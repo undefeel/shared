@@ -13,7 +13,6 @@ import (
 	"encoding/base32"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -59,7 +58,7 @@ func Normalize(s string) (string, error) {
 	s = strings.ToUpper(strings.NewReplacer("-", "", " ", "").Replace(s))
 	raw, err := b32.DecodeString(s)
 	if err != nil || len(raw) != sha256.Size {
-		return "", fmt.Errorf("некорректный ID устройства")
+		return "", errors.New("invalid device ID")
 	}
 	return s, nil
 }

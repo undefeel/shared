@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -67,11 +68,18 @@ func ServerTLS(id *identity.Identity, allowed func(string) bool, onReject func(i
 	}
 }
 
+// ErrPeerPaused — пир поставил синхронизацию на паузу.
+var ErrPeerPaused = errors.New("пир на паузе")
+
 type Server struct {
 	Folder *folder.Folder
 	Log    *log.Logger
 	// OnPeer вызывается на каждый запрос с ID пира и его обратным адресом.
 	OnPeer func(id, addr string)
+	// Paused — пока true, пиру отвечаем 503 и ничего не отдаём.
+	Paused func() bool
+	// OnServed вызывается, когда пир полностью скачал файл.
+	OnServed func(peerID string, fi folder.FileInfo)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -79,6 +87,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /index", s.index)
 	mux.HandleFunc("GET /file", s.file)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.Paused != nil && s.Paused() {
+			http.Error(w, "paused", http.StatusServiceUnavailable)
+			return
+		}
 		if s.OnPeer != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			host, _, _ := net.SplitHostPort(r.RemoteAddr)
 			if port, err := strconv.Atoi(r.Header.Get(portHeader)); err == nil && port > 0 && host != "" {
@@ -92,6 +104,10 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 	s.Folder.Wait(since, pollTimeout)
+	if s.Paused != nil && s.Paused() {
+		http.Error(w, "paused", http.StatusServiceUnavailable)
+		return
+	}
 	files, seq := s.Folder.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(IndexResponse{Seq: seq, Files: files})
@@ -104,7 +120,17 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "версия устарела", http.StatusConflict)
 		return
 	}
-	http.ServeFile(w, r, p)
+	f, err := os.Open(p)
+	if err != nil {
+		http.Error(w, "файл недоступен", http.StatusConflict)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size, 10))
+	if _, err := io.Copy(w, f); err == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		s.OnServed(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw), fi)
+	}
 }
 
 type Client struct {
@@ -149,6 +175,10 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		resp.Body.Close()
+		return nil, ErrPeerPaused
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

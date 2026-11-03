@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "sharedir",
+  "name": "sharedir",
+  "version": "0.2.0",
+  "author": "undefeel",
+  "license": "MIT",
+  "description": "Two-way folder sync over LAN: device status, transfer progress, pairing and recent files in the Omarchy bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "sharedir",
+    "description": "Sync status, paired devices, pairing and recent files.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "binary": ""
+    },
+    "schema": [
+      {
+        "key": "binary",
+        "type": "string",
+        "label": "Path to the sharedir binary (empty: ~/.local/bin/sharedir)"
+      }
+    ]
+  }
+}

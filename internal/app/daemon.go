@@ -26,13 +26,36 @@ import (
 
 const rescanInterval = time.Minute
 
+// Состояния пира. Это коды для UI: текст на нужном языке подставляет клиент.
+const (
+	StateSearching  = "searching"   // ищем адрес
+	StateNotFound   = "not_found"   // ни одного адреса: нет в LAN и не прописан
+	StateOffline    = "offline"     // адрес есть, но пир не отвечает
+	StateSyncing    = "syncing"     // применяем изменения пира
+	StateSynced     = "synced"      // всё сошлось
+	StateRetry      = "retry"       // часть файлов не применилась, скоро повтор
+	StatePaused     = "paused"      // пауза у нас
+	StatePeerPaused = "peer_paused" // пауза у пира
+)
+
 type PeerStatus struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Connected bool      `json:"connected"`
+	Syncing   bool      `json:"syncing"`
 	Addr      string    `json:"addr,omitempty"`
 	State     string    `json:"state"`
+	Failed    int       `json:"failed,omitempty"` // для StateRetry
 	LastSync  time.Time `json:"last_sync,omitzero"`
+	Progress  *Progress `json:"progress,omitempty"`
+}
+
+// Progress — ход текущего приёма изменений от пира.
+type Progress struct {
+	Files     int   `json:"files"`
+	DoneFiles int   `json:"done_files"`
+	Bytes     int64 `json:"bytes"`
+	DoneBytes int64 `json:"done_bytes"`
 }
 
 type Candidate struct {
@@ -43,18 +66,24 @@ type Candidate struct {
 }
 
 type Status struct {
-	ID         string       `json:"id"`
-	Name       string       `json:"name"`
-	Folder     string       `json:"folder"`
-	Files      int          `json:"files"`
-	Bytes      int64        `json:"bytes"`
-	LastScan   time.Time    `json:"last_scan,omitzero"`
-	Peers      []PeerStatus `json:"peers"`
-	Candidates []Candidate  `json:"candidates"`
+	Running    bool          `json:"running"`
+	ID         string        `json:"id"`
+	Name       string        `json:"name"`
+	Folder     string        `json:"folder"`
+	Files      int           `json:"files"`
+	Bytes      int64         `json:"bytes"`
+	LastScan   time.Time     `json:"last_scan,omitzero"`
+	Paused     bool          `json:"paused"`
+	Syncing    bool          `json:"syncing"`
+	Peers      []PeerStatus  `json:"peers"`
+	Candidates []Candidate   `json:"candidates"`
+	Kinds      []folder.Kind `json:"kinds"`
+	Days       []Day         `json:"days"`   // последние 7 дней, старые первыми
+	Recent     []Event       `json:"recent"` // новые первыми
 }
 
 type peerRunner struct {
-	cancel context.CancelFunc
+	cancel context.CancelFunc // nil, пока синхронизация на паузе
 	mu     sync.Mutex
 	st     PeerStatus
 }
@@ -79,6 +108,7 @@ type Daemon struct {
 	ctx    context.Context
 	folder *folder.Folder
 	disc   *discovery.Discovery
+	act    *activity
 
 	mu       sync.Mutex
 	cfg      *config.Config
@@ -98,7 +128,7 @@ func New(home string, logger *log.Logger) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Daemon{Home: home, ID: id, Log: logger, cfg: cfg, peers: map[string]*peerRunner{}, incoming: map[string]Candidate{}, learned: map[string]string{}}, nil
+	return &Daemon{Home: home, ID: id, Log: logger, cfg: cfg, act: loadActivity(filepath.Join(home, "activity.json")), peers: map[string]*peerRunner{}, incoming: map[string]Candidate{}, learned: map[string]string{}}, nil
 }
 
 func (d *Daemon) Config() config.Config {
@@ -139,7 +169,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:   (&transport.Server{Folder: d.folder, Log: d.Log, OnPeer: d.learn}).Handler(),
+		Handler:   (&transport.Server{Folder: d.folder, Log: d.Log, OnPeer: d.learn, Paused: d.Paused, OnServed: d.served}).Handler(),
 		TLSConfig: transport.ServerTLS(d.ID, d.isPeer, d.rejected),
 		ErrorLog:  log.New(discardTLSNoise{d.Log}, "", 0),
 	}
@@ -176,10 +206,16 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 	}
 	tick := time.NewTicker(rescanInterval)
 	defer tick.Stop()
+	flush := time.NewTicker(2 * time.Second)
+	defer flush.Stop()
+	defer d.act.flush()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-flush.C:
+			d.act.flush()
+			continue
 		case <-trigger:
 			time.Sleep(time.Second)
 			select { // события, пришедшие за эту секунду, покрывает тот же скан
@@ -199,6 +235,48 @@ func (d *Daemon) isPeer(id string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.cfg.FindPeer(id) != nil
+}
+
+func (d *Daemon) peerName(id string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if p := d.cfg.FindPeer(id); p != nil {
+		return p.Name
+	}
+	return identity.ShortID(id)
+}
+
+func (d *Daemon) served(id string, fi folder.FileInfo) {
+	d.act.add(Event{Time: time.Now(), Kind: "out", Name: fi.Name, Peer: d.peerName(id), Size: fi.Size})
+	d.changed()
+}
+
+func (d *Daemon) Paused() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg.Paused
+}
+
+// SetPaused ставит синхронизацию на паузу или снимает с неё. Пока пауза,
+// мы не тянем изменения и не отдаём их пирам; локальный скан продолжается,
+// так что после возобновления всё накопленное уйдёт.
+func (d *Daemon) SetPaused(paused bool) error {
+	d.mu.Lock()
+	d.cfg.Paused = paused
+	err := d.cfg.Save(d.Home)
+	d.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if paused {
+		d.folder.Kick() // висящие long-poll пиров сразу получат «пауза»
+		d.Log.Printf("синхронизация на паузе")
+	} else {
+		d.Log.Printf("синхронизация возобновлена")
+	}
+	d.syncPeers()
+	d.changed()
+	return nil
 }
 
 func (d *Daemon) learn(id, addr string) {
@@ -228,21 +306,56 @@ func (d *Daemon) syncPeers() {
 	}
 	for id, pr := range d.peers {
 		if _, ok := want[id]; !ok {
-			pr.cancel()
+			if pr.cancel != nil {
+				pr.cancel()
+			}
 			delete(d.peers, id)
 		}
 	}
 	for id, p := range want {
-		if pr, ok := d.peers[id]; ok {
-			pr.set(func(s *PeerStatus) { s.Name = p.Name })
-			continue
+		pr, ok := d.peers[id]
+		if !ok {
+			pr = &peerRunner{st: PeerStatus{ID: id, Name: p.Name, State: StateSearching}}
+			d.peers[id] = pr
+			delete(d.incoming, id)
 		}
-		ctx, cancel := context.WithCancel(d.ctx)
-		pr := &peerRunner{cancel: cancel, st: PeerStatus{ID: id, Name: p.Name, State: "поиск"}}
-		d.peers[id] = pr
-		delete(d.incoming, id)
-		go d.runPeer(ctx, pr)
+		pr.set(func(s *PeerStatus) { s.Name = p.Name })
+		switch {
+		case d.cfg.Paused && pr.cancel != nil:
+			pr.cancel()
+			pr.cancel = nil
+			pr.set(func(s *PeerStatus) { s.Connected, s.Syncing, s.Progress, s.State = false, false, nil, StatePaused })
+		case d.cfg.Paused:
+			pr.set(func(s *PeerStatus) { s.State = StatePaused })
+		case pr.cancel == nil:
+			ctx, cancel := context.WithCancel(d.ctx)
+			pr.cancel = cancel
+			pr.set(func(s *PeerStatus) { s.State = StateSearching })
+			go d.runPeer(ctx, pr)
+		}
 	}
+}
+
+// peerProgress переводит ход ApplyRemote в статус пира и ленту событий.
+type peerProgress struct {
+	d  *Daemon
+	pr *peerRunner
+}
+
+func (p peerProgress) Plan(files int, bytes int64) {
+	p.pr.set(func(s *PeerStatus) { s.Progress = &Progress{Files: files, Bytes: bytes} })
+	p.d.changed()
+}
+
+func (p peerProgress) Done(fi folder.FileInfo, ev folder.Event, bytes int64) {
+	p.pr.set(func(s *PeerStatus) {
+		if s.Progress != nil {
+			s.Progress.DoneFiles++
+			s.Progress.DoneBytes += bytes
+		}
+	})
+	p.d.act.add(Event{Time: time.Now(), Kind: string(ev), Name: fi.Name, Peer: p.pr.name(), Size: bytes})
+	p.d.changed()
 }
 
 // addrs — адреса, по которым стоит искать пира: свежий из анонса, затем
@@ -290,7 +403,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		if addr == "" {
 			cands := d.addrs(id)
 			if len(cands) == 0 {
-				pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = false, "", "не найден в сети" })
+				pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = false, "", StateNotFound })
 				d.changed()
 				sleepCtx(ctx, 3*time.Second)
 				continue
@@ -300,13 +413,20 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		}
 
 		idx, err := client.Index(ctx, addr, since)
+		if errors.Is(err, transport.ErrPeerPaused) {
+			pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = true, addr, StatePeerPaused })
+			d.changed()
+			since = 0
+			sleepCtx(ctx, 5*time.Second)
+			continue
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			pr.mu.Lock()
 			wasConnected := pr.st.Connected
-			pr.st.Connected, pr.st.State = false, "нет связи"
+			pr.st.Connected, pr.st.State = false, StateOffline
 			pr.mu.Unlock()
 			if wasConnected {
 				d.Log.Printf("%s: соединение потеряно: %v", pr.st.Name, err)
@@ -325,16 +445,20 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		pr.mu.Unlock()
 
 		if idx.Seq != since {
-			pr.set(func(s *PeerStatus) { s.State = "синхронизация" })
+			pr.set(func(s *PeerStatus) { s.State, s.Syncing = StateSyncing, true })
 			d.changed()
-			applied, failed := d.folder.ApplyRemote(ctx, short, idx.Files, client.Fetcher(addr))
+			applied, failed := d.folder.ApplyRemote(ctx, short, idx.Files, client.Fetcher(addr), peerProgress{d, pr})
+			pr.set(func(s *PeerStatus) { s.Syncing, s.Progress = false, nil })
+			if ctx.Err() != nil {
+				return // пауза или удаление пира: статус уже выставил syncPeers
+			}
 			if applied > 0 {
 				d.Log.Printf("%s: применено изменений: %d", pr.name(), applied)
 			}
 			if failed > 0 {
 				// Повторим полную сверку чуть позже: локальный скан или пир
 				// к этому времени, скорее всего, догонят.
-				pr.set(func(s *PeerStatus) { s.State = fmt.Sprintf("не удалось: %d, повтор", failed) })
+				pr.set(func(s *PeerStatus) { s.State, s.Failed = StateRetry, failed })
 				d.changed()
 				since = 0
 				sleepCtx(ctx, 5*time.Second)
@@ -342,22 +466,35 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			}
 			since = idx.Seq
 		}
-		pr.set(func(s *PeerStatus) { s.State, s.LastSync = "синхронизировано", time.Now() })
+		pr.set(func(s *PeerStatus) { s.State, s.LastSync, s.Failed = StateSynced, time.Now(), 0 })
 		d.changed()
 	}
 }
 
 func (d *Daemon) Status() Status {
 	cfg := d.Config()
-	st := Status{ID: d.ID.ID, Name: cfg.Name, Folder: cfg.Folder, Peers: []PeerStatus{}, Candidates: []Candidate{}}
+	st := Status{Running: true, ID: d.ID.ID, Name: cfg.Name, Folder: cfg.Folder, Paused: cfg.Paused, Peers: []PeerStatus{}, Candidates: []Candidate{}, Kinds: []folder.Kind{}}
 	if d.folder != nil {
 		fs := d.folder.Stats()
 		st.Files, st.Bytes, st.LastScan = fs.Files, fs.Bytes, fs.LastScan
+		if fs.Kinds != nil {
+			st.Kinds = fs.Kinds
+		}
+	}
+	st.Days, st.Recent = d.act.snapshot(7, 20)
+	if st.Recent == nil {
+		st.Recent = []Event{}
 	}
 	d.mu.Lock()
 	for _, pr := range d.peers {
 		pr.mu.Lock()
-		st.Peers = append(st.Peers, pr.st)
+		ps := pr.st
+		if ps.Progress != nil {
+			cp := *ps.Progress
+			ps.Progress = &cp
+		}
+		st.Syncing = st.Syncing || ps.Syncing
+		st.Peers = append(st.Peers, ps)
 		pr.mu.Unlock()
 	}
 	seen := map[string]bool{}
@@ -387,7 +524,7 @@ func (d *Daemon) Pair(id, name, addr string) error {
 		return err
 	}
 	if id == d.ID.ID {
-		return errors.New("это ID этого же устройства")
+		return errors.New("that is this device's own ID")
 	}
 	if name == "" && d.disc != nil {
 		for _, dev := range d.disc.Devices() {
@@ -423,7 +560,7 @@ func (d *Daemon) Unpair(id string) error {
 	}
 	d.mu.Unlock()
 	if !ok {
-		return errors.New("такого устройства нет среди сопряжённых")
+		return errors.New("no such paired device")
 	}
 	if err != nil {
 		return err

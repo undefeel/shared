@@ -77,7 +77,7 @@ func pull(t *testing.T, dst, src *node) {
 		_, err = io.Copy(w, file)
 		return err
 	}
-	if _, failed := dst.f.ApplyRemote(context.Background(), src.id, idx, fetch); failed > 0 {
+	if _, failed := dst.f.ApplyRemote(context.Background(), src.id, idx, fetch, nil); failed > 0 {
 		t.Fatalf("%s <- %s: %d ошибок", dst.id, src.id, failed)
 	}
 }

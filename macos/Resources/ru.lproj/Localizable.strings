@@ -1,0 +1,63 @@
+/* sharedir — русский перевод. Ключи — английские строки из кода (en — базовый язык). */
+
+/* Заголовок и состояния */
+"Sync" = "Синхронизация";
+"Resume syncing" = "Продолжить синхронизацию";
+"Pause syncing" = "Поставить на паузу";
+"Setup needed" = "Нужна настройка";
+"Starting…" = "Запуск…";
+"Daemon isn’t running" = "Демон не запущен";
+"Syncing is paused" = "Синхронизация на паузе";
+"No paired devices" = "Нет сопряжённых устройств";
+"Offline — changes will sync later" = "Нет связи — изменения отправятся позже";
+"Syncing · %@, %@" = "Синхронизация · %@, %@";
+"Syncing…" = "Синхронизация…";
+"Up to date · %@" = "Синхронизировано · %@";
+"Up to date" = "Синхронизировано";
+"just now" = "только что";
+
+/* Папка и устройства */
+"Open" = "Открыть";
+"Devices" = "Устройства";
+"None yet. Add a device below, then do the same on it." = "Пока ни одного. Добавьте устройство ниже — и сделайте то же на нём.";
+"Receiving %d of %d · %@ left" = "Получение %d из %d · осталось %@";
+"Offline · last seen %@" = "Не в сети · был %@";
+"Offline" = "Не в сети";
+"Looking for device…" = "Поиск устройства…";
+"%d files failed, retrying" = "Не удалось файлов: %d, повтор";
+"Paused" = "На паузе";
+"Paused on that device" = "На паузе на том устройстве";
+
+/* Сопряжение */
+"Found on This Network" = "Найдено в сети";
+"Incoming connection" = "Входящее подключение";
+"Add…" = "Добавить…";
+"Make sure “%@” shows the same ID:" = "Проверьте, что на «%@» показан тот же ID:";
+"Make sure the other device shows the same ID:" = "Проверьте, что на другом устройстве показан тот же ID:";
+"Cancel" = "Отмена";
+"Pair" = "Сопрячь";
+
+/* Первый запуск и демон */
+"No folder chosen yet" = "Папка ещё не выбрана";
+"Its contents will sync with every paired device on your network." = "Её содержимое будет синхронизироваться со всеми сопряжёнными устройствами в сети.";
+"Choose Folder…" = "Выбрать папку…";
+"Sync This Folder" = "Синхронизировать";
+"Choose the folder sharedir will keep in sync" = "Выберите папку, которую sharedir будет синхронизировать";
+"Starting the daemon…" = "Запускаю демон…";
+"The daemon is not responding" = "Демон не отвечает";
+"Details are in the log" = "Подробности — в журнале";
+"Start" = "Запустить";
+"Couldn’t start the daemon: %@" = "Не удалось запустить демон: %@";
+"The sharedir binary was not found" = "Не найден бинарник sharedir";
+
+/* Низ меню */
+"Copy My ID" = "Скопировать мой ID";
+"Open at Login" = "Запускать при входе";
+"Open at Login: %@" = "Автозапуск: %@";
+"Show Log…" = "Журнал…";
+"Quit sharedir" = "Выйти из sharedir";
+
+/* Ошибки демона (приходят по-английски) */
+"invalid device ID" = "Некорректный ID устройства";
+"that is this device's own ID" = "Это ID этого же устройства";
+"no such paired device" = "Такого устройства нет среди сопряжённых";

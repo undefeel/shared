@@ -10,8 +10,10 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -92,6 +94,38 @@ type Stats struct {
 	Files    int
 	Bytes    int64
 	LastScan time.Time
+	Kinds    []Kind // по убыванию объёма
+}
+
+// Kind — объём файлов одного типа. Label — код (video, images, docs, audio,
+// archive, code, other); подпись на нужном языке рисует UI.
+type Kind struct {
+	Label string `json:"label"`
+	Bytes int64  `json:"bytes"`
+}
+
+var kindByExt = map[string]string{}
+
+func init() {
+	for label, exts := range map[string]string{
+		"video":   "mp4 mov mkv avi webm m4v wmv flv",
+		"images":  "jpg jpeg png gif heic heif webp svg bmp tiff tif raw cr2 nef arw psd",
+		"docs":    "pdf doc docx odt rtf txt md xls xlsx ods csv ppt pptx odp pages numbers key epub",
+		"audio":   "mp3 flac wav m4a aac ogg opus aiff",
+		"archive": "zip tar gz tgz bz2 xz 7z rar dmg iso zst",
+		"code":    "go py js ts tsx jsx rs c h cpp swift kt java rb sh json yaml yml toml html css sql",
+	} {
+		for _, e := range strings.Fields(exts) {
+			kindByExt["."+e] = label
+		}
+	}
+}
+
+func kindOf(name string) string {
+	if k, ok := kindByExt[strings.ToLower(path.Ext(name))]; ok {
+		return k
+	}
+	return "other"
 }
 
 type Folder struct {
@@ -198,6 +232,14 @@ func (f *Folder) Snapshot() ([]FileInfo, uint64) {
 	return out, f.seq
 }
 
+// Kick будит всех, кто ждёт в Wait, не меняя индекс.
+func (f *Folder) Kick() {
+	f.mu.Lock()
+	close(f.changed)
+	f.changed = make(chan struct{})
+	f.mu.Unlock()
+}
+
 // Wait блокируется, пока seq не станет отличным от since, или до таймаута.
 func (f *Folder) Wait(since uint64, timeout time.Duration) {
 	f.mu.Lock()
@@ -228,11 +270,17 @@ func (f *Folder) Stats() Stats {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := Stats{LastScan: f.lastScan}
+	kinds := map[string]int64{}
 	for _, fi := range f.files {
 		if !fi.Deleted {
 			s.Files++
 			s.Bytes += fi.Size
+			kinds[kindOf(fi.Name)] += fi.Size
 		}
 	}
+	for label, n := range kinds {
+		s.Kinds = append(s.Kinds, Kind{label, n})
+	}
+	sort.Slice(s.Kinds, func(i, j int) bool { return s.Kinds[i].Bytes > s.Kinds[j].Bytes })
 	return s
 }

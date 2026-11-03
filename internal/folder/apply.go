@@ -68,9 +68,35 @@ func (f *Folder) decide(l *FileInfo, r *FileInfo, peer string) action {
 	return skip // мы победили; пир сам сохранит свою версию как конфликтную
 }
 
+// Event — что произошло с файлом при применении изменений пира.
+type Event string
+
+const (
+	EventReceived Event = "in"
+	EventDeleted  Event = "deleted"
+	EventConflict Event = "conflict"
+)
+
+// Progress получает план и ход применения изменений пира. Может быть nil.
+type Progress interface {
+	Plan(files int, bytes int64)
+	Done(fi FileInfo, ev Event, bytes int64)
+}
+
+type step struct {
+	l   *FileInfo
+	r   FileInfo
+	act action
+}
+
+// needsDownload — придётся ли тянуть содержимое с пира.
+func (s step) needsDownload() bool {
+	return !s.r.Deleted && (s.l == nil || s.l.Deleted || s.l.Hash != s.r.Hash || s.act == takeWithConflict)
+}
+
 // ApplyRemote сверяет индекс пира с локальным и подтягивает изменения.
 // Возвращает число применённых записей и число неудач (их стоит повторить).
-func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo, fetch Fetcher) (applied, failed int) {
+func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo, fetch Fetcher, progress Progress) (applied, failed int) {
 	defer func() {
 		if applied > 0 {
 			if err := f.save(); err != nil {
@@ -78,10 +104,11 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 			}
 		}
 	}()
+
+	var steps []step
+	var files int
+	var bytes int64
 	for i := range remote {
-		if ctx.Err() != nil {
-			return applied, failed + 1
-		}
 		r := remote[i]
 		r.Disk = ""
 		if !validName(r.Name) {
@@ -98,24 +125,54 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 			l = &c
 		}
 		f.mu.Unlock()
-
 		act := f.decide(l, &r, peer)
 		if act == skip {
 			continue
 		}
-		if err := f.applyOne(ctx, l, r, act, fetch); err != nil {
-			f.log.Printf("%s: %s: %v", peer, r.Name, err)
+		st := step{l, r, act}
+		steps = append(steps, st)
+		if act != mergeOnly {
+			files++
+		}
+		if st.needsDownload() {
+			bytes += r.Size
+		}
+	}
+	if progress != nil && files > 0 {
+		progress.Plan(files, bytes)
+	}
+
+	for _, st := range steps {
+		if ctx.Err() != nil {
+			return applied, failed + 1
+		}
+		if err := f.applyOne(ctx, st, fetch); err != nil {
+			f.log.Printf("%s: %s: %v", peer, st.r.Name, err)
 			failed++
 			continue
 		}
 		applied++
+		if progress != nil && st.act != mergeOnly {
+			ev, n := EventReceived, int64(0)
+			switch {
+			case st.r.Deleted:
+				ev = EventDeleted
+			case st.act == takeWithConflict:
+				ev = EventConflict
+			}
+			if st.needsDownload() {
+				n = st.r.Size
+			}
+			progress.Done(st.r, ev, n)
+		}
 	}
 	return applied, failed
 }
 
 var errLocalChanged = errors.New("файл изменён локально, повторим после сканирования")
 
-func (f *Folder) applyOne(ctx context.Context, l *FileInfo, r FileInfo, act action, fetch Fetcher) error {
+func (f *Folder) applyOne(ctx context.Context, st step, fetch Fetcher) error {
+	l, r, act := st.l, st.r, st.act
 	if act == mergeOnly {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -129,7 +186,7 @@ func (f *Folder) applyOne(ctx context.Context, l *FileInfo, r FileInfo, act acti
 	}
 
 	var tmp string
-	if !r.Deleted && (l == nil || l.Deleted || l.Hash != r.Hash || act == takeWithConflict) {
+	if st.needsDownload() {
 		var err error
 		if tmp, err = f.download(ctx, r, fetch); err != nil {
 			return err

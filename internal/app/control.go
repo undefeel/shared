@@ -16,7 +16,7 @@ import (
 )
 
 // ErrNotRunning — демон не запущен (сокет недоступен).
-var ErrNotRunning = errors.New("демон не запущен")
+var ErrNotRunning = errors.New("daemon is not running")
 
 func listenControl(home string) (net.Listener, error) {
 	p := config.SocketPath(home)
@@ -68,6 +68,12 @@ func (d *Daemon) controlHandler() http.Handler {
 	mux.HandleFunc("POST /reload", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, d.Reload())
 	})
+	mux.HandleFunc("POST /pause", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, d.SetPaused(true))
+	})
+	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, d.SetPaused(false))
+	})
 	return mux
 }
 
@@ -117,6 +123,13 @@ func (c *Ctl) Pair(id, name, addr string) error {
 
 func (c *Ctl) Unpair(id string) error {
 	return c.do("POST", "/unpair", pairRequest{ID: id}, nil)
+}
+
+func (c *Ctl) SetPaused(paused bool) error {
+	if paused {
+		return c.do("POST", "/pause", nil, nil)
+	}
+	return c.do("POST", "/resume", nil, nil)
 }
 
 // PairOffline правит конфиг напрямую, когда демон не запущен.

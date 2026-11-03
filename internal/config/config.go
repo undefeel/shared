@@ -30,6 +30,7 @@ type Config struct {
 	Discovery     bool   `json:"discovery"`
 	DiscoveryPort int    `json:"discovery_port"`
 	Peers         []Peer `json:"peers"`
+	Paused        bool   `json:"paused,omitempty"`
 }
 
 // Home — каталог с конфигом, ключами и индексом.

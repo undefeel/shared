@@ -1,4 +1,8 @@
-// Package tray — иконка в меню-баре macOS и в трее Waybar (StatusNotifierItem).
+//go:build linux
+
+// Package tray — иконка StatusNotifierItem для Linux-окружений с треем
+// (Waybar в Omarchy 3, KDE и т.п.). В Omarchy 4 вместо неё — плагин оболочки,
+// на macOS — нативное приложение из macos/.
 package tray
 
 import (
@@ -12,6 +16,7 @@ import (
 	"fyne.io/systray"
 
 	"sharedir/internal/app"
+	"sharedir/internal/i18n"
 	"sharedir/internal/identity"
 )
 
@@ -52,17 +57,17 @@ func onReady(d *app.Daemon) {
 		m.peers[i].Hide()
 	}
 	systray.AddSeparator()
-	openItem := systray.AddMenuItem("Открыть папку", "")
-	copyItem := systray.AddMenuItem("Скопировать мой ID", identity.Pretty(d.ID.ID))
-	m.candidates = systray.AddMenuItem("Добавить устройство", "Устройства sharedir в этой сети")
-	m.noCands = m.candidates.AddSubMenuItem("Никого не найдено", "")
+	openItem := systray.AddMenuItem(i18n.T("Open folder"), "")
+	copyItem := systray.AddMenuItem(i18n.T("Copy my ID"), identity.Pretty(d.ID.ID))
+	m.candidates = systray.AddMenuItem(i18n.T("Add device"), "")
+	m.noCands = m.candidates.AddSubMenuItem(i18n.T("Nobody found"), "")
 	m.noCands.Disable()
 	for i := range m.candSlots {
 		m.candSlots[i] = m.candidates.AddSubMenuItem("", "")
 		m.candSlots[i].Hide()
 	}
 	systray.AddSeparator()
-	quitItem := systray.AddMenuItem("Выход", "")
+	quitItem := systray.AddMenuItem(i18n.T("Quit"), "")
 
 	go func() {
 		for {
@@ -121,21 +126,21 @@ func (m *menu) setIcon(s iconState) {
 }
 
 func (m *menu) refresh(st app.Status) {
-	icon, summary := iconOffline, "нет сопряжённых устройств"
+	icon, summary := iconOffline, i18n.T("no paired devices")
 	if len(st.Peers) > 0 {
-		summary = "нет связи"
+		summary = i18n.T("offline")
 	}
 	for _, p := range st.Peers {
 		if p.Connected && icon == iconOffline {
-			icon, summary = iconOK, "синхронизировано"
+			icon, summary = iconOK, i18n.T("synced")
 		}
-		if p.State == "синхронизация" {
-			icon, summary = iconSyncing, "синхронизация…"
+		if p.Syncing {
+			icon, summary = iconSyncing, i18n.T("syncing…")
 		}
 	}
 	m.setIcon(icon)
 	m.header.SetTitle(fmt.Sprintf("%s — %s", st.Name, summary))
-	systray.SetTooltip(fmt.Sprintf("sharedir: %s\n%d файлов, %s", summary, st.Files, humanBytes(st.Bytes)))
+	systray.SetTooltip("sharedir: " + summary + "\n" + i18n.T("%d files, %s", st.Files, humanBytes(st.Bytes)))
 
 	for i, item := range m.peers {
 		if i >= len(st.Peers) {
@@ -147,7 +152,7 @@ func (m *menu) refresh(st app.Status) {
 		if p.Connected {
 			dot = "●"
 		}
-		title := fmt.Sprintf("%s %s — %s", dot, p.Name, p.State)
+		title := fmt.Sprintf("%s %s — %s", dot, p.Name, i18n.T(p.State, p.Failed))
 		if !p.LastSync.IsZero() && p.Connected {
 			title += ", " + p.LastSync.Format("15:04")
 		}
@@ -171,11 +176,11 @@ func (m *menu) refresh(st app.Status) {
 		c := st.Candidates[i]
 		name := c.Name
 		if name == "" {
-			name = "входящее подключение"
+			name = i18n.T("incoming connection")
 		}
 		m.candIDs[i] = c.ID
 		item.SetTitle(fmt.Sprintf("%s (%s)", name, identity.Pretty(c.ID)[:9]))
-		item.SetTooltip("Сверьте ID с тем, что показывает то устройство: " + identity.Pretty(c.ID))
+		item.SetTooltip(i18n.T("Compare this ID with the one shown on that device: %s", identity.Pretty(c.ID)))
 		item.Show()
 	}
 }

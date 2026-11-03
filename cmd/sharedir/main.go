@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,12 +19,12 @@ import (
 
 	"sharedir/internal/app"
 	"sharedir/internal/config"
+	"sharedir/internal/i18n"
 	"sharedir/internal/identity"
-	"sharedir/internal/tray"
 )
 
 func init() {
-	// На macOS UI трея обязан жить в главном потоке.
+	// UI трея обязан жить в главном потоке.
 	runtime.LockOSThread()
 }
 
@@ -30,8 +32,10 @@ const usage = `sharedir — синхронизация папки между м�
 
 Команды:
   init [--folder ПУТЬ] [--name ИМЯ]   создать конфиг и ключ устройства
-  run [--no-tray]                     запустить демон (с иконкой в трее)
-  status                              состояние синхронизации и найденные устройства
+  run [--tray]                        запустить демон (--tray: иконка SNI, только Linux)
+  status [--json]                     состояние синхронизации и найденные устройства
+  watch                               JSON-строка статуса при каждом изменении (для UI)
+  pause | resume                      поставить синхронизацию на паузу / продолжить
   id                                  показать ID этого устройства
   pair ID [--name ИМЯ] [--addr IP[:ПОРТ]]  доверять устройству (делается на обеих машинах)
   unpair ID                           перестать доверять устройству
@@ -57,7 +61,11 @@ func main() {
 	case "run":
 		err = cmdRun(home, args)
 	case "status":
-		err = cmdStatus(home)
+		err = cmdStatus(home, args)
+	case "watch":
+		err = cmdWatch(home)
+	case "pause", "resume":
+		err = app.NewCtl(home).SetPaused(cmd == "pause")
 	case "id":
 		err = cmdID(home)
 	case "pair":
@@ -81,7 +89,7 @@ func main() {
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "ошибка:", err)
+	fmt.Fprintln(os.Stderr, "sharedir:", i18n.T(err.Error()))
 	os.Exit(1)
 }
 
@@ -138,7 +146,8 @@ func cmdInit(home string, args []string) error {
 
 func cmdRun(home string, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	noTray := fs.Bool("no-tray", false, "без иконки в трее")
+	withTray := fs.Bool("tray", false, "иконка в трее (StatusNotifierItem, только Linux)")
+	fs.Bool("no-tray", true, "устарел: трей теперь выключен по умолчанию")
 	parse(fs, args)
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
@@ -150,58 +159,86 @@ func cmdRun(home string, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if *noTray {
-		return d.Run(ctx)
+	if *withTray {
+		return runWithTray(ctx, cancel, d)
 	}
-	errc := make(chan error, 1)
-	go func() {
-		errc <- d.Run(ctx)
-		tray.Quit()
-	}()
-	go func() { <-ctx.Done(); tray.Quit() }()
-	tray.Run(d, cancel)
-	cancel()
-	select {
-	case err := <-errc:
-		return err
-	case <-time.After(3 * time.Second):
-		return nil
-	}
+	return d.Run(ctx)
 }
 
-func cmdStatus(home string) error {
+// notRunning — что отдаёт `status --json`/`watch`, если демон не отвечает:
+// UI проще разобрать JSON, чем различать коды выхода.
+const notRunning = `{"running":false}`
+
+func cmdStatus(home string, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "вывести JSON")
+	parse(fs, args)
 	st, err := app.NewCtl(home).Status()
+	if *asJSON {
+		if err != nil {
+			fmt.Println(notRunning)
+			return nil
+		}
+		return json.NewEncoder(os.Stdout).Encode(st)
+	}
 	if err != nil {
-		return err
+		return errors.New(i18n.T("daemon is not running"))
+	}
+	if st.Paused {
+		fmt.Println(i18n.T("Sync is paused (sharedir resume)"))
 	}
 	fmt.Printf("%s  %s\n", st.Name, identity.Pretty(st.ID))
-	fmt.Printf("Папка: %s (%d файлов, %.1f МБ)\n", st.Folder, st.Files, float64(st.Bytes)/(1<<20))
-	fmt.Println("\nСопряжённые устройства:")
+	fmt.Println(i18n.T("Folder: %s (%d files, %.1f MB)", st.Folder, st.Files, float64(st.Bytes)/(1<<20)))
+	fmt.Println("\n" + i18n.T("Paired devices:"))
 	if len(st.Peers) == 0 {
-		fmt.Println("  нет")
+		fmt.Println("  " + i18n.T("none"))
 	}
 	for _, p := range st.Peers {
 		mark := "○"
 		if p.Connected {
 			mark = "●"
 		}
-		line := fmt.Sprintf("  %s %-16s %-22s %s", mark, p.Name, p.Addr, p.State)
+		state := i18n.T(p.State)
+		if p.State == app.StateRetry {
+			state = i18n.T(p.State, p.Failed)
+		}
+		line := fmt.Sprintf("  %s %-16s %-22s %s", mark, p.Name, p.Addr, state)
 		if !p.LastSync.IsZero() {
 			line += ", " + p.LastSync.Format("15:04:05")
 		}
 		fmt.Println(line)
 	}
 	if len(st.Candidates) > 0 {
-		fmt.Println("\nНайдены, но не сопряжены (добавить: sharedir pair ID):")
+		fmt.Println("\n" + i18n.T("Found, not paired (add: sharedir pair ID):"))
 		for _, c := range st.Candidates {
 			name := c.Name
 			if name == "" {
-				name = "(входящее)"
+				name = i18n.T("(incoming)")
 			}
 			fmt.Printf("  %-16s %-22s %s\n", name, c.Addr, identity.Pretty(c.ID))
 		}
 	}
 	return nil
+}
+
+// cmdWatch печатает статус одной JSON-строкой при каждом изменении.
+// Плагин оболочки Omarchy держит этот процесс и читает строки по мере прихода.
+func cmdWatch(home string) error {
+	ctl := app.NewCtl(home)
+	var last []byte
+	for {
+		line := []byte(notRunning)
+		if st, err := ctl.Status(); err == nil {
+			line, _ = json.Marshal(st)
+		}
+		if !bytes.Equal(line, last) {
+			if _, err := fmt.Printf("%s\n", line); err != nil {
+				return nil // читатель ушёл
+			}
+			last = line
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func cmdID(home string) error {
@@ -251,7 +288,7 @@ func cmdUnpair(home string, args []string) error {
 				return nerr
 			}
 			if !cfg.RemovePeer(id) {
-				return errors.New("такого устройства нет среди сопряжённых")
+				return errors.New("no such paired device")
 			}
 			err = cfg.Save(home)
 		}

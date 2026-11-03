@@ -1,10 +1,14 @@
-.PHONY: build mac linux test clean
+.PHONY: build mac app linux test clean
 
 build: mac linux
 
 # macOS собирается нативно: трею и FSEvents нужен cgo.
 mac:
 	go build -trimpath -o bin/sharedir ./cmd/sharedir
+
+# macOS-приложение меню-бара с демоном внутри: bin/sharedir.app
+app:
+	./macos/build.sh
 
 # Linux — без cgo (трей ходит в DBus напрямую), можно собирать прямо на маке.
 linux:
