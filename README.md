@@ -57,9 +57,20 @@ sudo ufw allow 22100/tcp && sudo ufw allow 22101/udp   # в Omarchy ufw по у�
 sharedir install     # systemd --user, лог: journalctl --user -u sharedir -f
 ```
 
-Интерфейс для Omarchy 4 — плагин оболочки в [omarchy/sharedir](omarchy/sharedir). **Это черновик:**
-на Omarchy он ещё не запускался. На Omarchy 3 (Waybar) и других окружениях с треем подойдёт
-`sharedir run --tray`.
+Интерфейс для Omarchy 4 — виджет бара в [omarchy/sharedir](omarchy/sharedir) (проверен на 4.0.6):
+иконка-статус, панель с переключателем паузы, устройствами, сопряжением и активностью.
+
+```bash
+make omarchy                                            # копия в ~/.config/omarchy/plugins/sharedir
+omarchy plugin enable sharedir --section right --before omarchy.tray
+```
+
+Левый клик — панель, правый — пауза, средний — открыть папку. IPC: `omarchy-shell sharedir
+open|toggle|pause|resume|status`. Если бинарник не в `~/.local/bin/sharedir`, задайте путь:
+`omarchy bar set sharedir binary /путь/к/sharedir`. Копию, а не симлинк, — потому что оболочка
+не перезагружает код по симлинку.
+
+На Omarchy 3 (Waybar) и других окружениях с треем подойдёт `sharedir run --tray`.
 
 ## Сопряжение
 

@@ -15,6 +15,14 @@ Item {
     return configured !== "" ? configured : Quickshell.env("HOME") + "/.local/bin/sharedir"
   }
 
+  // Сменили путь в настройках — перезапускаем watch с новым бинарником.
+  onBinaryChanged: {
+    status = ({ running: false })
+    watchProcess.running = false
+    restartTimer.interval = 100
+    restartTimer.restart()
+  }
+
   property var status: ({ running: false })
   readonly property bool running: status.running === true
   readonly property bool paused: running && status.paused === true
@@ -63,8 +71,12 @@ Item {
   function toggle() { setPaused(active) }
   function pair(id) { run(["pair", id]) }
 
+  // Через controlProcess, чтобы ошибка (например, сервис не установлен) попала в lastError.
   function startDaemon() {
-    Quickshell.execDetached(["systemctl", "--user", "start", "sharedir.service"])
+    if (controlProcess.running) return
+    lastError = ""
+    controlProcess.command = ["systemctl", "--user", "start", "sharedir.service"]
+    controlProcess.running = true
   }
 
   function openFolder() {
@@ -97,7 +109,10 @@ Item {
   Timer {
     id: restartTimer
     interval: 3000
-    onTriggered: watchProcess.running = true
+    onTriggered: {
+      interval = 3000
+      watchProcess.running = true
+    }
   }
 
   Process {

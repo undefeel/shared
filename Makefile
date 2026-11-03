@@ -1,4 +1,4 @@
-.PHONY: build mac app linux test clean
+.PHONY: build mac app linux test clean omarchy
 
 build: mac linux
 
@@ -20,3 +20,8 @@ test:
 
 clean:
 	rm -rf bin
+
+# Плагин бара Omarchy 4: копия (не симлинк — оболочка не следит за файлами вне ~/.config).
+omarchy:
+	rm -rf $(HOME)/.config/omarchy/plugins/sharedir
+	cp -R omarchy/sharedir $(HOME)/.config/omarchy/plugins/sharedir

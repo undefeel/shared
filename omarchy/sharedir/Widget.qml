@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -15,9 +16,7 @@ Panel {
   ipcTarget: "sharedir"
   manageIpc: false
 
-  readonly property Item panelFlick: panel.loadedContent ? panel.loadedContent.panelFlick : null
-
-  readonly property string lang: S.lang(Commons.I18n.language)
+  readonly property string lang: S.lang(Quickshell.env("LC_ALL") || Quickshell.env("LC_MESSAGES") || Quickshell.env("LANG"))
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.4)
@@ -80,7 +79,7 @@ Panel {
   onOpenedChanged: if (opened) {
     pairingId = ""
     if (panelFlick) panelFlick.contentY = 0
-    Qt.callLater(function() { if (panel.loadedContent) panel.loadedContent.forceActiveFocus() })
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
   Service {
@@ -88,7 +87,7 @@ Panel {
     settings: root.settings
   }
 
-  ShellIpc {
+  IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -117,13 +116,12 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: panel.loadedContent
+    focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(560))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
 
-    content: PanelKeyCatcher {
-      property alias panelFlick: panelFlick
-      implicitHeight: column.implicitHeight
+    PanelKeyCatcher {
+      id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function(dx, dy) {
         if (dx > 0) root.tab = "activity"
@@ -152,6 +150,13 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(12)
 
+          Item {
+            id: header
+            width: parent.width
+            implicitHeight: hero.implicitHeight
+            // В trailingControl `root` — это PanelHero, а не панель: достаём её через header.
+            readonly property var panel: root
+
           PanelHero {
             id: hero
             width: parent.width
@@ -176,17 +181,17 @@ Panel {
                 PanelActionButton {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: "󰝰"  // md-folder_open
-                  tooltipText: root.tr("Open folder")
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  tooltipText: header.panel.tr("Open folder")
+                  foreground: hero.foreground
+                  fontFamily: hero.fontFamily
                   onClicked: sync.openFolder()
                 }
                 PanelActionButton {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: "󰆏"  // md-content_copy
-                  tooltipText: root.tr("Copy my ID")
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  tooltipText: header.panel.tr("Copy my ID")
+                  foreground: hero.foreground
+                  fontFamily: hero.fontFamily
                   onClicked: sync.copyId(S.prettyId(sync.status.id))
                 }
                 ToggleSwitch {
@@ -194,17 +199,18 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   checked: sync.active
                   busy: sync.busy
-                  foreground: root.foreground
+                  foreground: hero.foreground
                   onToggled: sync.toggle()
 
                   PanelToolTip {
                     visible: powerSwitch.containsMouse
-                    text: sync.active ? root.tr("Pause syncing") : root.tr("Resume syncing")
-                    fontFamily: root.fontFamily
+                    text: sync.active ? header.panel.tr("Pause syncing") : header.panel.tr("Resume syncing")
+                    fontFamily: hero.fontFamily
                   }
                 }
               }
             }
+          }
           }
 
           Text {
@@ -258,8 +264,8 @@ Panel {
             width: parent.width
             spacing: Style.space(12)
 
-            PanelSeparator { foreground: root.foreground }
-            SectionHeader { text: root.tr("DEVICES") }
+            PanelSeparator { visible: sync.peers.length > 0; foreground: root.foreground }
+            SectionHeader { visible: sync.peers.length > 0; text: root.tr("DEVICES") }
 
             Repeater {
               model: sync.peers
@@ -439,7 +445,7 @@ Panel {
       height: parent.height
       width: parent.width * Math.max(0, Math.min(1, parent.fraction))
       color: root.foreground
-      Behavior on width { NumberAnimation { duration: Style.duration(200); easing.type: Easing.OutCubic } }
+      Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
     }
   }
 
