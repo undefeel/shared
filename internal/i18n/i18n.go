@@ -55,6 +55,11 @@ var ru = map[string]string{
 	"that is this device's own ID": "это ID этого же устройства",
 	"no such paired device":        "такого устройства нет среди сопряжённых",
 
+	// sharedir relay.
+	"relay off": "relay выключен",
+	"relay on: devices will connect through it when not on the same network": "relay включён: устройства в разных сетях будут соединяться через него",
+	"relay is not configured": "relay не настроен",
+
 	// Трей.
 	"no paired devices":   "нет сопряжённых устройств",
 	"syncing…":            "синхронизация…",

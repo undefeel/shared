@@ -125,6 +125,10 @@ func (c *Ctl) Unpair(id string) error {
 	return c.do("POST", "/unpair", pairRequest{ID: id}, nil)
 }
 
+func (c *Ctl) Reload() error {
+	return c.do("POST", "/reload", nil, nil)
+}
+
 func (c *Ctl) SetPaused(paused bool) error {
 	if paused {
 		return c.do("POST", "/pause", nil, nil)

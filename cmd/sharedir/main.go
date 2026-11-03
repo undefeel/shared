@@ -39,6 +39,7 @@ const usage = `sharedir — синхронизация папки между м�
   id                                  показать ID этого устройства
   pair ID [--name ИМЯ] [--addr IP[:ПОРТ]]  доверять устройству (делается на обеих машинах)
   unpair ID                           перестать доверять устройству
+  relay ...                           relay для устройств в разных сетях (sharedir relay — справка)
   install                             автозапуск при входе (launchd / systemd --user)
   uninstall                           убрать автозапуск
 
@@ -64,6 +65,8 @@ func main() {
 		err = cmdStatus(home, args)
 	case "watch":
 		err = cmdWatch(home)
+	case "relay":
+		err = cmdRelay(home, args)
 	case "pause", "resume":
 		err = app.NewCtl(home).SetPaused(cmd == "pause")
 	case "id":

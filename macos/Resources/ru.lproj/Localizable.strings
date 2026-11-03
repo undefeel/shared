@@ -27,6 +27,7 @@
 "%d files failed, retrying" = "Не удалось файлов: %d, повтор";
 "Paused" = "На паузе";
 "Paused on that device" = "На паузе на том устройстве";
+"%@ · via relay" = "%@ · через relay";
 
 /* Сопряжение */
 "Found on This Network" = "Найдено в сети";

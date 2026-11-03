@@ -75,6 +75,7 @@ type Status struct {
 	LastScan   time.Time     `json:"last_scan,omitzero"`
 	Paused     bool          `json:"paused"`
 	Syncing    bool          `json:"syncing"`
+	Relay      *RelayStatus  `json:"relay,omitempty"`
 	Peers      []PeerStatus  `json:"peers"`
 	Candidates []Candidate   `json:"candidates"`
 	Kinds      []folder.Kind `json:"kinds"`
@@ -110,11 +111,13 @@ type Daemon struct {
 	disc   *discovery.Discovery
 	act    *activity
 
-	mu       sync.Mutex
-	cfg      *config.Config
-	peers    map[string]*peerRunner
-	incoming map[string]Candidate // отклонённые незнакомые устройства
-	learned  map[string]string    // обратные адреса пиров, подключавшихся к нам
+	mu        sync.Mutex
+	cfg       *config.Config
+	peers     map[string]*peerRunner
+	incoming  map[string]Candidate // отклонённые незнакомые устройства
+	learned   map[string]string    // обратные адреса пиров, подключавшихся к нам
+	relaySt   *RelayStatus
+	relayKick chan struct{} // смена адреса relay в конфиге
 	// OnChange вызывается при смене статуса (для трея).
 	OnChange func()
 }
@@ -128,7 +131,7 @@ func New(home string, logger *log.Logger) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Daemon{Home: home, ID: id, Log: logger, cfg: cfg, act: loadActivity(filepath.Join(home, "activity.json")), peers: map[string]*peerRunner{}, incoming: map[string]Candidate{}, learned: map[string]string{}}, nil
+	return &Daemon{Home: home, ID: id, Log: logger, cfg: cfg, act: loadActivity(filepath.Join(home, "activity.json")), peers: map[string]*peerRunner{}, incoming: map[string]Candidate{}, learned: map[string]string{}, relayKick: make(chan struct{}, 1)}, nil
 }
 
 func (d *Daemon) Config() config.Config {
@@ -174,6 +177,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		ErrorLog:  log.New(discardTLSNoise{d.Log}, "", 0),
 	}
 	go srv.Serve(tls.NewListener(ln, srv.TLSConfig))
+	// Тот же сервер принимает и каналы, пришедшие через relay.
+	relayLn := newConnListener()
+	go srv.Serve(tls.NewListener(relayLn, srv.TLSConfig))
+	go d.relayLoop(ctx, relayLn)
 	defer srv.Close()
 	d.Log.Printf("слушаю TCP :%d", cfg.Port)
 
@@ -359,7 +366,8 @@ func (p peerProgress) Done(fi folder.FileInfo, ev folder.Event, bytes int64) {
 }
 
 // addrs — адреса, по которым стоит искать пира: свежий из анонса, затем
-// тот, с которого пир сам подключался к нам, затем прописанные вручную.
+// тот, с которого пир сам подключался к нам, затем прописанные вручную,
+// и в самом конце — через relay.
 func (d *Daemon) addrs(id string) []string {
 	var out []string
 	if d.disc != nil {
@@ -379,6 +387,9 @@ func (d *Daemon) addrs(id string) []string {
 			out = append(out, a)
 		}
 	}
+	if d.cfg.Relay != "" {
+		out = append(out, transport.RelayHost) // последним: напрямую быстрее
+	}
 	d.mu.Unlock()
 	return out
 }
@@ -392,7 +403,7 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 
 func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 	id := pr.st.ID
-	client := transport.NewClient(d.ID, id, d.Config().Port)
+	client := transport.NewClient(d.ID, id, d.Config().Port, d.relayDial(id))
 	defer client.Close()
 	short := identity.ShortID(id)
 
@@ -468,6 +479,14 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		}
 		pr.set(func(s *PeerStatus) { s.State, s.LastSync, s.Failed = StateSynced, time.Now(), 0 })
 		d.changed()
+
+		// Вернулись домой: пир снова виден в LAN — уходим с relay на прямую связь.
+		if addr == transport.RelayHost && d.disc != nil {
+			if _, ok := d.disc.Lookup(id); ok {
+				d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", pr.name())
+				addr, since, attempt = "", 0, 0
+			}
+		}
 	}
 }
 
@@ -482,6 +501,12 @@ func (d *Daemon) Status() Status {
 		}
 	}
 	st.Days, st.Recent = d.act.snapshot(7, 20)
+	d.mu.Lock()
+	if d.relaySt != nil {
+		rs := *d.relaySt
+		st.Relay = &rs
+	}
+	d.mu.Unlock()
 	if st.Recent == nil {
 		st.Recent = []Event{}
 	}
@@ -578,7 +603,15 @@ func (d *Daemon) Reload() error {
 	}
 	d.mu.Lock()
 	d.cfg.Peers = cfg.Peers
+	relayChanged := d.cfg.Relay != cfg.Relay
+	d.cfg.Relay = cfg.Relay
 	d.mu.Unlock()
+	if relayChanged {
+		select {
+		case d.relayKick <- struct{}{}:
+		default:
+		}
+	}
 	d.syncPeers()
 	d.changed()
 	return nil

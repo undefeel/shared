@@ -31,6 +31,8 @@ type Config struct {
 	DiscoveryPort int    `json:"discovery_port"`
 	Peers         []Peer `json:"peers"`
 	Paused        bool   `json:"paused,omitempty"`
+	// Relay — sharedir-relay://ID:TOKEN@host:port; пусто — без relay.
+	Relay string `json:"relay,omitempty"`
 }
 
 // Home — каталог с конфигом, ключами и индексом.

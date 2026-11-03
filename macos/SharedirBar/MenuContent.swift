@@ -223,6 +223,12 @@ private struct PeerRow: View {
     }
 
     private var subtitle: String {
+        // Связь через relay медленнее прямой — пусть это будет видно.
+        guard peer.connected, peer.addr == "relay" else { return status }
+        return L("%@ · via relay", status)
+    }
+
+    private var status: String {
         if let p = peer.progress {
             return L("Receiving %d of %d · %@ left", p.doneFiles, p.files, Format.bytes(p.bytes - p.doneBytes))
         }

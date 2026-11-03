@@ -1,0 +1,37 @@
+[Unit]
+Description=sharedir relay
+Documentation=https://github.com/undefeel/shared#relay-синхронизация-через-интернет
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/sharedir relay serve --listen :22200
+Environment=SHAREDIR_HOME=/var/lib/sharedir-relay
+DynamicUser=yes
+StateDirectory=sharedir-relay
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# Песочница: relay нужны только сеть и свой каталог состояния.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

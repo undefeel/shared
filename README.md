@@ -98,7 +98,45 @@ sharedir pair <ID> --addr 10.0.0.5          # порт по умолчанию 2
 
 Про Happ/sing-box (VLESS Reality): в LAN он не мешает, локальные адреса идут мимо туннеля.
 Но через сам Reality-сервер машины друг друга не видят: это прокси «клиент → сервер», а не общая сеть.
-Чтобы синхронизироваться вне дома, понадобится relay на своём VPS (в планах).
+Для синхронизации вне дома — relay.
+
+## Relay: синхронизация через интернет
+
+Relay — посредник на сервере с публичным IP. Оба устройства подключаются к нему исходящим
+соединением, relay склеивает их и пересылает байты. Внутри идёт тот же сквозной mTLS, что и в LAN:
+relay не может ни прочитать файлы, ни подменить устройство — он видит только шифротекст и
+метаданные (IP, время, объём). Без токена relay никого не обслуживает.
+
+Порядок связи: адрес из LAN → прописанные адреса → relay. Дома трафик идёт напрямую; если вы
+подключились через relay, а потом пир появился в LAN, связь сама переключится на прямую.
+
+**Сервер (один раз):**
+
+```bash
+make linux && scp bin/sharedir-linux-amd64 root@VPS:/usr/local/bin/sharedir
+scp deploy/sharedir-relay.service root@VPS:/etc/systemd/system/
+ssh root@VPS
+  systemctl daemon-reload
+  systemd-run --wait --pipe -p DynamicUser=yes -p StateDirectory=sharedir-relay \
+    -E SHAREDIR_HOME=/var/lib/sharedir-relay \
+    /usr/local/bin/sharedir relay init --addr ПУБЛИЧНЫЙ_IP > /root/sharedir-relay-url.txt
+  chmod 600 /root/sharedir-relay-url.txt
+  systemctl enable --now sharedir-relay
+  ufw allow 22200/tcp comment "sharedir relay"
+```
+
+`relay init` печатает адрес вида `sharedir-relay://ID:ТОКЕН@IP:22200`. Это секрет:
+по нему можно пользоваться relay (но не читать чужие файлы).
+
+**Устройства:**
+
+```bash
+sharedir relay use "$(ssh root@VPS cat /root/sharedir-relay-url.txt)"
+sharedir status    # «relay … connected», у пира вне LAN — адрес relay
+```
+
+`sharedir relay off` отключает relay. В приложении macOS у пира, связанного через relay,
+стоит пометка «через relay».
 
 ## Команды
 
@@ -112,6 +150,8 @@ sharedir pair <ID> --addr 10.0.0.5          # порт по умолчанию 2
 | `id` | ID этого устройства |
 | `pair ID [--name] [--addr]` / `unpair ID` | управление доверенными устройствами |
 | `install` / `uninstall` | автозапуск при входе |
+| `relay use АДРЕС` / `relay off` | связь через relay вне локальной сети |
+| `relay init --addr IP` / `relay serve` | сам relay (на сервере) |
 
 Настройки лежат в `~/Library/Application Support/sharedir` (macOS) или `~/.config/sharedir` (Linux):
 `config.json`, ключ `key.pem`/`cert.pem`, индекс `index.json`. Каталог можно переопределить через `SHAREDIR_HOME`.
@@ -128,13 +168,15 @@ sharedir pair <ID> --addr 10.0.0.5          # порт по умолчанию 2
 (`GET /status`). Состояния пиров — коды, а не текст: `searching`, `not_found`, `offline`, `syncing`,
 `synced`, `retry`, `paused`, `peer_paused`; типы файлов — `video`, `images`, `docs`, `audio`,
 `archive`, `code`, `other`. Ошибки API — по-английски; переводит их сам интерфейс.
+Поле `relay` (`addr`, `connected`, `error`) — состояние подключения к relay; у пира, связанного
+через relay, `addr` равен `"relay"`.
 
 Переводы: CLI — [internal/i18n](internal/i18n/i18n.go) (язык из `LC_ALL`/`LC_MESSAGES`/`LANG`),
 macOS — [macos/Resources/ru.lproj](macos/Resources/ru.lproj/Localizable.strings) (ключи — английские строки).
 
 ## Ограничения MVP
 
-- Только LAN или ручной адрес; relay для работы через интернет — следующий шаг.
+- Через relay скорость ограничена каналом сервера: трафик проходит через него дважды.
 - Пустые каталоги и симлинки не синхронизируются.
 - Файл передаётся целиком (без блочной дельты); при изменении большого файла уходит весь файл.
 - Имена, различающиеся только регистром (`A.txt` и `a.txt`), на macOS столкнутся.

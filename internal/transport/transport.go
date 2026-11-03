@@ -68,6 +68,10 @@ func ServerTLS(id *identity.Identity, allowed func(string) bool, onReject func(i
 	}
 }
 
+// RelayHost — псевдо-адрес пира «через relay». Клиент, получив его,
+// дозванивается не по TCP, а через relayDial.
+const RelayHost = "relay"
+
 // ErrPeerPaused — пир поставил синхронизацию на паузу.
 var ErrPeerPaused = errors.New("пир на паузе")
 
@@ -139,8 +143,9 @@ type Client struct {
 }
 
 // NewClient создаёт клиента, который доверяет только серверу с ID peer.
-// port — порт нашего сервера, его узнает пир.
-func NewClient(id *identity.Identity, peer string, port int) *Client {
+// port — порт нашего сервера, его узнает пир. relayDial открывает канал
+// к пиру через relay, когда адрес — RelayHost (может быть nil).
+func NewClient(id *identity.Identity, peer string, port int, relayDial func(context.Context) (net.Conn, error)) *Client {
 	tlsCfg := &tls.Config{
 		Certificates:       []tls.Certificate{id.Cert},
 		InsecureSkipVerify: true, // цепочку не проверяем: проверяем ID ниже
@@ -158,11 +163,24 @@ func NewClient(id *identity.Identity, peer string, port int) *Client {
 	}
 	return &Client{port: port, http: &http.Client{Transport: &http.Transport{
 		TLSClientConfig:     tlsCfg,
-		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:         dialer(relayDial),
 		TLSHandshakeTimeout: 5 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}}}
+}
+
+func dialer(relayDial func(context.Context) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	direct := (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, _, _ := net.SplitHostPort(addr); host == RelayHost {
+			if relayDial == nil {
+				return nil, errors.New("relay is not configured")
+			}
+			return relayDial(ctx)
+		}
+		return direct(ctx, network, addr)
+	}
 }
 
 func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*http.Response, error) {
