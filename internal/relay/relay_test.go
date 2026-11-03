@@ -96,3 +96,44 @@ func TestParseURL(t *testing.T) {
 		t.Error("чужая схема принята")
 	}
 }
+
+func TestRelayPreAuthLimit(t *testing.T) {
+	ep := startRelay(t)
+	// Молчащие соединения сверх лимита relay закрывает сразу.
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for range maxPreAuthPerIP {
+		c, err := net.Dial("tcp", ep.Addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	time.Sleep(200 * time.Millisecond) // дать relay принять их
+	extra, err := net.Dial("tcp", ep.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err == nil || strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("лишнее соединение не закрыто: %v", err)
+	}
+
+	// Авторизованный клиент лимит не занимает: после закрытия молчащих
+	// соединений обычное подключение проходит.
+	for _, c := range conns {
+		c.Close()
+	}
+	conns = nil
+	time.Sleep(200 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := (&Client{Endpoint: ep, ID: newID(t)}).Connect(ctx, newID(t).ID); err == nil || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("после освобождения лимита: %v", err)
+	}
+}

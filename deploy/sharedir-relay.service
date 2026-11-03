@@ -32,6 +32,15 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077
+ProtectProc=invisible
+ProcSubset=pid
+PrivateUsers=yes
+# Сервер общий (VPN, nginx, docker): даже взломанный relay не должен видеть
+# чужие конфиги и ключи. Минус в начале — не ошибка, если каталога нет.
+InaccessiblePaths=-/opt -/srv -/var/www -/var/lib/docker -/var/lib/containerd -/var/log -/etc/nginx -/etc/letsencrypt -/etc/caddy -/etc/fail2ban -/etc/ssh
 
 [Install]
 WantedBy=multi-user.target

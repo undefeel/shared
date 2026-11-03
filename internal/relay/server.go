@@ -15,10 +15,16 @@ import (
 )
 
 const (
-	helloTimeout  = 15 * time.Second
+	helloTimeout  = 10 * time.Second
 	acceptTimeout = 15 * time.Second
 	pingInterval  = 30 * time.Second
 	maxPending    = 64 // одновременных незавершённых connect на устройство
+
+	// Лимиты на соединения, ещё не предъявившие токен: иначе посторонний
+	// может держать тысячи молчащих соединений. Лимит именно до проверки
+	// токена — свои устройства через VPN часто приходят с одного IP.
+	maxPreAuthPerIP = 32
+	maxPreAuth      = 1024
 )
 
 // Server — сам relay. Ничего не хранит на диске, кроме своего ключа:
@@ -31,6 +37,55 @@ type Server struct {
 	mu        sync.Mutex
 	listeners map[string]*control
 	pending   map[string]*pendingConn
+	preAuth   map[string]int       // IP → соединений до проверки токена
+	preAuthN  int                  // всего таких
+	badLogged map[string]time.Time // IP → когда последний раз писали в лог
+}
+
+func remoteIP(c net.Conn) string {
+	host, _, err := net.SplitHostPort(c.RemoteAddr().String())
+	if err != nil {
+		return c.RemoteAddr().String()
+	}
+	return host
+}
+
+// enterPreAuth учитывает соединение до проверки токена; false — лимит исчерпан.
+func (s *Server) enterPreAuth(ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.preAuth[ip] >= maxPreAuthPerIP || s.preAuthN >= maxPreAuth {
+		return false
+	}
+	s.preAuth[ip]++
+	s.preAuthN++
+	return true
+}
+
+func (s *Server) leavePreAuth(ip string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.preAuth[ip]--; s.preAuth[ip] <= 0 {
+		delete(s.preAuth, ip)
+	}
+	s.preAuthN--
+}
+
+// logBadToken пишет о неверном токене не чаще раза в минуту на IP.
+func (s *Server) logBadToken(ip, id string) {
+	s.mu.Lock()
+	last, ok := s.badLogged[ip]
+	write := !ok || time.Since(last) > time.Minute
+	if write {
+		if len(s.badLogged) > 10000 {
+			s.badLogged = map[string]time.Time{} // не даём таблице расти бесконечно
+		}
+		s.badLogged[ip] = time.Now()
+	}
+	s.mu.Unlock()
+	if write {
+		s.Log.Printf("%s %s: неверный токен", ip, identity.ShortID(id))
+	}
 }
 
 type control struct {
@@ -68,6 +123,8 @@ func (s *Server) Serve(ln net.Listener) error {
 	s.mu.Lock()
 	s.listeners = map[string]*control{}
 	s.pending = map[string]*pendingConn{}
+	s.preAuth = map[string]int{}
+	s.badLogged = map[string]time.Time{}
 	s.mu.Unlock()
 	tln := tls.NewListener(ln, s.tlsConfig())
 	for {
@@ -75,13 +132,22 @@ func (s *Server) Serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
-		go s.handle(c.(*tls.Conn))
+		ip := remoteIP(c)
+		if !s.enterPreAuth(ip) {
+			c.Close()
+			continue
+		}
+		go s.handle(c.(*tls.Conn), ip)
 	}
 }
 
-func (s *Server) handle(conn *tls.Conn) {
+func (s *Server) handle(conn *tls.Conn, ip string) {
 	keep := false
+	authed := false
 	defer func() {
+		if !authed {
+			s.leavePreAuth(ip)
+		}
 		if !keep {
 			conn.Close()
 		}
@@ -96,10 +162,12 @@ func (s *Server) handle(conn *tls.Conn) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(h.Token), []byte(s.Token)) != 1 {
-		s.Log.Printf("%s %s: неверный токен", conn.RemoteAddr(), identity.ShortID(id))
+		s.logBadToken(ip, id)
 		writeJSON(conn, Message{Error: "bad token"})
 		return
 	}
+	authed = true
+	s.leavePreAuth(ip)
 	conn.SetDeadline(time.Time{})
 
 	switch h.Op {
