@@ -69,7 +69,7 @@ function incompatiblePeer(peer) {
 }
 
 function phase(status, active) {
-  if (!status.running) return "down"
+  if (!status || !status.running) return "down"
   if (folderError(status)) return "blocked"
   if (!active) return "paused"
   var peers = status.peers || []

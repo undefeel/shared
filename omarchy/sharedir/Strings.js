@@ -150,6 +150,7 @@ function dayLabel(language, date, isToday) {
 
 // Короткое состояние пира справа от имени.
 function peerBadge(language, peer) {
+  if (peer.state === "incompatible" || peer.error_code === "protocol_incompatible") return t(language, "Incompatible version")
   if (peer.progress && peer.progress.bytes > 0)
     return Math.round(100 * peer.progress.done_bytes / peer.progress.bytes) + "%"
   switch (peer.state) {

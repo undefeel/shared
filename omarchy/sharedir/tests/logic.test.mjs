@@ -100,7 +100,7 @@ test('resume CLI success does not clear the root block from current status', () 
 })
 
 const stringsSource = readFileSync(new URL('../Strings.js', import.meta.url), 'utf8').replace(/^\.pragma library\s*/, '')
-const strings = new Function(stringsSource + '\nreturn { t, peerCaption }')()
+const strings = new Function(stringsSource + '\nreturn { t, peerCaption, peerBadge }')()
 
 test('v1 incompatible status cannot appear synced; root and pause win', () => {
   const status = logic.parseStatus(JSON.stringify({
@@ -118,4 +118,13 @@ test('v1 incompatible status cannot appear synced; root and pause win', () => {
     assert.equal(message, strings.t(language, 'Update the other machine to the same sharedir version'))
     assert.ok(!message.includes('Up to date'))
   }
+})
+
+test('missing status is down and error-code-only peers have an incompatible badge', () => {
+  assert.equal(logic.phase(null, true), 'down')
+  assert.equal(logic.phase(undefined, true), 'down')
+  const peer = {state: 'synced', error_code: 'protocol_incompatible'}
+  assert.equal(logic.phase({running: true, peers: [peer]}, true), 'incompatible')
+  for (const language of ['en', 'ru'])
+    assert.equal(strings.peerBadge(language, peer), strings.t(language, 'Incompatible version'))
 })
