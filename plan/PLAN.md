@@ -7,10 +7,10 @@
 - macOS: меню-бар SwiftUI (`macos/SharedirBar`) + встроенный демон, связь через локальный control-сокет.
 - Omarchy: виджет бара QML (`omarchy/sharedir`).
 
-Приёмка: `make test` (`go test -race ./...`), `go vet ./...`, `make build`, `make app` (Swift собирается на этой машине).
+Приёмка: `make test`, `make test-macos`, `make test-omarchy`, `GOOS=linux go vet ./...`, (`go test -race ./...`), `go vet ./...`, `make build`, `make app` (Swift собирается на этой машине).
 
 ## Этапы
 | № | Этап | Подплан | Статус |
 |---|---|---|---|
 | 01 | Ревью безопасности и багов | `01-review.md` | done |
-| 02 | Исправления по итогам ревью | `02-fixes.md` | todo |
+| 02 | Исправления по итогам ревью | `02-fixes.md` | done |
