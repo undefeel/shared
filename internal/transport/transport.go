@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -101,7 +100,7 @@ func (s *Server) Handler() http.Handler {
 		if !s.authorize(w, r) {
 			return
 		}
-		if s.Paused != nil && s.Paused() {
+		if (s.Paused != nil && s.Paused()) || (s.Folder != nil && s.Folder.Blocked() != nil) {
 			http.Error(w, "paused", http.StatusServiceUnavailable)
 			return
 		}
@@ -133,38 +132,60 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if timeout <= 0 {
 		timeout = pollTimeout
 	}
+	generation := s.Folder.ConfirmedGeneration()
 	s.Folder.Wait(since, timeout)
 	if !s.authorize(w, r) {
 		return
 	}
-	if s.Paused != nil && s.Paused() {
+	if (s.Paused != nil && s.Paused()) || (s.Folder != nil && s.Folder.Blocked() != nil) {
 		http.Error(w, "paused", http.StatusServiceUnavailable)
 		return
 	}
 	files, seq := s.Folder.Snapshot()
+	if s.Folder.CheckRead(generation) != nil {
+		http.Error(w, "folder unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(IndexResponse{Seq: seq, Files: files})
 }
 
 func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	fi, p, ok := s.Folder.Lookup(q.Get("name"))
-	if !ok || fi.Deleted || fi.Hash != q.Get("hash") {
-		http.Error(w, "версия устарела", http.StatusConflict)
-		return
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		http.Error(w, "файл недоступен", http.StatusConflict)
+	generation := s.Folder.ConfirmedGeneration()
+	fi, f, err := s.Folder.OpenVersion(q.Get("name"), q.Get("hash"))
+	if err != nil || s.Folder.CheckRead(generation) != nil {
+		if f != nil {
+			f.Close()
+		}
+		status := http.StatusConflict
+		if s.Folder.Blocked() != nil || s.Folder.CheckRead(generation) != nil {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, "file unavailable", status)
 		return
 	}
 	defer f.Close()
 	defer http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size, 10))
-	if _, err := io.Copy(&progressWriter{w: w, idle: s.writeIdle()}, f); err == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+	if _, err := io.Copy(&versionWriter{progressWriter: progressWriter{w: w, idle: s.writeIdle()}, folder: s.Folder, generation: generation}, f); err == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		s.OnServed(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw), fi)
 	}
+}
+
+// Check each chunk before writing: confirmation cannot revive an old fd request.
+type versionWriter struct {
+	progressWriter
+	folder     *folder.Folder
+	generation uint64
+}
+
+func (w *versionWriter) Write(p []byte) (int, error) {
+	if err := w.folder.CheckRead(w.generation); err != nil {
+		return 0, err
+	}
+	return w.progressWriter.Write(p)
 }
 
 type Client struct {
