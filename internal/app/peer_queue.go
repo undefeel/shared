@@ -75,19 +75,21 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		q.indexes[peer] = index
 		return false
 	}
-	// A continuation counts distinct names, not wire records. Keep the newest
-	// vector if a peer repeats a name in the same index response.
-	newest := make(map[string]folder.FileInfo, len(files))
-	for _, fi := range files {
-		if old, exists := newest[fi.Name]; !exists || fi.Version.Compare(old.Version) == folder.Greater {
-			newest[fi.Name] = fi
-		}
-	}
-	files = files[:0]
-	for _, fi := range newest {
-		files = append(files, fi)
-	}
+	// Sort and compact in place: duplicate handling must not allocate another
+	// index-sized map alongside the decoded index and bounded pending window.
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	unique := 0
+	for _, fi := range files {
+		if unique > 0 && files[unique-1].Name == fi.Name {
+			if fi.Version.Compare(files[unique-1].Version) == folder.Greater {
+				files[unique-1] = fi
+			}
+			continue
+		}
+		files[unique] = fi
+		unique++
+	}
+	files = files[:unique]
 	added := 0
 	var end string
 	more := false
