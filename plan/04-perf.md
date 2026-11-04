@@ -105,3 +105,4 @@
 - API из 04-15 для следующих задач: 04-17 — persistHooks.write(kind,path,writer,data), durableFile(file,phase), fsyncOnly(file,phase), phase(txID,phase); 04-19 — fsyncOnly на каждый inode/каталог G1, затем один fullSyncDevices(files,phase), phase-callbacks G1–G5; 04-21/22 — fsyncOnly/clockNow; harness — SetPersistenceProbe до конкурентного использования, PersistenceStats. Устаревший текст про FULLFSYNC на файл в perf.md R1/R3/R20 перекрыт решением владельца п.1.
 - 04-18 объединена с 04-17 (ownership расширен на rootstate.go, rootstate_test.go, journal_test.go, commit_test.go, бюджет ~600 строк); после мержа 04-17 задачу 04-18 в Orca отметить completed «merged into 04-17», чтобы разблокировать зависимые.
 - 04-17: найден баг 04-11 — storeDigest хэшировал gob-поток, зависящий от порядка типов в процессе; разрешено исправить в store_replay.go + store_migrate.go через hooks, бюджет ~700.
+- 04-19: бюджет ~450 строк.
