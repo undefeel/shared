@@ -27,14 +27,15 @@ const rescanInterval = time.Minute
 
 // Состояния пира. Это коды для UI: текст на нужном языке подставляет клиент.
 const (
-	StateSearching  = "searching"   // ищем адрес
-	StateNotFound   = "not_found"   // ни одного адреса: нет в LAN и не прописан
-	StateOffline    = "offline"     // адрес есть, но пир не отвечает
-	StateSyncing    = "syncing"     // применяем изменения пира
-	StateSynced     = "synced"      // всё сошлось
-	StateRetry      = "retry"       // часть файлов не применилась, скоро повтор
-	StatePaused     = "paused"      // пауза у нас
-	StatePeerPaused = "peer_paused" // пауза у пира
+	StateSearching    = "searching"   // ищем адрес
+	StateNotFound     = "not_found"   // ни одного адреса: нет в LAN и не прописан
+	StateOffline      = "offline"     // адрес есть, но пир не отвечает
+	StateSyncing      = "syncing"     // применяем изменения пира
+	StateSynced       = "synced"      // всё сошлось
+	StateRetry        = "retry"       // часть файлов не применилась, скоро повтор
+	StatePaused       = "paused"      // пауза у нас
+	StatePeerPaused   = "peer_paused" // пауза у пира
+	StateIncompatible = "incompatible"
 )
 
 type PeerStatus struct {
@@ -47,6 +48,11 @@ type PeerStatus struct {
 	Failed    int       `json:"failed,omitempty"` // для StateRetry
 	LastSync  time.Time `json:"last_sync,omitzero"`
 	Progress  *Progress `json:"progress,omitempty"`
+	// Wire names reserved for 04-61: error_code, error_message, expected_protocol, received_protocol.
+	ErrorCode        string `json:"error_code,omitempty"`
+	ErrorMessage     string `json:"error_message,omitempty"`
+	ExpectedProtocol int    `json:"expected_protocol,omitempty"`
+	ReceivedProtocol string `json:"received_protocol,omitempty"`
 }
 
 // Progress — ход текущего приёма изменений от пира.
@@ -88,6 +94,7 @@ type peerRunner struct {
 	cancel context.CancelFunc // nil, пока синхронизация на паузе
 	lan    chan struct{}      // пир появился в LAN: пора уходить с relay
 	mu     sync.Mutex
+	done   chan struct{}
 	st     PeerStatus
 }
 
@@ -169,6 +176,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	d.folder.SetDownloadConcurrency(cfg.DownloadConcurrency)
 	defer func() { d.lifecycle.Lock(); defer d.lifecycle.Unlock(); d.stopFolder(); _ = d.folder.Close() }()
 	d.Log.Printf("устройство %q, ID %s", cfg.Name, identity.Pretty(d.ID.ID))
 	d.Log.Printf("папка %s", cfg.Folder)
@@ -181,7 +189,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:           (&transport.Server{Folder: d.folder, Log: d.Log, OnPeer: d.learn, Paused: d.Paused, OnServed: d.served, Allowed: d.isPeer}).Handler(),
+		Handler:           (&transport.Server{Folder: d.folder, State: folderPeerState{d.folder}, Log: d.Log, OnPeer: d.learn, Paused: d.Paused, OnServed: d.served, Allowed: d.isPeer}).Handler(),
 		TLSConfig:         transport.ServerTLS(d.ID, d.isPeer, d.rejected),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       90 * time.Second,
@@ -362,19 +370,27 @@ func (d *Daemon) syncPeersLocked() {
 	d.connections.Revoke(d.isPeer)
 	blocked := d.folder.Blocked() != nil
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	want := map[string]config.Peer{}
 	for _, p := range d.cfg.Peers {
 		want[p.ID] = p
 	}
+	var draining []<-chan struct{}
 	for id, pr := range d.peers {
 		if _, ok := want[id]; !ok {
 			if pr.cancel != nil {
 				pr.cancel()
 			}
+			if pr.done != nil {
+				draining = append(draining, pr.done)
+			}
 			delete(d.peers, id)
 		}
 	}
+	d.mu.Unlock()
+	for _, done := range draining {
+		<-done
+	}
+	d.mu.Lock()
 	for id, p := range want {
 		pr, ok := d.peers[id]
 		if !ok {
@@ -393,11 +409,14 @@ func (d *Daemon) syncPeersLocked() {
 		case pr.cancel == nil:
 			ctx, cancel := context.WithCancel(d.ctx)
 			pr.cancel = cancel
+			pr.done = make(chan struct{})
 			pr.set(func(s *PeerStatus) { s.State = StateSearching })
+			runDone := pr.done
 			d.workers.Add(1)
-			go func() { defer d.workers.Done(); d.runPeer(ctx, pr) }()
+			go func() { defer d.workers.Done(); defer close(runDone); d.runPeer(ctx, pr) }()
 		}
 	}
+	d.mu.Unlock()
 }
 
 // peerProgress переводит ход ApplyRemote в статус пира и ленту событий.
@@ -477,12 +496,13 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 	id := pr.st.ID
 	client := transport.NewClient(d.ID, id, d.Config().Port, d.relayDial(id))
+	client.LocalHello = func() transport.Hello { return folderPeerState{d.folder}.Hello() }
 	defer client.Close()
 	short := identity.ShortID(id)
-
-	var since uint64
+	queue := newPeerQueue()
 	addr := ""
 	attempt := 0
+	var incompatibleLogged bool
 	for ctx.Err() == nil {
 		if addr == "" {
 			cands := d.addrs(id)
@@ -511,18 +531,26 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			}()
 			stopPoll = func() { close(done); cancel() }
 		}
-		idx, err := client.Index(pollCtx, addr, since)
+		epoch, since, haveCursor := queue.cursor(id)
+		if !haveCursor {
+			epoch, since = "", 0
+		}
+		var idx *transport.IndexResponse
+		var err error
+		polling := queue.canPoll(id)
+		if polling {
+			idx, err = client.IndexSince(pollCtx, addr, epoch, since, "")
+		}
 		toLAN := err != nil && pollCtx.Err() != nil && ctx.Err() == nil
 		stopPoll()
 		if toLAN {
 			d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", pr.name())
-			addr, since, attempt = "", 0, 0
+			addr, attempt = "", 0
 			continue
 		}
 		if errors.Is(err, transport.ErrPeerPaused) {
 			pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = true, addr, StatePeerPaused })
 			d.changed()
-			since = 0
 			sleepCtx(ctx, 5*time.Second)
 			continue
 		}
@@ -530,15 +558,31 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			if ctx.Err() != nil {
 				return
 			}
+			var protocolErr *transport.ProtocolError
+			if errors.As(err, &protocolErr) {
+				pr.mu.Lock()
+				first := !incompatibleLogged || pr.st.State != StateIncompatible || pr.st.ReceivedProtocol != protocolErr.Received
+				pr.st.Connected, pr.st.Syncing, pr.st.Progress, pr.st.State = false, false, nil, StateIncompatible
+				pr.st.ErrorCode, pr.st.ErrorMessage = "protocol_incompatible", protocolErr.Error()
+				pr.st.ExpectedProtocol, pr.st.ReceivedProtocol = protocolErr.Expected, protocolErr.Received
+				pr.mu.Unlock()
+				if first {
+					d.Log.Printf("%s: %v", pr.name(), protocolErr)
+				}
+				incompatibleLogged = true
+				d.changed()
+				sleepCtx(ctx, 60*time.Second)
+				continue
+			}
 			pr.mu.Lock()
 			wasConnected := pr.st.Connected
-			pr.st.Connected, pr.st.State = false, StateOffline
+			pr.st.Connected, pr.st.Syncing, pr.st.Progress, pr.st.State = false, false, nil, StateOffline
 			pr.mu.Unlock()
 			if wasConnected {
 				d.Log.Printf("%s: соединение потеряно: %v", pr.name(), err)
 			}
 			d.changed()
-			addr, since = "", 0
+			addr = ""
 			sleepCtx(ctx, 3*time.Second)
 			continue
 		}
@@ -548,12 +592,21 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			d.Log.Printf("%s: подключено к %s", pr.st.Name, addr)
 		}
 		pr.st.Connected, pr.st.Addr = true, addr
+		pr.st.ErrorCode, pr.st.ErrorMessage, pr.st.ReceivedProtocol = "", "", ""
+		pr.st.ExpectedProtocol = 0
 		pr.mu.Unlock()
+		incompatibleLogged = false
 
-		if idx.Seq != since {
+		if polling && idx != nil {
+			if !haveCursor || idx.StoreEpoch != epoch || idx.Cursor != since || idx.Reset || len(idx.Files) != 0 {
+				queue.accept(id, idx.StoreEpoch, idx.Cursor, idx.Reset, idx.Files)
+			}
+		}
+		due := queue.due(id, time.Now(), 64)
+		if len(due) > 0 {
 			pr.set(func(s *PeerStatus) { s.State, s.Syncing = StateSyncing, true })
 			d.changed()
-			applied, failed := d.folder.ApplyRemote(ctx, short, idx.Files, client.Fetcher(addr), peerProgress{d, pr})
+			applied, failed := d.applyPeerDue(ctx, client, addr, id, short, queue.activeEpoch(id), queue.activeCursor(id), due, queue, peerProgress{d, pr})
 			pr.set(func(s *PeerStatus) { s.Syncing, s.Progress = false, nil })
 			if ctx.Err() != nil {
 				return // пауза или удаление пира: статус уже выставил syncPeers
@@ -562,15 +615,26 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 				d.Log.Printf("%s: применено изменений: %d", pr.name(), applied)
 			}
 			if failed > 0 {
-				// Повторим полную сверку чуть позже: локальный скан или пир
-				// к этому времени, скорее всего, догонят.
 				pr.set(func(s *PeerStatus) { s.State, s.Failed = StateRetry, failed })
 				d.changed()
-				since = 0
-				sleepCtx(ctx, 5*time.Second)
+				// A failed body may have come from a dead candidate while the
+				// index endpoint still responds. Rotate addresses without dropping
+				// the queue's accepted work or durable cursor.
+				addr = ""
+				sleepCtx(ctx, peerRetryMin)
 				continue
 			}
-			since = idx.Seq
+			if queue.canPoll(id) {
+				pr.set(func(s *PeerStatus) { s.State, s.LastSync, s.Failed = StateSynced, time.Now(), 0 })
+				d.changed()
+			}
+			continue
+		}
+		if !queue.canPoll(id) {
+			pr.set(func(s *PeerStatus) { s.State, s.Syncing = StateRetry, false })
+			d.changed()
+			sleepCtx(ctx, 250*time.Millisecond)
+			continue
 		}
 		pr.set(func(s *PeerStatus) { s.State, s.LastSync, s.Failed = StateSynced, time.Now(), 0 })
 		d.changed()
@@ -579,7 +643,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		if addr == transport.RelayHost && d.disc != nil {
 			if _, ok := d.disc.Lookup(id); ok {
 				d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", pr.name())
-				addr, since, attempt = "", 0, 0
+				addr, attempt = "", 0
 			}
 		}
 	}
@@ -790,6 +854,7 @@ func (d *Daemon) stopFolder() {
 	}
 	d.mu.Unlock()
 	d.workers.Wait()
+	d.folder.DrainApply()
 	if d.watchCancel != nil {
 		d.watchCancel()
 		<-d.watchDone

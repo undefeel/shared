@@ -20,9 +20,7 @@ type peerQueue struct {
 	pending map[peerItemKey]peerPending
 	cursors map[string]peerCursor
 	indexes map[string]peerIndex
-	blocked map[string]bool
 }
-
 type peerItemKey struct{ peer, epoch, name string }
 type peerCursor struct {
 	epoch  string
@@ -34,25 +32,23 @@ type peerPending struct {
 	next     time.Time
 }
 
-// peerIndex retains the work represented by a cursor until every record has
-// been applied. Replaying the same index can fill available slots without
-// re-enqueuing records that have already completed.
+// peerIndex keeps only constant-size continuation state. FileInfo values live
+// in pending only until durable apply; replay advances from boundary.
 type peerIndex struct {
-	epoch   string
-	cursor  uint64
-	records map[string]peerIndexRecord
-}
-
-type peerIndexRecord struct {
-	info folder.FileInfo
-	done bool
+	epoch     string
+	cursor    uint64
+	boundary  string
+	windowEnd string
+	remaining int
+	exhausted bool
 }
 
 func newPeerQueue() *peerQueue {
-	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), indexes: make(map[string]peerIndex), blocked: make(map[string]bool)}
+	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), indexes: make(map[string]peerIndex)}
 }
 
-// accept queues candidates; false may queue a prefix, but never advances cursor.
+// accept queues one bounded sorted window. The caller replays the same stable
+// index only after that window drains, so continuation uses a canonical name.
 func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files []folder.FileInfo) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -65,76 +61,67 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 	if q.indexes == nil {
 		q.indexes = make(map[string]peerIndex)
 	}
-	if q.blocked == nil {
-		q.blocked = make(map[string]bool)
-	}
-	index, haveIndex := q.indexes[peer]
-	newEpoch := haveIndex && index.epoch != epoch
-	if newEpoch {
+	index, ok := q.indexes[peer]
+	if !ok || index.epoch != epoch || index.cursor != cursor {
 		for key := range q.pending {
 			if key.peer == peer {
 				delete(q.pending, key)
 			}
 		}
-		delete(q.blocked, peer)
-		delete(q.indexes, peer)
 		delete(q.cursors, peer)
-		if len(q.pending) < peerPendingLimit {
-			clear(q.blocked)
-		}
-		haveIndex = false
+		index = peerIndex{epoch: epoch, cursor: cursor}
 	}
-	// A reset bit can accompany a retry. Only a changed epoch or cursor starts
-	// a new index continuation.
-	newIndex := !haveIndex || index.epoch != epoch || index.cursor != cursor
-	if newIndex {
-		index = peerIndex{epoch: epoch, cursor: cursor, records: make(map[string]peerIndexRecord)}
-	}
-	left := false
-	for _, fi := range files {
-		fi.Disk = ""
-		fi.Version = fi.Version.Copy()
-		record, exists := index.records[fi.Name]
-		if exists {
-			cmp := record.info.Version.Compare(fi.Version)
-			if cmp == folder.Greater {
-				fi = record.info
-			} else if !samePeerVersion(record.info, fi) {
-				record.info = fi
-				record.done = false
-			}
-		}
-		if !exists {
-			record.info = fi
-		}
-		index.records[fi.Name] = record
-		key := peerItemKey{peer, epoch, fi.Name}
-		pending, queued := q.pending[key]
-		if queued && samePeerVersion(pending.info, fi) {
-			continue
-		}
-		if record.done && samePeerVersion(record.info, fi) {
-			continue
-		}
-		if !queued && len(q.pending) >= peerPendingLimit {
-			left = true
-			continue
-		}
-		q.pending[key] = peerPending{info: fi}
-	}
-	q.indexes[peer] = index
-	if left {
-		q.blocked[peer] = true
+	if index.remaining != 0 {
+		q.indexes[peer] = index
 		return false
 	}
-	delete(q.blocked, peer)
-	for _, record := range index.records {
-		if !record.done {
-			return true
+	// Sort and compact in place: duplicate handling must not allocate another
+	// index-sized map alongside the decoded index and bounded pending window.
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	unique := 0
+	for _, fi := range files {
+		if unique > 0 && files[unique-1].Name == fi.Name {
+			if fi.Version.Compare(files[unique-1].Version) == folder.Greater {
+				files[unique-1] = fi
+			}
+			continue
 		}
+		files[unique] = fi
+		unique++
 	}
+	files = files[:unique]
+	added := 0
+	var end string
+	more := false
+	space := peerPendingLimit - len(q.pending)
+	for _, fi := range files {
+		if fi.Name <= index.boundary {
+			continue
+		}
+		if added == space {
+			more = true
+			break
+		}
+		fi.Disk = ""
+		fi.Version = fi.Version.Copy()
+		fiKey := peerItemKey{peer, epoch, fi.Name}
+		q.pending[fiKey] = peerPending{info: fi}
+		end = fi.Name
+		added++
+	}
+	if added > 0 {
+		index.windowEnd, index.remaining, index.exhausted = end, added, !more
+		q.indexes[peer] = index
+		return !more
+	}
+	if more {
+		index.exhausted = false
+		q.indexes[peer] = index
+		return false
+	}
+	index.exhausted = true
+	q.indexes[peer] = index
 	q.cursors[peer] = peerCursor{epoch: epoch, cursor: cursor}
-	delete(q.blocked, peer)
 	return true
 }
 
@@ -176,7 +163,6 @@ func (q *peerQueue) failed(peer, epoch string, info folder.FileInfo, now time.Ti
 	item.next = now.Add(peerRetryDelay(item.attempts))
 	q.pending[key] = item
 }
-
 func peerRetryDelay(attempt uint) time.Duration {
 	delay := peerRetryMin
 	for i := uint(1); i < attempt && delay < peerRetryMax; i++ {
@@ -205,61 +191,70 @@ func (q *peerQueue) applied(peer, epoch string, info folder.FileInfo) {
 	key := peerItemKey{peer, epoch, info.Name}
 	if item, ok := q.pending[key]; ok && samePeerVersion(item.info, info) {
 		delete(q.pending, key)
-		if index, exists := q.indexes[peer]; exists && index.epoch == epoch {
-			if record, exists := index.records[info.Name]; exists && samePeerVersion(record.info, info) {
-				record.done = true
-				index.records[info.Name] = record
-				q.indexes[peer] = index
-				complete := true
-				for _, current := range index.records {
-					if !current.done {
-						complete = false
-						break
-					}
-				}
-				if complete {
+		index, exists := q.indexes[peer]
+		if exists && index.epoch == epoch && index.remaining > 0 {
+			index.remaining--
+			if index.remaining == 0 {
+				index.boundary = index.windowEnd
+				if index.exhausted {
 					q.cursors[peer] = peerCursor{epoch: index.epoch, cursor: index.cursor}
 				}
 			}
-		}
-		if len(q.pending) < peerPendingLimit {
-			clear(q.blocked)
+			q.indexes[peer] = index
 		}
 	}
 }
-
-func (q *peerQueue) cursor(peer string) (epoch string, cursor uint64, ok bool) {
+func (q *peerQueue) cursor(peer string) (string, uint64, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	c, ok := q.cursors[peer]
 	return c.epoch, c.cursor, ok
 }
+func (q *peerQueue) activeEpoch(peer string) string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.indexes[peer].epoch
+}
+func (q *peerQueue) activeCursor(peer string) uint64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.indexes[peer].cursor
+}
 
+// replaceName refreshes only an outstanding item. A changed epoch/cursor is a
+// baseline boundary and causes the next ordinary poll to fetch a complete index.
+func (q *peerQueue) replaceName(peer, epoch string, cursor uint64, fi folder.FileInfo) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	index, ok := q.indexes[peer]
+	if !ok {
+		return false
+	}
+	if index.epoch != epoch || index.cursor != cursor {
+		for key := range q.pending {
+			if key.peer == peer {
+				delete(q.pending, key)
+			}
+		}
+		delete(q.indexes, peer)
+		delete(q.cursors, peer)
+		return false
+	}
+	fi.Disk = ""
+	fi.Version = fi.Version.Copy()
+	key := peerItemKey{peer, epoch, fi.Name}
+	if old, exists := q.pending[key]; exists {
+		q.pending[key] = peerPending{info: fi, attempts: old.attempts}
+		return true
+	}
+	return false
+}
 func (q *peerQueue) canPoll(peer string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.blocked[peer] || len(q.pending) >= peerPendingLimit {
-		return false
-	}
 	index, exists := q.indexes[peer]
 	if !exists {
 		return true
 	}
-	for name, record := range index.records {
-		if record.done {
-			continue
-		}
-		if _, queued := q.pending[peerItemKey{peer: peer, epoch: index.epoch, name: name}]; !queued {
-			// The same index still has a suffix that has not entered the queue.
-			return true
-		}
-	}
-	// All records are queued or complete. Waiting for application/backoff here
-	// avoids repeatedly fetching the same index while work is already pending.
-	for _, record := range index.records {
-		if !record.done {
-			return false
-		}
-	}
-	return true
+	return index.remaining == 0 && len(q.pending) < peerPendingLimit
 }

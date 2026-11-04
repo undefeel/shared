@@ -83,9 +83,40 @@ func (s step) needsDownload() bool {
 	return !s.r.Deleted && (s.l == nil || s.l.Deleted || s.l.Hash != s.r.Hash || s.act == takeWithConflict)
 }
 
+// NeedsRemoteContent reports whether applying fi currently requires its body.
+// It is a planning hint only; prepareApply repeats the decision before commit.
+func (f *Folder) NeedsRemoteContent(peer string, fi FileInfo) bool {
+	f.mu.Lock()
+	var local *FileInfo
+	if cur := f.files[fi.Name]; cur != nil {
+		c := *cur
+		c.Version = cur.Version.Copy()
+		local = &c
+	}
+	f.mu.Unlock()
+	if f.Ignored(fi.Name) {
+		return false
+	}
+	act := f.decide(local, &fi, peer)
+	if act == skip && !(local != nil && fi.Deleted && !local.Deleted && fi.Version.Compare(local.Version) == Concurrent) {
+		return false
+	}
+	return step{l: local, r: fi, act: act}.needsDownload()
+}
+
 // ApplyRemote сверяет индекс пира с локальным и подтягивает изменения.
 // Возвращает число применённых записей и число неудач (их стоит повторить).
 func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo, fetch Fetcher, progress Progress) (applied, failed int) {
+	return f.ApplyRemoteResults(ctx, peer, remote, fetch, progress, nil)
+}
+
+// ApplyRemoteResults is ApplyRemote with a serialized per-record durable
+// outcome callback. A nil error includes records already equal to local state.
+func (f *Folder) ApplyRemoteResults(ctx context.Context, peer string, remote []FileInfo, fetch Fetcher, progress Progress, outcome func(FileInfo, error)) (applied, failed int) {
+	return f.applyRemoteResults(ctx, peer, remote, fetch, progress, outcome, false)
+}
+
+func (f *Folder) applyRemoteResults(ctx context.Context, peer string, remote []FileInfo, fetch Fetcher, progress Progress, outcome func(FileInfo, error), stagingReserved bool) (applied, failed int) {
 	generation := f.ConfirmedGeneration()
 
 	var steps []step
@@ -98,14 +129,23 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		if !r.Deleted && (r.Size < 0 || !validSHA256(r.Hash)) {
 			f.log.Printf("%s: пропущена некорректная запись %q (размер или SHA-256)", peer, r.Name)
 			failed++
+			if outcome != nil {
+				outcome(r, errors.New("invalid remote size or hash"))
+			}
 			continue
 		}
 		if !validName(r.Name) {
 			f.log.Printf("%s: пропущен недопустимый путь %q", peer, r.Name)
 			failed++
+			if outcome != nil {
+				outcome(r, errors.New("invalid remote path"))
+			}
 			continue
 		}
 		if f.Ignored(r.Name) {
+			if outcome != nil {
+				outcome(r, nil)
+			}
 			continue
 		}
 		f.mu.Lock()
@@ -118,12 +158,18 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		f.mu.Unlock()
 		act := f.decide(l, &r, peer)
 		if act == skip && !(l != nil && r.Deleted && !l.Deleted && r.Version.Compare(l.Version) == Concurrent) {
+			if outcome != nil {
+				outcome(r, nil)
+			}
 			continue
 		}
 		st := step{l, r, act}
 		if st.needsDownload() && r.Size > math.MaxInt64-bytes {
 			f.log.Printf("%s: переполнение размера плана для %q", peer, r.Name)
 			failed++
+			if outcome != nil {
+				outcome(r, errors.New("remote plan size overflow"))
+			}
 			continue
 		}
 		steps = append(steps, st)
@@ -138,50 +184,81 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		progress.Plan(files, bytes)
 	}
 
-	// Keep enough operations in flight to fill a group; result reporting remains
-	// serialized because Progress implementations need not be concurrent-safe.
+	// A fixed worker set bounds both goroutines and commit waiters. Pool permits
+	// are acquired before staging and held until durable submit/cleanup returns.
 	type result struct {
 		st  step
 		err error
 	}
-	results := make(chan result, groupCount)
+	results := make(chan result, 64)
+	jobs := make(chan step)
 	var wg sync.WaitGroup
-	for start := 0; start < len(steps); start += groupCount {
-		end := min(start+groupCount, len(steps))
-		for _, st := range steps[start:end] {
-			wg.Add(1)
-			go func(st step) {
-				defer wg.Done()
-				final, err := f.applyOne(ctx, peer, generation, st, fetch)
-				results <- result{final, err}
-			}(st)
-		}
-		for range steps[start:end] {
-			res := <-results
-			st := res.st
-			if res.err != nil {
-				f.log.Printf("%s: %s: %v", peer, st.r.Name, res.err)
-				failed++
-				continue
-			}
-			if st.act == skip {
-				continue
-			}
-			applied++
-			if progress != nil && st.act != mergeOnly {
-				ev, n := EventReceived, int64(0)
-				if st.r.Deleted {
-					ev = EventDeleted
-				} else if st.act == takeWithConflict {
-					ev = EventConflict
+	workers := min(64, len(steps))
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for st := range jobs {
+				var release func()
+				var err error
+				if !stagingReserved {
+					release, err = f.reserveStaging(ctx, func() int64 {
+						if st.needsDownload() {
+							return st.r.Size
+						}
+						return 0
+					}())
 				}
-				if st.needsDownload() {
-					n = st.r.Size
+				if err == nil {
+					st, err = f.applyOne(ctx, peer, generation, st, fetch, stagingReserved)
+					if release != nil {
+						release()
+					}
 				}
-				progress.Done(st.r, ev, n)
+				results <- result{st, err}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, st := range steps {
+			select {
+			case jobs <- st:
+			case <-ctx.Done():
+				return
 			}
 		}
-		wg.Wait()
+	}()
+	go func() { wg.Wait(); close(results) }()
+	for res := range results {
+		st := res.st
+		if res.err != nil {
+			f.log.Printf("%s: %s: %v", peer, st.r.Name, res.err)
+			failed++
+			if outcome != nil {
+				outcome(st.r, res.err)
+			}
+			continue
+		}
+		if outcome != nil {
+			outcome(st.r, nil)
+		}
+		if st.act == skip {
+			continue
+		}
+		applied++
+		if progress != nil && st.act != mergeOnly {
+			ev, n := EventReceived, int64(0)
+			if st.r.Deleted {
+				ev = EventDeleted
+			} else if st.act == takeWithConflict {
+				ev = EventConflict
+			}
+			if st.needsDownload() {
+				n = st.r.Size
+			}
+			progress.Done(st.r, ev, n)
+		}
 	}
 	return applied, failed
 }
@@ -189,11 +266,25 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 var errLocalChanged = errors.New("файл изменён локально, повторим после сканирования")
 
 // applyOne treats step as a forecast only. Network I/O never holds scanMu.
-func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, st step, fetch Fetcher) (step, error) {
+func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, st step, fetch Fetcher, streamReserved bool) (step, error) {
 	if e := f.Blocked(); e != nil {
 		return st, e
 	}
-	prepared, err := f.stageApply(ctx, st, fetch)
+	limited := fetch
+	if !streamReserved {
+		limited = Fetcher(func(ctx context.Context, fi FileInfo, w io.Writer) error {
+			release, err := f.acquireDownload(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			if fetch == nil {
+				return errors.New("no fetcher configured")
+			}
+			return fetch(ctx, fi, w)
+		})
+	}
+	prepared, err := f.stageApply(ctx, st, limited)
 	if err != nil {
 		return st, err
 	}

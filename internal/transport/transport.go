@@ -96,6 +96,8 @@ const RelayHost = "relay"
 
 // ErrPeerPaused — пир поставил синхронизацию на паузу.
 var ErrPeerPaused = errors.New("пир на паузе")
+var ErrVersionChanged = errors.New("peer file version changed")
+var ErrFileUnavailable = errors.New("peer file unavailable")
 
 type Server struct {
 	State            StateProvider
@@ -235,10 +237,17 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 			f.Close()
 		}
 		status := http.StatusConflict
+		message := "file unavailable"
+		if err != nil {
+			known, _, exists := s.Folder.Lookup(q.Get("name"))
+			if exists && (known.Deleted || known.Hash != q.Get("hash")) {
+				message = "version_changed"
+			}
+		}
 		if s.Folder.Blocked() != nil || s.Folder.CheckRead(generation) != nil {
 			status = http.StatusServiceUnavailable
 		}
-		http.Error(w, "file unavailable", status)
+		http.Error(w, message, status)
 		return
 	}
 	defer f.Close()
@@ -417,6 +426,17 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 		resp.Body.Close()
 		return nil, ErrPeerPaused
 	}
+	if resp.StatusCode == http.StatusConflict {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		if strings.TrimSpace(string(body)) == "version_changed" {
+			return nil, ErrVersionChanged
+		}
+		if strings.TrimSpace(string(body)) == "file unavailable" {
+			return nil, ErrFileUnavailable
+		}
+		return nil, fmt.Errorf("%s: %s", resp.Status, body)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
@@ -572,7 +592,7 @@ func (c *Client) Fetcher(addr string) folder.Fetcher {
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer closeResponseOnCancel(ctx, resp.Body)()
 		encoding := resp.Header.Get("Content-Encoding")
 		if encoding == "" {
 			encoding = "identity"
@@ -586,6 +606,16 @@ func (c *Client) Fetcher(addr string) folder.Fetcher {
 		}
 		return nil
 	}
+}
+
+// closeResponseOnCancel makes cancellation close an active response body even
+// when Read is blocked, and waits for the Close callback before returning.
+func closeResponseOnCancel(ctx context.Context, body io.ReadCloser) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	closeBody := func() { once.Do(func() { _ = body.Close(); close(done) }) }
+	stop := context.AfterFunc(ctx, closeBody)
+	return func() { stop(); closeBody(); <-done }
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }

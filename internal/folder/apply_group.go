@@ -50,9 +50,11 @@ func (f *Folder) submitApply(ctx context.Context, peer string, generation uint64
 	return op.step, err
 }
 
-// drainApply is called before releasing a root or binding. Callers already
+// DrainApply is called before releasing a root or binding. Callers already
 // cancel/drain peer runners before confirmation; never wait with scanMu held.
-func (f *Folder) drainApply() {
+// DrainApply stops admission, cancels uncommitted requests, and waits for any
+// intent-bearing group commit before a caller releases the folder generation.
+func (f *Folder) DrainApply() {
 	f.applyMu.Lock()
 	c := f.applyCoordinator
 	if c != nil {
@@ -60,6 +62,20 @@ func (f *Folder) drainApply() {
 		f.applyCoordinator = nil
 	}
 	f.applyMu.Unlock()
+}
+
+// PendingApplyCount reports ready operations waiting for the next durable
+// group, for lifecycle diagnostics and deterministic drain tests.
+func (f *Folder) PendingApplyCount() int {
+	f.applyMu.Lock()
+	c := f.applyCoordinator
+	f.applyMu.Unlock()
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pending)
 }
 
 func (f *Folder) applyGroup(requests []*groupRequest) error {

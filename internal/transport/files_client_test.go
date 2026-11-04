@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,4 +107,27 @@ func TestFetchFilesCancellationStopsStalledRequest(t *testing.T) {
 	if result.err != context.Canceled || len(result.got) != 0 {
 		t.Fatalf("results=%+v err=%v", result.got, result.err)
 	}
+}
+
+type closeUnblocksBody struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *closeUnblocksBody) Read([]byte) (int, error) { <-b.closed; return 0, io.ErrClosedPipe }
+func (b *closeUnblocksBody) Close() error             { b.once.Do(func() { close(b.closed) }); return nil }
+
+func TestResponseCloseOnCancelUnblocksRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &closeUnblocksBody{closed: make(chan struct{})}
+	cleanup := closeResponseOnCancel(ctx, body)
+	readDone := make(chan struct{})
+	go func() { defer close(readDone); _, _ = body.Read(make([]byte, 1)) }()
+	cancel()
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("response Read remained blocked after cancellation")
+	}
+	cleanup()
 }

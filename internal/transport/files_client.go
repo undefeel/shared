@@ -114,7 +114,7 @@ func (c *Client) fetchFilesAttempt(ctx context.Context, addr string, items []Bat
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer closeResponseOnCancel(ctx, resp.Body)()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("%s: %s", resp.Status, b)
