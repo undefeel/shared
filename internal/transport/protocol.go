@@ -102,7 +102,7 @@ func DecodeHello(r io.Reader) (Hello, error) {
 // CertifiedPeerID returns the ID of the certificate authenticated by the TLS
 // handshake. No identity supplied in request JSON is trusted or consulted.
 func CertifiedPeerID(certificates []*x509.Certificate) (string, error) {
-	if len(certificates) == 0 || len(certificates[0].Raw) == 0 {
+	if len(certificates) == 0 || certificates[0] == nil || len(certificates[0].Raw) == 0 {
 		return "", errors.New("peer did not present a certificate")
 	}
 	return identity.IDFromCert(certificates[0].Raw), nil
