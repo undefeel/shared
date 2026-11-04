@@ -108,3 +108,55 @@ func TestAskGetsImmediateReply(t *testing.T) {
 	default:
 	}
 }
+
+func TestDeviceTableIsBounded(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	d := &Discovery{devices: map[string]Device{}, now: func() time.Time { return now }}
+	for i := 0; i < 10_000; i++ {
+		id := identity.IDFromCert([]byte(strconv.Itoa(i)))
+		d.remember(Announcement{ID: id, Name: "device"}, "127.0.0.1:1", d.now())
+	}
+	if got := len(d.devices); got > maxDevices {
+		t.Fatalf("device table grew to %d, limit is %d", got, maxDevices)
+	}
+}
+
+func TestRememberRemovesExpiredDevicesAndRefreshesKnownDevice(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	d := &Discovery{devices: map[string]Device{}, now: func() time.Time { return now }}
+	id := identity.IDFromCert([]byte("same peer"))
+	d.remember(Announcement{ID: id, Name: "peer"}, "127.0.0.1:1", d.now())
+	now = now.Add(time.Second)
+	d.remember(Announcement{ID: id, Name: "peer updated"}, "127.0.0.1:2", d.now())
+	if got := len(d.devices); got != 1 {
+		t.Fatalf("repeat announcement created another entry: %d", got)
+	}
+	if got := d.devices[id]; got.Name != "peer updated" || got.Addr != "127.0.0.1:2" {
+		t.Fatalf("known device was not updated: %+v", got)
+	}
+	now = now.Add(ttl + 2*time.Second)
+	d.remember(Announcement{ID: identity.IDFromCert([]byte("new peer")), Name: "new"}, "127.0.0.1:3", d.now())
+	if got := len(d.devices); got != 1 {
+		t.Fatalf("expired device was retained: %d entries", got)
+	}
+}
+
+func TestAnnouncementRateLimitPerIP(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	d := &Discovery{ipRates: map[string]rateWindowCounter{}, now: func() time.Time { return now }}
+	for i := 0; i < perIPRateLimit; i++ {
+		if !d.allowAnnouncement("192.0.2.1", d.now()) {
+			t.Fatalf("announcement %d was rejected before per-IP limit", i+1)
+		}
+	}
+	if d.allowAnnouncement("192.0.2.1", d.now()) {
+		t.Fatal("announcement over per-IP limit was accepted")
+	}
+	if !d.allowAnnouncement("192.0.2.2", d.now()) {
+		t.Fatal("one source IP consumed another IP's allowance")
+	}
+	now = now.Add(rateWindow)
+	if !d.allowAnnouncement("192.0.2.1", d.now()) {
+		t.Fatal("per-IP limit did not reset after one second")
+	}
+}
