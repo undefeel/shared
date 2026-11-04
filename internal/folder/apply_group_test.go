@@ -29,8 +29,12 @@ func TestApplyGroup64IncomingOneFrame(t *testing.T) {
 	}
 	var barrier sync.WaitGroup
 	barrier.Add(64)
-	frames := 0
-	n.f.SetPersistenceProbe(PersistenceProbe{Phase: func(_, phase string) {
+	frames, logWrites := 0, 0
+	n.f.SetPersistenceProbe(PersistenceProbe{Write: func(kind, _ string, _ int, _ error) {
+		if kind == "log" {
+			logWrites++
+		}
+	}, Phase: func(_, phase string) {
 		if phase == "G4" {
 			frames++
 		}
@@ -38,8 +42,8 @@ func TestApplyGroup64IncomingOneFrame(t *testing.T) {
 	done := 0
 	progress := &groupProgress{done: func() {
 		files, _ := n.f.Snapshot()
-		if len(files) != 64 || frames != 1 {
-			t.Errorf("early/partial Done: %d files, %d frames", len(files), frames)
+		if len(files) != 64 || (frames != 1 || logWrites != 1) {
+			t.Errorf("early/partial Done: %d files, %d phases, %d log writes", len(files), frames, logWrites)
 		}
 		done++
 	}}
@@ -49,8 +53,8 @@ func TestApplyGroup64IncomingOneFrame(t *testing.T) {
 		_, e := io.WriteString(w, "body")
 		return e
 	}, progress)
-	if a != 64 || b != 0 || frames != 1 || done != 64 {
-		t.Fatalf("applied=%d failed=%d frames=%d Done=%d", a, b, frames, done)
+	if a != 64 || b != 0 || frames != 1 || logWrites != 1 || done != 64 {
+		t.Fatalf("applied=%d failed=%d frames=%d writes=%d Done=%d", a, b, frames, logWrites, done)
 	}
 	reopened, err := Open(n.f.Root, n.f.statePath, "A", n.f.log)
 	if err != nil {
