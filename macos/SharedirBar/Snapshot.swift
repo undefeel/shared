@@ -9,12 +9,12 @@ enum Snapshot {
         try? await Task.sleep(for: .seconds(2))
         await store.poll()
         let env = ProcessInfo.processInfo.environment
-        // SHAREDIR_SNAPSHOT_STATUS=file.json — подставить статус (для вёрстки
-        // состояний, которые трудно поймать вживую), SHAREDIR_SNAPSHOT_TAB=activity.
+        // SHAREDIR_SNAPSHOT_STATUS=file.json — подставить старый или новый status
+        // (включая folder_error / scan_error), SHAREDIR_SNAPSHOT_TAB=activity.
         if let path = env["SHAREDIR_SNAPSHOT_STATUS"] {
             for file in path.split(separator: ",").map(String.init) {
                 if let data = FileManager.default.contents(atPath: file),
-                   let st = try? StatusDecoder.shared.decode(DaemonStatus.self, from: data) {
+                   let st = try? StatusLogic.decode(data) {
                     store.inject(st)
                 }
                 try? await Task.sleep(for: .milliseconds(400))

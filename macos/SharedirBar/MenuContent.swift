@@ -14,14 +14,18 @@ struct MenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            switch store.phase {
-            case .setup:
+            if store.status.folderError != nil {
+                MenuDivider()
+                blockedFolder
+            } else {
+                switch store.phase {
+                case .setup:
                 MenuDivider()
                 SetupView()
-            case .notRunning, .starting:
+                case .notRunning, .starting:
                 MenuDivider()
                 NotRunningView()
-            default:
+                default:
                 if let total = store.totalProgress {
                     ProgressView(value: total.fraction)
                         .progressViewStyle(MeterStyle(active: !store.status.paused, height: 5))
@@ -52,6 +56,7 @@ struct MenuContent: View {
                 case .activity:
                     ActivityView()
                 }
+                }
             }
             if let err = store.lastError {
                 Text(err)
@@ -67,6 +72,19 @@ struct MenuContent: View {
         .foregroundStyle(labelColor)
         .padding(6)
         .frame(width: 320)
+        .confirmationDialog(
+            confirmationTitle,
+            isPresented: Binding(
+                get: { store.folderConfirmation != nil },
+                set: { if !$0 { store.folderConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(confirmationButton, role: .destructive) { store.confirmFolder() }
+            Button(L("Cancel"), role: .cancel) { store.folderConfirmation = nil }
+        } message: {
+            Text(confirmationMessage)
+        }
     }
 
     // MARK: Заголовок
@@ -78,7 +96,7 @@ struct MenuContent: View {
                 Text(headline).font(.system(size: 11)).foregroundStyle(secondaryColor)
             }
             Spacer()
-            if store.status.running {
+            if store.status.running && store.status.folderError == nil {
                 Toggle(L("Sync"), isOn: Binding(
                     get: { !store.status.paused },
                     set: { store.setPaused(!$0) }
@@ -96,6 +114,7 @@ struct MenuContent: View {
 
     private var headline: String {
         let st = store.status
+        if let key = StatusLogic.headlineKey(for: st) { return L(key) }
         switch store.phase {
         case .setup: return L("Setup needed")
         case .starting: return L("Starting…")
@@ -118,6 +137,60 @@ struct MenuContent: View {
             }
             return L("Up to date")
         }
+    }
+
+    private var blockedFolder: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(L("Folder sync stopped"), systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text(folderErrorDescription)
+                .font(.system(size: 11)).foregroundStyle(secondaryColor)
+                .fixedSize(horizontal: false, vertical: true)
+            if !store.status.folder.isEmpty {
+                Text(Format.abbreviatedPath(store.status.folder))
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(secondaryColor)
+                    .lineLimit(2).truncationMode(.middle)
+            }
+            HStack(spacing: 8) {
+                Button(L("Start over…")) { store.requestFolderConfirmation(.reset) }
+                    .controlSize(.small)
+                Button(L("Keep this folder…")) { store.requestFolderConfirmation(.rebind) }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+    }
+
+    private var folderErrorDescription: String {
+        switch store.status.folderError?.code {
+        case "root_empty": return L("The folder is empty, but it had files before. Sync is stopped until you choose what to do.")
+        case "root_unavailable": return L("The folder is unavailable. Reconnect its drive or choose an action below.")
+        case "root_changed": return L("The folder at this path has changed. Choose how to continue.")
+        case "commit_failed": return L("Changes could not be safely saved. Sync is stopped until you choose what to do.")
+        default: return L("Sync is stopped until you choose what to do.")
+        }
+    }
+
+    private var confirmationTitle: String {
+        guard let c = store.folderConfirmation else { return "" }
+        return L(c.action == .reset ? "Start over with this folder?" : "Use this folder as the same one?")
+    }
+
+    private var confirmationButton: String {
+        guard let c = store.folderConfirmation else { return "" }
+        return L(c.action == .reset ? "Start over" : "Keep this folder")
+    }
+
+    private var confirmationMessage: String {
+        guard let c = store.folderConfirmation else { return "" }
+        if c.action == .reset {
+            return L("The old index will be archived. Files here and on other devices will stay. Their contents will sync as new and may create conflict copies.")
+        }
+        if c.code == "root_empty" {
+            return L("The index will be kept. Because this folder is empty, all its files will be deleted from other devices.")
+        }
+        return L("The index will be kept. Anything missing from this folder will be deleted from other devices.")
     }
 
     // MARK: Папка
