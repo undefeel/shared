@@ -156,6 +156,8 @@ type Folder struct {
 	scanMu           sync.Mutex
 	applyMu          sync.Mutex
 	applyCoordinator *groupCoordinator
+	downloadMu       sync.Mutex
+	downloadPool     *downloadPool
 	// Lock order: scanMu → saveMu → mu. I/O never holds mu.
 	saveMu            sync.Mutex
 	generation        uint64 // saveMu; attempts, including failed saves

@@ -175,6 +175,86 @@ func TestOldRunnerCannotCommitAfterConfirm(t *testing.T) {
 	}
 }
 
+func TestStopFolderCancelsAndDrainsBlockedDownload(t *testing.T) {
+	d := folderDaemon(t)
+	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	started, observedCancel, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	pr := &peerRunner{cancel: cancel, st: PeerStatus{ID: "peer"}}
+	d.peers["peer"] = pr
+	hash := sha256.Sum256([]byte("incoming"))
+	d.workers.Add(1)
+	go func() {
+		defer d.workers.Done()
+		defer close(done)
+		_, _ = d.folder.ApplyRemote(ctx, "peer", []folder.FileInfo{{Name: "late", Size: 8, Hash: hex.EncodeToString(hash[:]), Version: folder.Vector{"peer": 1}}}, func(ctx context.Context, _ folder.FileInfo, _ io.Writer) error {
+			close(started)
+			<-ctx.Done()
+			close(observedCancel)
+			return ctx.Err()
+		}, nil)
+	}()
+	<-started
+	d.lifecycle.Lock()
+	d.stopFolder()
+	d.lifecycle.Unlock()
+	select {
+	case <-observedCancel:
+	default:
+		t.Fatal("runner cancellation was not drained")
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("runner returned before stopFolder completed")
+	}
+	if _, err := os.Stat(filepath.Join(d.Config().Folder, "late")); !os.IsNotExist(err) {
+		t.Fatalf("late mutation remains: %v", err)
+	}
+	if _, failed := d.folder.ApplyRemote(context.Background(), "peer", []folder.FileInfo{{Name: "resume", Size: 8, Hash: hex.EncodeToString(hash[:]), Version: folder.Vector{"peer": 1}}}, func(_ context.Context, _ folder.FileInfo, w io.Writer) error {
+		_, err := w.Write([]byte("incoming"))
+		return err
+	}, nil); failed != 0 {
+		t.Fatalf("resume failed: %d", failed)
+	}
+}
+
+func TestUnpairWaitsForRunnerDrainWithoutDaemonLock(t *testing.T) {
+	d := folderDaemon(t)
+	id := d.ID.ID
+	d.mu.Lock()
+	d.cfg.Peers = append(d.cfg.Peers, config.Peer{ID: id, Name: "temporary"})
+	d.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	runnerDone := make(chan struct{})
+	pr := &peerRunner{cancel: cancel, done: runnerDone, st: PeerStatus{ID: id}}
+	d.peers[id] = pr
+	started := make(chan struct{})
+	d.workers.Add(1)
+	go func() {
+		defer d.workers.Done()
+		<-ctx.Done()
+		close(started)
+		time.Sleep(20 * time.Millisecond)
+		close(runnerDone)
+	}()
+	if err := d.Unpair(id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("unpair returned before runner cancellation/drain")
+	}
+	select {
+	case <-runnerDone:
+	default:
+		t.Fatal("unpair returned before runner done channel")
+	}
+}
+
 type handlerTransport struct{ h http.Handler }
 
 func (h handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {

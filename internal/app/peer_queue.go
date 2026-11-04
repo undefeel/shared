@@ -95,11 +95,14 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		fi.Disk = ""
 		fi.Version = fi.Version.Copy()
 		record, exists := index.records[fi.Name]
+		if exists && record.done {
+			continue
+		}
 		if exists {
 			cmp := record.info.Version.Compare(fi.Version)
-			if cmp == folder.Greater {
+			if record.info.Name != "" && cmp == folder.Greater {
 				fi = record.info
-			} else if !samePeerVersion(record.info, fi) {
+			} else if record.info.Name == "" || !samePeerVersion(record.info, fi) {
 				record.info = fi
 				record.done = false
 			}
@@ -118,6 +121,7 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		}
 		if !queued && len(q.pending) >= peerPendingLimit {
 			left = true
+			index.records[fi.Name] = peerIndexRecord{}
 			continue
 		}
 		q.pending[key] = peerPending{info: fi}
@@ -208,6 +212,9 @@ func (q *peerQueue) applied(peer, epoch string, info folder.FileInfo) {
 		if index, exists := q.indexes[peer]; exists && index.epoch == epoch {
 			if record, exists := index.records[info.Name]; exists && samePeerVersion(record.info, info) {
 				record.done = true
+				// Completion only needs the name key and bit. Drop the large
+				// FileInfo/Vector copy; replay will not enqueue this record.
+				record.info = folder.FileInfo{}
 				index.records[info.Name] = record
 				q.indexes[peer] = index
 				complete := true
@@ -233,6 +240,33 @@ func (q *peerQueue) cursor(peer string) (epoch string, cursor uint64, ok bool) {
 	defer q.mu.Unlock()
 	c, ok := q.cursors[peer]
 	return c.epoch, c.cursor, ok
+}
+
+func (q *peerQueue) activeEpoch(peer string) string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.indexes[peer].epoch
+}
+
+func (q *peerQueue) activeCursor(peer string) uint64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.indexes[peer].cursor
+}
+
+func (q *peerQueue) replaceName(peer, epoch string, cursor uint64, fi folder.FileInfo) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	index, ok := q.indexes[peer]
+	if !ok || index.epoch != epoch || index.cursor != cursor {
+		return false
+	}
+	fi.Disk = ""
+	fi.Version = fi.Version.Copy()
+	index.records[fi.Name] = peerIndexRecord{info: fi}
+	q.indexes[peer] = index
+	q.pending[peerItemKey{peer, epoch, fi.Name}] = peerPending{info: fi}
+	return true
 }
 
 func (q *peerQueue) canPoll(peer string) bool {

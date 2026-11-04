@@ -572,7 +572,7 @@ func (c *Client) Fetcher(addr string) folder.Fetcher {
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer closeResponseOnCancel(ctx, resp.Body)()
 		encoding := resp.Header.Get("Content-Encoding")
 		if encoding == "" {
 			encoding = "identity"
@@ -586,6 +586,16 @@ func (c *Client) Fetcher(addr string) folder.Fetcher {
 		}
 		return nil
 	}
+}
+
+// closeResponseOnCancel makes cancellation close an active response body even
+// when Read is blocked, and waits for the Close callback before returning.
+func closeResponseOnCancel(ctx context.Context, body io.ReadCloser) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	closeBody := func() { once.Do(func() { _ = body.Close(); close(done) }) }
+	stop := context.AfterFunc(ctx, closeBody)
+	return func() { stop(); closeBody(); <-done }
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }

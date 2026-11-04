@@ -55,6 +55,12 @@ func TestPeerQueueFailureDoesNotRepeatAcceptedIndex(t *testing.T) {
 			t.Fatalf("backoff(%d) = %v", attempt, d)
 		}
 	}
+	if d := peerRetryDelay(2); d < 500*time.Millisecond || d > 600*time.Millisecond {
+		t.Fatalf("second retry did not back off exponentially: %v", d)
+	}
+	if d := peerRetryDelay(3); d < time.Second || d > 1200*time.Millisecond {
+		t.Fatalf("third retry did not back off exponentially: %v", d)
+	}
 }
 
 func TestPeerQueueNewerVersionReplacesPending(t *testing.T) {
@@ -140,6 +146,14 @@ func TestPeerQueueOverflowContinuationAppliesEachRecordOnce(t *testing.T) {
 	if got := q.due("p", time.Now(), 0); len(got) != 0 {
 		t.Fatalf("applied records remained queued: %d", len(got))
 	}
+	q.mu.Lock()
+	for name, rec := range q.indexes["p"].records {
+		if rec.info.Name != "" || !rec.done {
+			q.mu.Unlock()
+			t.Fatalf("completed %s retained a full FileInfo or lost completion: %#v", name, rec)
+		}
+	}
+	q.mu.Unlock()
 	if !q.accept("p", "epoch", 11, true, files) {
 		t.Fatal("replayed completed index was not accepted")
 	}

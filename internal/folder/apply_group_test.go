@@ -28,7 +28,11 @@ func TestApplyGroup64IncomingOneFrame(t *testing.T) {
 		remote = append(remote, r)
 	}
 	var barrier sync.WaitGroup
-	barrier.Add(64)
+	// The pool bounds network concurrency; all 64 may still enter one durable
+	// coordinator group as completed downloads make room for later workers.
+	barrier.Add(6)
+	var fetchMu sync.Mutex
+	fetches := 0
 	frames, logWrites := 0, 0
 	n.f.SetPersistenceProbe(PersistenceProbe{Write: func(kind, _ string, _ int, _ error) {
 		if kind == "log" {
@@ -48,8 +52,14 @@ func TestApplyGroup64IncomingOneFrame(t *testing.T) {
 		done++
 	}}
 	a, b := n.f.ApplyRemote(context.Background(), "B", remote, func(_ context.Context, _ FileInfo, w io.Writer) error {
-		barrier.Done()
-		barrier.Wait()
+		fetchMu.Lock()
+		fetches++
+		firstSix := fetches <= 6
+		fetchMu.Unlock()
+		if firstSix {
+			barrier.Done()
+			barrier.Wait()
+		}
 		_, e := io.WriteString(w, "body")
 		return e
 	}, progress)

@@ -178,7 +178,7 @@ func (f *Folder) initRoot(data []byte) error {
 
 // Close requires callers to drain watcher and peer operations first.
 func (f *Folder) Close() error {
-	f.drainApply()
+	f.DrainApply()
 	var err error
 	if f.store != nil {
 		err = f.store.close()
@@ -201,7 +201,7 @@ var ErrStaleToken = errors.New("stale folder confirmation token")
 
 // SetConfiguredRoot serializes path changes with all tree commits.
 func (f *Folder) SetConfiguredRoot(configuredPath string) error {
-	f.drainApply()
+	f.DrainApply()
 	p, err := filepath.Abs(configuredPath)
 	if err != nil {
 		return err
@@ -221,7 +221,7 @@ func (f *Folder) SetConfiguredRoot(configuredPath string) error {
 // Confirm requires callers to cancel and drain old runners and watchers first.
 // Work on a private candidate so readers continue seeing the latch until durable success.
 func (f *Folder) Confirm(token, action, configuredPath string) error {
-	f.drainApply()
+	f.DrainApply()
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	blocked := f.Blocked()
