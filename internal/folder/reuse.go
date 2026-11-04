@@ -3,13 +3,16 @@ package folder
 import (
 	"context"
 	"errors"
-	"fmt"
+
 	"os"
 )
 
 func (f *Folder) reuseCandidates(fi FileInfo) []FileInfo {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.contentNames == nil {
+		f.rebuildContentNames()
+	}
 	var out []FileInfo
 	seen := map[string]bool{}
 	add := func(name string) {
@@ -49,6 +52,10 @@ func (f *Folder) hasReusableContent(fi FileInfo) bool {
 }
 
 func (f *Folder) downloadOrReuse(ctx context.Context, fi FileInfo, fetch Fetcher) (string, error) {
+	return f.downloadOrReuseWith(ctx, fi, fetch, f.root.cloneFile)
+}
+
+func (f *Folder) downloadOrReuseWith(ctx context.Context, fi FileInfo, fetch Fetcher, clone func(*os.File, string, int64) (*os.File, error)) (string, error) {
 	for _, candidate := range f.reuseCandidates(fi) {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -66,24 +73,34 @@ func (f *Folder) downloadOrReuse(ctx context.Context, fi FileInfo, fetch Fetcher
 			continue
 		}
 		name := tmpPrefix + captureToken()
-		dst, err := f.root.create(name)
+		dst, err := clone(src, name, fi.Size)
 		if err != nil {
+			now, e := src.Stat()
 			src.Close()
+			if errors.Is(err, errCloneChanged) || (e == nil && scanStatFromInfo(st) != scanStatFromInfo(now)) {
+				continue
+			}
 			return "", err
 		}
-		err = cloneInto(src, dst, fi.Size)
+		_, err = src.Seek(0, 0)
 		if err == nil {
 			after, now, _, e := stableHash(src)
 			if e != nil || after != before || !sameFileInfo(st, now) {
-				err = errors.New("reuse source changed")
+				err = errCloneChanged
 			}
 		}
 		if err == nil {
-			got, info, _, e := stableHash(dst)
-			if e != nil || got != fi.Hash || info.Size() != fi.Size {
-				err = fmt.Errorf("reused content verification failed")
+			_, err = dst.Seek(0, 0)
+			if err == nil {
+				got, info, _, e := stableHash(dst)
+				if e != nil {
+					err = e
+				} else if got != fi.Hash || info.Size() != fi.Size {
+					err = errCloneChanged
+				}
 			}
 		}
+
 		src.Close()
 		ce := dst.Close()
 		if err == nil {
@@ -93,7 +110,7 @@ func (f *Folder) downloadOrReuse(ctx context.Context, fi FileInfo, fetch Fetcher
 			return name, nil
 		}
 		_ = f.root.unlink(name, false)
-		if errors.Is(err, os.ErrInvalid) {
+		if !errors.Is(err, errCloneChanged) {
 			return "", err
 		}
 	}

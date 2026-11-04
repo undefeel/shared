@@ -340,15 +340,7 @@ func (f *Folder) tick(v Vector) uint64 {
 
 // notify отмечает изменение индекса и будит ожидающих. Вызывать под mu.
 func (f *Folder) notify() {
-	f.contentNames = make(map[string]map[string]struct{})
-	for name, fi := range f.files {
-		if fi != nil && !fi.Deleted && fi.Hash != "" {
-			if f.contentNames[fi.Hash] == nil {
-				f.contentNames[fi.Hash] = make(map[string]struct{})
-			}
-			f.contentNames[fi.Hash][name] = struct{}{}
-		}
-	}
+	f.rebuildContentNames()
 	f.seq++
 	close(f.changed)
 	f.changed = make(chan struct{})
@@ -680,4 +672,16 @@ func (h *persistHooks) fullSyncDevicesWithOps(files []*os.File, phase string, op
 		seen[dev] = true
 	}
 	return nil
+}
+
+func (f *Folder) rebuildContentNames() {
+	f.contentNames = make(map[string]map[string]struct{})
+	for name, fi := range f.files {
+		if fi != nil && !fi.Deleted && fi.Hash != "" {
+			if f.contentNames[fi.Hash] == nil {
+				f.contentNames[fi.Hash] = make(map[string]struct{})
+			}
+			f.contentNames[fi.Hash][name] = struct{}{}
+		}
+	}
 }

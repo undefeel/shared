@@ -433,16 +433,6 @@ func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint6
 	if !r.Deleted {
 		// Stage in the target parent so intent/recovery names remain siblings.
 		staged := path.Join(path.Dir(disk), tmpPrefix+captureToken())
-		incoming, err = f.root.create(staged)
-		if err != nil {
-			return st, err
-		}
-		cleanup(func() { incoming.Close() })
-		cleanup(func() {
-			if _, e := os.Stat(f.intentPath()); os.IsNotExist(e) {
-				_ = f.root.unlink(staged, false)
-			}
-		})
 		var source *os.File
 		if tmp != "" {
 			source, err = f.root.openRead(tmp)
@@ -453,13 +443,19 @@ func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint6
 		if err != nil {
 			return st, err
 		}
-		err = cloneInto(source, incoming, r.Size)
+		incoming, err = f.root.cloneFile(source, staged, r.Size)
 		if tmp != "" {
 			source.Close()
 		}
 		if err != nil {
 			return st, err
 		}
+		cleanup(func() { incoming.Close() })
+		cleanup(func() {
+			if _, e := os.Stat(f.intentPath()); os.IsNotExist(e) {
+				_ = f.root.unlink(staged, false)
+			}
+		})
 		var localMode os.FileMode
 		if info != nil {
 			localMode = info.Mode().Perm()
