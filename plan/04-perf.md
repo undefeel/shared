@@ -43,10 +43,48 @@
 - R19 Логи: ограничение размера, дедуп повторов; неудачные переподключения — раз в N минут.
 - R20 Измеримая приёмка: тест/бенчмарк синхронизации ≥2000 мелких файлов между двумя in-process демонами со счётчиками байт записи индекса и числа flush (через persistHooks), пороги заданы в проекте.
 
+## Решения владельца по проекту 04-01 (2026-11-04)
+- R3: один FULLFSYNC на группу (на устройство), а не на файл — осознанное ослабление этапа 02. Детали — раздел «Решения владельца по проекту» в `plan/design/perf.md`.
+- Волны A → B → C по выгоде, после каждой — замер и отчёт.
+
 ## Задачи
 | ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
 | 04-01 | Проект: `plan/design/perf.md` + разбиение на задачи | L3 | sol | — | done | `task_8d318dcf4fc4` | `ctx_6b241d62bd61` |
+
+
+### Волна A — фундамент и сеть
+| ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
+|---|---|---|---|---|---|---|---|
+| 04-10 | codec schema=3 | L3 | sol | — | todo | | |
+| 04-11 | append/replay | L3 | sol | 04-10 | todo | | |
+| 04-12 | compaction | L3 | sol | 04-11 | todo | | |
+| 04-13 | типы group-intent | L3 | sol | 04-10 | todo | | |
+| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | | |
+| 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | | |
+| 04-16 | миграция helpers | L3 | sol | 04-15 | todo | | |
+| 04-17 | подключить store Open/save | L3 | sol | 04-16 | todo | | |
+| 04-18 | control persistence | L3 | sol | 04-17 | todo | | |
+| 04-19 | commit группы | L3 | sol | 04-18 | todo | | |
+| 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | | |
+| 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | | |
+| 04-22 | connect group apply | L3 | sol | 04-21 | todo | | |
+| 04-23 | config concurrency | L2 | luna | — | todo | | |
+| 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | | |
+| 04-25 | handshake primitive | L2 | luna | — | todo | | |
+| 04-26 | frame codec | L2 | luna | 04-25 | todo | | |
+| 04-27 | compression helper | L2 | luna | 04-26 | todo | | |
+| 04-28 | /files server | L3 | sol | 04-27 | todo | | |
+| 04-29 | /files client | L2 | luna | 04-28 | todo | | |
+| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | | |
+| 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | | |
+| 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | | |
+| 04-50 | bounded log writer | L2 | luna | — | todo | | |
+| 04-52 | macOS error UI | L2 | luna | 04-32 | todo | | |
+| 04-53 | QML error UI | L2 | luna | 04-32 | todo | | |
+| 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | | |
+
+Волны B (04-33…04-41) и C (04-42…04-49, 04-51, 04-55…04-57) — задачи и spec создаются после замера волны A. Ownership и тесты каждой задачи — таблица «Задачи реализации» в `plan/design/perf.md`.
 
 Реализация — задачи 04-10…, их создам по разбиению из 04-01 (каждая ≤5 файлов, ~300 строк diff). Ревью: L1–L2 — luna-low, L3 — luna high; проект 04-01 проверяю сам.
 
