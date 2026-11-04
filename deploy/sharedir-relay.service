@@ -11,7 +11,9 @@ DynamicUser=yes
 StateDirectory=sharedir-relay
 Restart=on-failure
 RestartSec=5
-LimitNOFILE=65536
+LimitNOFILE=4096
+MemoryMax=512M
+TasksMax=512
 # Песочница: relay нужны только сеть и свой каталог состояния.
 NoNewPrivileges=yes
 CapabilityBoundingSet=
