@@ -134,3 +134,43 @@ func TestReuseSymlinkDonorFallsBack(t *testing.T) {
 		t.Fatal("followed donor symlink")
 	}
 }
+
+func TestReuseDurableVectorAndRestartIndex(t *testing.T) {
+	n := newNode(t, "A")
+	defer func() { n.f.Close() }()
+	n.write(t, "donor", "body", time.Unix(100, 0))
+	if e := n.f.Scan(); e != nil {
+		t.Fatal(e)
+	}
+	root, state, logger := n.f.Root, n.f.statePath, n.f.log
+	r := incoming("body", Vector{"B": 1}, 200e9)
+	a, b := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, func(context.Context, FileInfo, io.Writer) error { t.Fatal("fetched"); return nil }, nil)
+	if a != 1 || b != 0 {
+		t.Fatalf("apply=%d/%d", a, b)
+	}
+	if e := n.f.Close(); e != nil {
+		t.Fatal(e)
+	}
+	reopened, e := Open(root, state, "A", logger)
+	if e != nil {
+		t.Fatal(e)
+	}
+	n.f = reopened
+	idx, _ := n.f.Snapshot()
+	found := false
+	for _, fi := range idx {
+		if fi.Name == "x" {
+			found = true
+			if fi.Version.Compare(r.Version) != Equal {
+				t.Fatal("vector lost")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("target lost")
+	}
+	r.Name = "next"
+	if !n.f.hasReusableContent(r) {
+		t.Fatal("restart index unavailable")
+	}
+}

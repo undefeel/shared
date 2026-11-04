@@ -420,9 +420,6 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 	if groups == 0 {
 		t.Errorf("pipeline mean group size below 32: files=%d groups=%d", n, groups)
 	}
-	if false {
-		t.Errorf("probe byte accounting mismatch")
-	}
 	if result.intent > 4<<20 {
 		t.Errorf("intent bytes %d >4MiB", result.intent)
 	}

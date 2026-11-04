@@ -3,7 +3,6 @@ package folder
 import (
 	"context"
 	"errors"
-
 	"os"
 )
 
