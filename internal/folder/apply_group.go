@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -93,7 +94,9 @@ func (f *Folder) applyGroup(requests []*groupRequest) error {
 		}
 	}
 	g := groupIntent{Schema: storeSchema, StoreID: f.store.state.StoreID, BaseGeneration: f.store.state.Generation, Generation: f.store.state.Generation + 1, ConfirmedGeneration: f.confirmedGeneration, Binding: f.binding, Clock: batch.clock}
-	_, _ = rand.Read(g.TxID[:])
+	if _, err := rand.Read(g.TxID[:]); err != nil {
+		return fmt.Errorf("group tx id: %w", err)
+	}
 	var trees []*commitTree
 	var dirs []*os.File
 	for _, req := range requests {
