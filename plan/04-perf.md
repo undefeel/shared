@@ -56,7 +56,7 @@
 ### Волна A — фундамент и сеть
 | ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
-| 04-10 | codec schema=3 | L3 | sol | — | in_progress | `task_e0012807b32a` | `ctx_f30215cc8b18` |
+| 04-10 | codec schema=3 | L3 | sol | — | review | `task_e0012807b32a` | `ctx_f30215cc8b18` |
 | 04-11 | append/replay | L3 | sol | 04-10 | todo | `task_424caacccdd1` |  |
 | 04-12 | compaction | L3 | sol | 04-11 | todo | `task_1afb877b0106` |  |
 | 04-13 | типы group-intent | L3 | sol | 04-10 | todo | `task_2b2c1fbdeff6` |  |
@@ -71,7 +71,7 @@
 | 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_879c6c7a7563` |  |
 | 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_7c52a6713b09` |  |
-| 04-25 | handshake primitive | L2 | luna | — | in_progress | `task_8a511af85279` | `ctx_a2d77225581a` |
+| 04-25 | handshake primitive | L2 | luna | — | review | `task_8a511af85279` | `ctx_a2d77225581a` |
 | 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b5801286b17` |  |
 | 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_20fe2cf8cbf4` |  |
 | 04-28 | /files server | L3 | sol | 04-27 | todo | `task_568d72350beb` |  |
