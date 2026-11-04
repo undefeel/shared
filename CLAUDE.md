@@ -25,7 +25,7 @@
 | **L4** | Архитектура подсистемы или задача, которую L3 провалил | sonnet, затем стоп и вопрос мне | стоп и вопрос мне |
 
 Ревью — на ступень ниже исполнителя, только чтение, без запуска:
-- код уровней L1–L2 проверяет `codex-low` (luna, effort low);
+- код уровней L1–L2 проверяет gemini medium (antigravity, `--model gemini-3.8-flash-medium`; `plan/tools/review.sh <ID> gemini-medium`);
 - код L3 проверяет luna high;
 - тексты и сверку реализации с документом идей проверяет sonnet effort low.
 

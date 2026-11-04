@@ -79,14 +79,14 @@
 | 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_76b47f186047` |  |
 | 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_26fe36214891` |  |
 | 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_bf20451a38d3` |  |
-| 04-50 | bounded log writer | L2 | luna | — | in_progress | `task_9fc335af3492` | `ctx_25d91e4bfc39` |
+| 04-50 | bounded log writer | L2 | luna | — | review | `task_9fc335af3492` | `ctx_25d91e4bfc39` |
 | 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_705d5629db39` |  |
 | 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_d4afee100756` |  |
 | 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | `task_e2eff8412917` |  |
 
 Волны B (04-33…04-41) и C (04-42…04-49, 04-51, 04-55…04-57) — задачи и spec создаются после замера волны A. Ownership и тесты каждой задачи — таблица «Задачи реализации» в `plan/design/perf.md`.
 
-Реализация — задачи 04-10…, их создам по разбиению из 04-01 (каждая ≤5 файлов, ~300 строк diff). Ревью: L1–L2 — luna-low, L3 — luna high; проект 04-01 проверяю сам.
+Реализация — задачи 04-10…, их создам по разбиению из 04-01 (каждая ≤5 файлов, ~300 строк diff). Ревью: L1–L2 — gemini-medium, L3 — luna high; проект 04-01 проверяю сам.
 
 Критерии готовности этапа: R1–R20 реализованы или явно отложены с причиной; `go vet ./...`, `go test -race ./...`, `make build`, `make app` зелёные; бенчмарк R20 в порогах; Linux-тесты и проверка по `docs/power-loss-check.md` — за владельцем.
 - 04-10: бюджет codec расширен до ~550 строк с тестами (ответ на вопрос воркера), log frame encode/decode остаётся в 04-10.
