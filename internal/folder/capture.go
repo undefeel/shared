@@ -14,6 +14,8 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+var errCaptureIdentity = errors.New("capture inode changed")
+
 // capture holds a pinned parent, not a copy of the inode. The coordinator owns
 // serialization (scanMu -> saveMu -> mu), root/parent checks, post-capture hash
 // validation, intent persistence and directory flushes. Close never deletes data.
@@ -88,7 +90,7 @@ func (c *capture) restore(peer, hash string) (string, error) {
 }
 
 // discard is called only after the index is durably committed. The coordinator
-// must flush the parent afterwards, then remove and flush the transaction intent.
+// removes the intent next, then flushes the parent and state directories.
 // POSIX has no atomic unlink-if-inode: an external replacement between the
 // identity check and unlink remains an owner-accepted residual risk.
 func (c *capture) discard() error {
@@ -114,7 +116,7 @@ func (c *capture) discard() error {
 		same = *c.savedIdentity == (captureIdentity{uint64(st.Dev), uint64(st.Ino)})
 	}
 	if !same {
-		return fmt.Errorf("capture inode changed: %s", c.Recovery)
+		return fmt.Errorf("%w: %s", errCaptureIdentity, c.Recovery)
 	}
 	return unix.Unlinkat(int(c.parent.Fd()), path.Base(c.Recovery), 0)
 }

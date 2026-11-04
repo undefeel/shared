@@ -65,10 +65,18 @@ func TestCommitFlushOrder(t *testing.T) {
 		}
 		return nil
 	}
+	tree.discard = func() error { trace = append(trace, "discard"); return tree.capture.discard() }
+	tree.removeIntent = func(name string) error {
+		trace = append(trace, "remove-intent")
+		if _, err := os.Stat(f.Root + "/" + tree.capture.Recovery); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("intent removed before capture")
+		}
+		return os.Remove(name)
+	}
 	if err := runCommit(f, tree, p, func() { trace = append(trace, "publish") }); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"data", "intent", "dir", "dir", "dir", "index", "dir", "dir", "dir", "publish"}
+	want := []string{"data", "intent", "dir", "dir", "dir", "index", "dir", "publish", "discard", "remove-intent", "dir", "dir"}
 	if !reflect.DeepEqual(trace, want) {
 		t.Fatalf("trace %v", trace)
 	}
@@ -92,6 +100,15 @@ func commitSyncFailure(t *testing.T, fail int) {
 	f.persistHooks.syncFile = hook
 	f.persistHooks.syncDir = hook
 	err := runCommit(f, tree, p, func() { published = true; f.notify() })
+	if fail > 7 {
+		if err != nil || !published || f.Blocked() != nil {
+			t.Fatalf("cleanup failure: %v, published=%v blocked=%v", err, published, f.Blocked())
+		}
+		if _, err := os.Stat(f.intentPath()); err != nil {
+			t.Fatal("retry intent missing:", err)
+		}
+		return
+	}
 	if !errors.Is(err, fault) || published {
 		t.Fatalf("err=%v published=%v", err, published)
 	}
@@ -180,5 +197,65 @@ func TestCommitOpenCleansCommittedCapture(t *testing.T) {
 		if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("left recovery object %s: %v", name, err)
 		}
+	}
+}
+
+func TestCommitDiscardMismatchPublishesConflict(t *testing.T) {
+	f, tree, p := commitFixture(t)
+	mutate := tree.mutate
+	tree.mutate = func() error {
+		if err := mutate(); err != nil {
+			return err
+		}
+		// Model an external process replacing the captured directory entry.
+		replacement := f.Root + "/replacement"
+		if err := os.WriteFile(replacement, []byte("late writer"), 0600); err != nil {
+			return err
+		}
+		return os.Rename(replacement, f.Root+"/"+tree.capture.Recovery)
+	}
+	published := false
+	if err := runCommit(f, tree, p, func() { published = true }); err != nil {
+		t.Fatal(err)
+	}
+	if !published || f.Blocked() != nil {
+		t.Fatal("committed transaction blocked")
+	}
+	entries, err := os.ReadDir(f.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "sync-conflict") {
+			data, err := os.ReadFile(f.Root + "/" + entry.Name())
+			if err != nil || string(data) != "late writer" {
+				t.Fatalf("conflict %q: %v", data, err)
+			}
+			return
+		}
+	}
+	t.Fatal("missing conflict")
+}
+
+func TestCommitIntentRemoveFailurePublishesAndRecovers(t *testing.T) {
+	f, tree, p := commitFixture(t)
+	tree.removeIntent = func(string) error { return errors.New("remove failure") }
+	published := false
+	if err := runCommit(f, tree, p, func() { published = true; f.files[tree.intent.After.Name] = tree.intent.After }); err != nil {
+		t.Fatal(err)
+	}
+	if !published || f.Blocked() != nil {
+		t.Fatal("committed transaction blocked")
+	}
+	if _, err := os.Stat(f.intentPath()); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(f.Root, f.statePath, f.me, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := os.Stat(f.intentPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("intent not cleaned:", err)
 	}
 }

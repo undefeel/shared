@@ -1,6 +1,9 @@
 package folder
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // commitTree describes prepared data. mutate must use pinned parents and
 // no-replace operations, recheck captured bytes, and leave the intent on error.
@@ -12,10 +15,13 @@ type commitTree struct {
 	capture  *capture
 	dirs     []*os.File
 	mutate   func() error
+	// Optional per-transaction hooks for cleanup fault injection and tracing.
+	discard      func() error
+	removeIntent func(string) error
 }
 
 // commitLocked is shared by staged Scan and incoming transactions. publish runs
-// under mu only after all durable operations succeed; callers report Done after return.
+// under mu after the index is durable; cleanup failures cannot undo that commit.
 func (f *Folder) commitLocked(p persisted, tree *commitTree, publish func()) (err error) {
 	defer func() {
 		if err != nil {
@@ -66,27 +72,53 @@ func (f *Folder) commitLocked(p persisted, tree *commitTree, publish func()) (er
 	if err := f.persistLocked(p); err != nil {
 		return err
 	}
-	if tree != nil {
-		// Owner policy: capture, then intent, then parent and state flushes.
-		if tree.capture != nil {
-			if err := tree.capture.discard(); err != nil {
-				return err
-			}
-		}
-		if err := os.Remove(f.intentPath()); err != nil {
-			return err
-		}
-		if tree.capture != nil {
-			if err := flushDir(tree.capture.parent); err != nil {
-				return err
-			}
-		}
-		if err := f.syncIntentDir(); err != nil {
-			return err
-		}
-	}
 	f.mu.Lock()
 	publish()
 	f.mu.Unlock()
+	if tree != nil {
+		if cleanupErr := f.cleanupCommit(tree, flushDir); cleanupErr != nil && f.log != nil {
+			f.log.Printf("commit cleanup (will retry on Open): %v", cleanupErr)
+		}
+	}
 	return nil
+}
+
+func (f *Folder) cleanupCommit(tree *commitTree, flushDir func(*os.File) error) error {
+	// Owner policy: capture, then intent, then parent and state flushes.
+	if tree.capture != nil {
+		discard := tree.discard
+		if discard == nil {
+			discard = tree.capture.discard
+		}
+		if err := discard(); err != nil {
+			if !errors.Is(err, errCaptureIdentity) {
+				return err
+			}
+			if _, err = tree.capture.promote("recovery", ""); err != nil {
+				return err
+			}
+		}
+	}
+	remove := tree.removeIntent
+	if remove == nil {
+		remove = os.Remove
+	}
+	if err := remove(f.intentPath()); err != nil {
+		return err
+	}
+	var err error
+	if tree.capture != nil {
+		err = flushDir(tree.capture.parent)
+	}
+	if err == nil {
+		err = f.syncIntentDir()
+	}
+	if err != nil {
+		// Recreate the retry marker if a post-unlink flush failed. Even if
+		// its flush fails too, leave the renamed intent available for Open.
+		if restoreErr := f.writeIntent(tree.intent); restoreErr != nil && f.log != nil {
+			f.log.Printf("restore cleanup intent: %v", restoreErr)
+		}
+	}
+	return err
 }
