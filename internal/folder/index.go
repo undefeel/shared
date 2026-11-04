@@ -144,13 +144,14 @@ type Folder struct {
 	durableGeneration uint64       // saveMu; advances only after directory flush
 	persistHooks      persistHooks // set before concurrent use, for fault injection
 
-	mu       sync.Mutex
-	files    map[string]*FileInfo
-	clock    uint64
-	seq      uint64
-	changed  chan struct{}
-	lastScan time.Time
-	ignore   []string
+	mu        sync.Mutex
+	files     map[string]*FileInfo
+	clock     uint64
+	seq       uint64
+	changed   chan struct{}
+	lastScan  time.Time
+	ignore    []string
+	hashCache map[string]scanHashCache
 }
 
 type persistHooks struct {
@@ -176,6 +177,7 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 		me:        me,
 		log:       logger,
 		files:     map[string]*FileInfo{},
+		hashCache: map[string]scanHashCache{},
 		// seq стартует со времени запуска: клиент, помнящий seq прошлого
 		// процесса, сразу получит свежий индекс.
 		seq:     uint64(time.Now().UnixNano()),
@@ -229,6 +231,11 @@ func (f *Folder) save() error {
 		p.Files = append(p.Files, &c)
 	}
 	f.mu.Unlock()
+	return f.persistLocked(p)
+}
+
+// persistLocked writes one immutable snapshot; the caller holds saveMu.
+func (f *Folder) persistLocked(p persisted) error {
 	sort.Slice(p.Files, func(i, j int) bool { return p.Files[i].Name < p.Files[j].Name })
 	marshal := f.persistHooks.marshal
 	if marshal == nil {
