@@ -134,7 +134,7 @@ $(if [[ "$MODE" == part ]]; then echo "Run go vet and the tests of your own pack
 SPEC
 
 out="$(orca orchestration worker-start --spec-file "$S" --task-title "$TITLE" \
-        --worktree current --agent codex --model gpt-6-luna --effort high --json)" || { echo "$out"; exit 1; }
+        --worktree current --agent codex --model gpt-6-luna --effort medium --json)" || { echo "$out"; exit 1; }
 ds="$(jq -r '.result.dispatchId // .result.dispatch.id // .dispatchId // empty' <<<"$out")"
 [[ -n "$ds" ]] || { echo "$out"; exit 1; }
 echo "lead: started implementer $ds ($TITLE)"

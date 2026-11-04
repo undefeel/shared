@@ -2,7 +2,7 @@
 # Ревью задачи (только чтение) в worktree её воркера: plan/tools/review.sh <ID> [luna|luna-low|gemini-medium(=flash-high)]
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
-ID="$1"; EF=high; [[ "${2:-luna}" == luna-low ]] && EF=low
+ID="$1"; EF=medium; [[ "${2:-luna}" == luna-low ]] && EF=low
 AGENT=(--agent codex --model gpt-6-luna --effort "$EF")
 [[ "${2:-}" == gemini-medium ]] && AGENT=(--agent antigravity --model gemini-3.8-flash-high)
 WT="$(dirname "$ROOT")/t$ID"; BR="undefeel/t$ID"

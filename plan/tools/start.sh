@@ -24,7 +24,7 @@ case "$base" in
   gemini|antigravity) agent=(--agent antigravity)
        [[ -n "$effort_override" ]] && { echo "Ошибка: у antigravity нет --effort (нужен --model)" >&2; exit 2; } ;;
   haiku)  agent=(--agent claude --model claude-haiku-5-5);  effort=medium ;;
-  luna)   agent=(--agent codex  --model gpt-6-luna);        effort=high ;;
+  luna)   agent=(--agent codex  --model gpt-6-luna);        effort=medium ;;
   sonnet) agent=(--agent claude --model claude-sonnet-5-5); effort=medium ;;
   sol)    agent=(--agent codex  --model gpt-6.1-sol);       effort=medium ;;
   *) echo "Ошибка: неизвестный исполнитель '$EXEC'" >&2; exit 2 ;;
