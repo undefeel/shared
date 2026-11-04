@@ -221,13 +221,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (d *Daemon) watchLoop(ctx context.Context) {
 	generation := d.folder.ConfirmedGeneration()
 	trigger := make(chan struct{}, 1)
-	if err := d.folder.Watch(ctx, func() {
+	watchStop, watcherDone, err := d.folder.Watch(ctx, func() {
 		select {
 		case trigger <- struct{}{}:
 		default:
 		}
-	}); err != nil {
+	})
+	if err != nil {
 		d.Log.Printf("вотчер не запущен, только периодический скан: %v", err)
+	} else {
+		defer func() {
+			watchStop()
+			<-watcherDone
+		}()
 	}
 	tick := time.NewTicker(rescanInterval)
 	defer tick.Stop()
