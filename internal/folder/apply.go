@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"golang.org/x/sys/unix"
 	"io"
+	"math"
 	"os"
 	"path"
+	"strings"
 )
 
 // Fetcher скачивает содержимое файла fi у пира в w.
@@ -91,6 +93,11 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 	for i := range remote {
 		r := remote[i]
 		r.Disk = ""
+		if !r.Deleted && (r.Size < 0 || !validSHA256(r.Hash)) {
+			f.log.Printf("%s: пропущена некорректная запись %q (размер или SHA-256)", peer, r.Name)
+			failed++
+			continue
+		}
 		if !validName(r.Name) {
 			f.log.Printf("%s: пропущен недопустимый путь %q", peer, r.Name)
 			failed++
@@ -112,6 +119,11 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 			continue
 		}
 		st := step{l, r, act}
+		if st.needsDownload() && r.Size > math.MaxInt64-bytes {
+			f.log.Printf("%s: переполнение размера плана для %q", peer, r.Name)
+			failed++
+			continue
+		}
 		steps = append(steps, st)
 		if act != mergeOnly {
 			files++
@@ -471,22 +483,81 @@ func (f *Folder) commitApply(next map[string]*FileInfo, clock uint64, tree *comm
 }
 
 func (f *Folder) download(ctx context.Context, r FileInfo, fetch Fetcher) (string, error) {
+	if r.Size < 0 || !validSHA256(r.Hash) {
+		return "", errors.New("некорректный размер или SHA-256")
+	}
 	name := tmpPrefix + captureToken()
 	tmp, err := f.root.create(name)
 	if err != nil {
 		return "", err
 	}
 	h := sha256.New()
-	err = fetch(ctx, r, io.MultiWriter(tmp, h))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
+	count := &countingWriter{w: io.MultiWriter(tmp, h), limit: r.Size}
+	err = fetch(ctx, r, count)
+	if err == nil && count.overflow {
+		err = errors.New("получено больше объявленного размера")
 	}
-	if err == nil && hex.EncodeToString(h.Sum(nil)) != r.Hash {
+	if err == nil && count.n != r.Size {
+		err = fmt.Errorf("размер не совпал: получено %d, ожидалось %d", count.n, r.Size)
+	}
+	if err == nil && hex.EncodeToString(h.Sum(nil)) != strings.ToLower(r.Hash) {
 		err = fmt.Errorf("хеш не совпал (файл менялся во время передачи)")
+	}
+	if err == nil {
+		syncFile := f.persistHooks.syncFile
+		if syncFile == nil {
+			syncFile = func(file *os.File) error { return file.Sync() }
+		}
+		err = syncFile(tmp)
+	}
+	if cerr := closeDownloadedFile(tmp); err == nil {
+		err = cerr
 	}
 	if err != nil {
 		_ = f.root.unlink(name, false)
 		return "", err
 	}
 	return name, nil
+}
+
+// closeDownloadedFile is an unexported fault-injection hook for close errors.
+var closeDownloadedFile = func(file *os.File) error { return file.Close() }
+
+type countingWriter struct {
+	w        io.Writer
+	limit    int64
+	n        int64
+	overflow bool
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	remaining := w.limit - w.n
+	if remaining < 0 {
+		return 0, errors.New("получено больше объявленного размера")
+	}
+	if int64(len(p)) > remaining {
+		w.overflow = true
+		if remaining > 0 {
+			n, err := w.w.Write(p[:int(remaining)])
+			w.n += int64(n)
+			if err != nil {
+				return n, err
+			}
+			if int64(n) != remaining {
+				return n, io.ErrShortWrite
+			}
+		}
+		return int(remaining), errors.New("получено больше объявленного размера")
+	}
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	return n, err
+}
+
+func validSHA256(hash string) bool {
+	if len(hash) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil
 }
