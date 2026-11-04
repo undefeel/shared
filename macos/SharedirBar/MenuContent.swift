@@ -78,11 +78,14 @@ struct MenuContent: View {
                 get: { store.folderConfirmation != nil },
                 set: { if !$0 { store.folderConfirmation = nil } }
             ),
-            titleVisibility: .visible
-        ) {
-            Button(confirmationButton, role: .destructive) { store.confirmFolder() }
+            titleVisibility: .visible,
+            presenting: store.folderConfirmation
+        ) { confirmation in
+            // Подтверждение передаётся в действие: к моменту вызова SwiftUI уже
+            // закрыл диалог и сбросил store.folderConfirmation через биндинг.
+            Button(confirmationButton, role: .destructive) { store.confirmFolder(confirmation) }
             Button(L("Cancel"), role: .cancel) { store.folderConfirmation = nil }
-        } message: {
+        } message: { _ in
             Text(confirmationMessage)
         }
     }

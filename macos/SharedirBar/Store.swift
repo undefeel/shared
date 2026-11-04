@@ -385,8 +385,7 @@ final class Store: ObservableObject {
         folderConfirmation = StatusLogic.confirmation(action: action, status: status)
     }
 
-    func confirmFolder() {
-        guard let confirmation = folderConfirmation else { return }
+    func confirmFolder(_ confirmation: FolderConfirmation) {
         folderConfirmation = nil
         let action = confirmation.action.rawValue
         let token = confirmation.token
