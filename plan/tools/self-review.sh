@@ -3,7 +3,7 @@
 # in the current worktree, waits for its report, prints it and releases the reviewer.
 #
 #   plan/tools/self-review.sh <ID> [round]        Gemini (flash, high effort) review round (default 1) and wait
-#   plan/tools/self-review.sh <ID> luna           final control review by luna (codex, medium effort)
+#   plan/tools/self-review.sh <ID> luna           final control review by luna (codex, high effort)
 #   plan/tools/self-review.sh --wait <dispatch>   keep waiting for an already started reviewer
 #
 # Exit codes: 0 = report printed; 3 = reviewer still running (re-run with --wait <dispatch>);
@@ -47,7 +47,7 @@ fi
 
 ID="${1:?usage: self-review.sh <ID> [round|luna]}"; ROUND="${2:-1}"
 AGENT=(--agent antigravity --model "$MODEL")
-if [[ "$ROUND" == luna ]]; then AGENT=(--agent codex --model gpt-6-luna --effort medium); fi
+if [[ "$ROUND" == luna ]]; then AGENT=(--agent codex --model gpt-6-luna --effort high); fi
 SPEC_TASK="plan/specs/$ID.md"
 [[ -f "$SPEC_TASK" ]] || { echo "no $SPEC_TASK" >&2; exit 2; }
 BASE="$(git merge-base HEAD origin/main)"

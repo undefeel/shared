@@ -11,7 +11,7 @@
 |---|---|---|---|---|
 | 1 | antigravity | `--agent antigravity` (без `--model`) | Механика по образцу | не тратит |
 | 2 | haiku | `--agent claude --model claude-haiku-5-5 --effort medium` | Чуть выше antigravity, быстрый | тратит мало |
-| 3 | luna | `--agent codex --model gpt-6-luna --effort medium` | Логика по точному spec | не тратит |
+| 3 | luna | `--agent codex --model gpt-6-luna --effort high` | Логика по точному spec | не тратит |
 | 4 | sonnet | `--agent claude --model claude-sonnet-5-5 --effort medium` | Сам разбирается в контексте, сильнее всех в русском тексте | тратит |
 | 5 | sol | `--agent codex --model gpt-6.1-sol --effort medium` | Сложный дизайн, трудные баги, задачи на несколько модулей | не тратит |
 
@@ -37,7 +37,7 @@
 
 Ревью кода задач L1–L2 делает сам воркер, координатор в нём не участвует (решение пользователя):
 - после реализации и зелёной приёмки воркер коммитит и запускает `plan/tools/self-review.sh <ID>`: это ревьюер Gemini (antigravity, `--model gemini-3.8-flash-high`) только на чтение, в том же worktree;
-- финальный контрольный круг `plan/tools/self-review.sh <ID> luna` (luna medium, только чтение) воркер запускает сам, если во 2-м круге Gemini остались blocker/major (Gemini пропускает тонкие логические ошибки);
+- финальный контрольный круг `plan/tools/self-review.sh <ID> luna` (luna high, только чтение) воркер запускает сам, если во 2-м круге Gemini остались blocker/major (Gemini пропускает тонкие логические ошибки);
 - воркер правит blocker/major (minor — если дёшево), обоснованно отклоняет то, что противоречит spec или решениям владельца, делает до 2 кругов и в `worker_done` перечисляет замечания и что с ними сделано;
 - раздел «Self-review» обязателен в каждом spec кода; ревьюер воркера в лимит параллельности не считается;
 - координатор при мерже смотрит `--stat` и отчёт о ревью, гоняет приёмку; отдельный круг ревью через `review.sh` — только если отчёт вызывает сомнения;

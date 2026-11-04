@@ -124,6 +124,7 @@ $TASK
 ## Constraints
 $(section Constraints)
 - Do NOT run plan/tools/self-review.sh or plan/tools/lead.sh and do not start workers: the lead reviews your work.
+- Finish the whole change in this turn, however large it looks: write the code, run the acceptance, commit. Reporting "not implemented" or failed without a concrete technical blocker is not acceptable; if something truly blocks you, ask (orchestration ask) naming the exact blocker.
 - Communicate in English.
 
 ## Ownership
@@ -134,7 +135,7 @@ $(if [[ "$MODE" == part ]]; then echo "Run go vet and the tests of your own pack
 SPEC
 
 out="$(orca orchestration worker-start --spec-file "$S" --task-title "$TITLE" \
-        --worktree current --agent codex --model gpt-6-luna --effort medium --json)" || { echo "$out"; exit 1; }
+        --worktree current --agent codex --model gpt-6-luna --effort high --json)" || { echo "$out"; exit 1; }
 ds="$(jq -r '.result.dispatchId // .result.dispatch.id // .dispatchId // empty' <<<"$out")"
 [[ -n "$ds" ]] || { echo "$out"; exit 1; }
 echo "lead: started implementer $ds ($TITLE)"
