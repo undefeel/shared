@@ -58,12 +58,8 @@ out="$(orca orchestration worker-start --task "$tk" "${place[@]}" "${agent[@]}" 
 dispatch="$(jq -r '.result.dispatchId // .result.dispatch.id // .result.dispatch_id // .dispatchId // empty' <<<"$out")"
 [[ -n "$dispatch" ]] || { echo "$out"; echo "Ошибка: в ответе нет dispatchId" >&2; exit 1; }
 
-# --comment воркер не читает, поэтому addendum доставляется ещё и сообщением.
-if [[ -f "$addendum" ]]; then
-  orca orchestration send --to "dispatch:$dispatch" --subject "Addendum for $ID (mandatory, read before starting)" \
-       --body "$(cat "$addendum")" --json >/dev/null
-fi
-
+# Addendum сообщением (send) не отправляем: если воркер уже завершился, Orca порождает
+# follow-up задачу «New messages» с новым агентом. Доработка — новой задачей <ID>b с полным spec.
 echo "$ID $dispatch"
 
 if [[ -f "$STATUS" ]] && grep -q '^Активные:' "$STATUS"; then
