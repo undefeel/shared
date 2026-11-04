@@ -109,3 +109,4 @@
 - 04-30: обновляет существующие тесты transport под обязательный v2; epoch/cursor — через интерфейс-провайдер в transport (тестовый двойник), реальное подключение в 04-32; бюджет ~500.
 - 04-21: проверка хэша после capture остаётся под блокировкой (гарантия этапа 02); вне scanMu выносится только подготовка до intent. R10 — только Scan (04-36).
 - 04-22: ownership расширен на index.go, group.go, rootstate.go, apply_stage.go; бюджет ~700.
+- 04-22: найден баг 04-19 — frame.Before без DeletedAt (tombstone от Scan → Before mismatch); ownership + group_commit.go, group_recovery.go, отмена после G1; бюджет ~850.
