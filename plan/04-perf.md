@@ -69,7 +69,7 @@
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_138a41f67663` |  |
 | 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_e576a21f893e` |  |
 | 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_879c6c7a7563` |  |
-| 04-23 | config concurrency | L2 | luna | — | review | `task_2fff94561cda` | `ctx_5239cd95da9d` |
+| 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_7c52a6713b09` |  |
 | 04-25 | handshake primitive | L2 | luna | — | in_progress | `task_8a511af85279` | `ctx_a2d77225581a` |
 | 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b5801286b17` |  |
