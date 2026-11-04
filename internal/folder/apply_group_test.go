@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,13 @@ func TestApplyGroup64IncomingOneFrame(t *testing.T) {
 	if len(files) != 64 {
 		t.Fatal(len(files))
 	}
+	for _, fi := range files {
+		body, err := os.ReadFile(filepath.Join(reopened.Root, fi.Name))
+		if err != nil || string(body) != "body" {
+			t.Fatalf("%s: %q %v", fi.Name, body, err)
+		}
+	}
+
 }
 
 func TestApplyGroupFailedCommitHasNoDone(t *testing.T) {
@@ -161,5 +169,39 @@ func TestApplyGroupRootReplacementBeforeIntent(t *testing.T) {
 	}
 	if _, err := os.Stat(n.f.intentPath()); !os.IsNotExist(err) {
 		t.Fatalf("stale root wrote intent: %v", err)
+	}
+}
+
+func TestApplyGroupRepeatsForecastIntoConflict(t *testing.T) {
+	n := applySeed(t)
+	r := incoming("new", Vector{"A": 1, "B": 1}, 200e9)
+	events := &applyEvents{}
+	a, b := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, func(ctx context.Context, fi FileInfo, w io.Writer) error {
+		n.write(t, "x", "local", time.Unix(150, 0))
+		if err := n.f.Scan(); err != nil {
+			return err
+		}
+		return bodyFetch("new")(ctx, fi, w)
+	}, events)
+	if a != 1 || b != 0 || len(events.events) != 1 || events.events[0] != EventConflict {
+		t.Fatalf("apply %d/%d events %v", a, b, events.events)
+	}
+	assertBody(t, n, "new")
+	entries, err := os.ReadDir(n.f.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflicts := 0
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".sync-conflict-") {
+			conflicts++
+			body, err := os.ReadFile(filepath.Join(n.f.Root, entry.Name()))
+			if err != nil || string(body) != "local" {
+				t.Fatalf("conflict %s: %q %v", entry.Name(), body, err)
+			}
+		}
+	}
+	if conflicts != 1 {
+		t.Fatal("missing local conflict", conflicts)
 	}
 }

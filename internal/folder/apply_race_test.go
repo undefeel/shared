@@ -3,7 +3,6 @@ package folder
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -130,20 +129,16 @@ func TestApplyLocalWriteAfterCapture(t *testing.T) {
 		t.Fatalf("edited=%v failed=%d", edited, failed)
 	}
 	reopened, err := Open(n.f.Root, n.f.statePath, "A", n.f.log)
-	if reopened != nil {
-		defer reopened.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
-	var blocked *RootError
-	if !errors.As(err, &blocked) {
-		t.Fatalf("expected conservative recovery block: %v", err)
-	}
-	captures, _ := filepath.Glob(filepath.Join(n.f.Root, tmpPrefix+"capture-*"))
-	if len(captures) != 1 {
-		t.Fatalf("missing local capture: %v", captures)
-	}
-	body, err := os.ReadFile(captures[0])
+	defer reopened.Close()
+	body, err := os.ReadFile(filepath.Join(reopened.Root, "x"))
 	if err != nil || string(body) != "late" {
 		t.Fatalf("local bytes lost: %s %v", body, err)
+	}
+	if _, err = os.Stat(reopened.intentPath()); !os.IsNotExist(err) {
+		t.Fatalf("rollback retained marker: %v", err)
 	}
 	if len(ev.events) != 0 {
 		t.Fatal(ev.events)
