@@ -79,6 +79,70 @@ func TestScanUnmountSimulationBlocksBeforePublishing(t *testing.T) {
 	}
 }
 
+func TestScanRootOpenFailureBlocksWithoutPublishing(t *testing.T) {
+	f := rootScanFixture(t)
+	indexBefore, err := os.ReadFile(f.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before persisted
+	if err := json.Unmarshal(indexBefore, &before); err != nil {
+		t.Fatal(err)
+	}
+	ioops := f.rootScanIO()
+	baseOpenDir := ioops.openDir
+	ioops.openDir = func(r *rootFS, name string) (*os.File, error) {
+		if name == "." {
+			return nil, os.ErrNotExist
+		}
+		return baseOpenDir(r, name)
+	}
+	if err := f.scanWith(ioops); err == nil {
+		t.Fatal("Scan succeeded after injected root open failure")
+	}
+	if e := f.Blocked(); e == nil || e.Code != "root_unavailable" {
+		t.Fatalf("blocked=%+v, want root_unavailable", e)
+	}
+	indexAfter, err := os.ReadFile(f.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after persisted
+	if err := json.Unmarshal(indexAfter, &after); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before.Files, after.Files) || before.Clock != after.Clock {
+		t.Fatal("root open failure changed indexed files or clock")
+	}
+}
+
+func TestScanEmptyDecisionUsesIndexAtCommit(t *testing.T) {
+	dir := t.TempDir()
+	f, err := Open(filepath.Join(dir, "root"), filepath.Join(dir, "index.json"), "me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	ioops := f.rootScanIO()
+	ioops.beforeCommit = func() {
+		f.mu.Lock()
+		f.files["prior"] = &FileInfo{Name: "prior", Deleted: true, Version: Vector{"me": 1}}
+		f.mu.Unlock()
+		if err := f.save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.scanWith(ioops); err == nil {
+		t.Fatal("empty candidate committed despite index becoming nonempty")
+	}
+	if e := f.Blocked(); e == nil || e.Code != "root_empty" {
+		t.Fatalf("blocked=%+v, want root_empty", e)
+	}
+	if fi, _, ok := f.Lookup("prior"); !ok || !fi.Deleted {
+		t.Fatalf("hook index entry was not preserved: fi=%+v ok=%v", fi, ok)
+	}
+}
+
 func TestScanReplacementRootBlocksWithoutPublishingTombstones(t *testing.T) {
 	f := rootScanFixture(t)
 	indexBefore, err := os.ReadFile(f.statePath)

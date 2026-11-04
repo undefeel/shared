@@ -51,17 +51,18 @@ func matchIgnore(patterns []string, name string) bool {
 }
 
 type scanIO struct {
-	openDir  func(*rootFS, string) (*os.File, error)
-	readDir  func(*os.File) ([]os.DirEntry, error)
-	info     func(*os.File, os.DirEntry) (os.FileInfo, scanStat, error)
-	openRead func(*rootFS, string) (*os.File, error)
+	openDir      func(*rootFS, string) (*os.File, error)
+	readDir      func(*os.File) ([]os.DirEntry, error)
+	info         func(*os.File, os.DirEntry) (os.FileInfo, scanStat, error)
+	openRead     func(*rootFS, string) (*os.File, error)
+	beforeCommit func()
 }
 
 func (f *Folder) rootScanIO() scanIO {
 	return scanIO{func(r *rootFS, p string) (*os.File, error) { return r.openDir(p, false) },
 		func(d *os.File) ([]os.DirEntry, error) { return d.ReadDir(-1) },
 		infoAt,
-		func(r *rootFS, p string) (*os.File, error) { return r.openRead(p) }}
+		func(r *rootFS, p string) (*os.File, error) { return r.openRead(p) }, nil}
 }
 
 func infoAt(dir *os.File, entry os.DirEntry) (os.FileInfo, scanStat, error) {
@@ -178,11 +179,9 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	if err := f.guardRoot(); err != nil {
 		return err
 	}
-	r, err := openRootFS(f.Root)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
+	// Walk from the root descriptor pinned during Open. Reopening the configured
+	// pathname here could silently switch the candidate to a replacement root.
+	r := f.root
 	patterns, err := readIgnore(ioops, r)
 	if err != nil {
 		return err
@@ -206,11 +205,17 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	walk = func(dir string) error {
 		d, err := ioops.openDir(r, dir)
 		if err != nil {
+			if dir == "." {
+				return f.blockRoot("root_unavailable", err.Error())
+			}
 			return err
 		}
 		defer d.Close()
 		entries, err := ioops.readDir(d)
 		if err != nil {
+			if dir == "." {
+				return f.blockRoot("root_unavailable", err.Error())
+			}
 			return err
 		}
 		for _, entry := range entries {
@@ -285,6 +290,9 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	if err := walk("."); err != nil {
 		return err
 	}
+	if ioops.beforeCommit != nil {
+		ioops.beforeCommit()
+	}
 	return f.commitScan(candidate, patterns, newCache)
 }
 
@@ -295,14 +303,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	if err := f.guardRoot(); err != nil {
 		return err
 	}
-	f.mu.Lock()
-	hasIndexedEntries := len(f.files) != 0 // tombstones also require confirmation
-	f.mu.Unlock()
-	if len(found) == 0 && hasIndexedEntries {
-		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
-	}
 	f.saveMu.Lock()
-	defer f.saveMu.Unlock()
 	f.mu.Lock()
 	next := make(map[string]*FileInfo, len(f.files)+len(found))
 	for k, v := range f.files {
@@ -310,6 +311,14 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		c.Version = v.Version.Copy()
 		next[k] = &c
 	}
+	// Decide against the same current files snapshot used to build next. Release
+	// both locks before blockRoot persists the latch through saveMu.
+	if len(found) == 0 && len(f.files) != 0 {
+		f.mu.Unlock()
+		f.saveMu.Unlock()
+		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
+	}
+	defer f.saveMu.Unlock()
 	clock := f.clock
 	tick := func(v Vector) uint64 {
 		for _, n := range v {
