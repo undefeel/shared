@@ -3,6 +3,7 @@ package folder
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -109,25 +110,41 @@ func TestApplyLocalWriteAfterCapture(t *testing.T) {
 	n := applySeed(t)
 	r := incoming("new", Vector{"A": 1, "B": 1}, 200e9)
 	edited := false
-	n.f.persistHooks.syncDir = func(d *os.File) error {
-		captures, e := filepath.Glob(filepath.Join(n.f.Root, tmpPrefix+"capture-*"))
-		if e != nil {
-			return e
-		}
-		if !edited && len(captures) > 0 {
-			edited = true
-			if e = os.WriteFile(captures[0], []byte("late"), 0600); e != nil {
+	n.f.SetPersistenceProbe(PersistenceProbe{Fault: func(_, phase string, _, _ uint64) error {
+		if !edited && phase == "G3a" {
+			captures, e := filepath.Glob(filepath.Join(n.f.Root, tmpPrefix+"capture-*"))
+			if e != nil {
 				return e
 			}
+			if len(captures) != 1 {
+				t.Fatalf("captures: %v", captures)
+			}
+			edited = true
+			return os.WriteFile(captures[0], []byte("late"), 0600)
 		}
-		return syncDir(d)
-	}
+		return nil
+	}})
 	ev := &applyEvents{}
 	_, failed := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, bodyFetch("new"), ev)
-	if !edited || failed != 0 {
+	if !edited || failed != 1 || n.f.Blocked() == nil {
 		t.Fatalf("edited=%v failed=%d", edited, failed)
 	}
-	assertBody(t, n, "late")
+	reopened, err := Open(n.f.Root, n.f.statePath, "A", n.f.log)
+	if reopened != nil {
+		defer reopened.Close()
+	}
+	var blocked *RootError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("expected conservative recovery block: %v", err)
+	}
+	captures, _ := filepath.Glob(filepath.Join(n.f.Root, tmpPrefix+"capture-*"))
+	if len(captures) != 1 {
+		t.Fatalf("missing local capture: %v", captures)
+	}
+	body, err := os.ReadFile(captures[0])
+	if err != nil || string(body) != "late" {
+		t.Fatalf("local bytes lost: %s %v", body, err)
+	}
 	if len(ev.events) != 0 {
 		t.Fatal(ev.events)
 	}

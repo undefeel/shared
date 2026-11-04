@@ -16,7 +16,7 @@ func recoveryFile(fi *FileInfo) *storeFile {
 	if fi == nil {
 		return nil
 	}
-	s := &storeFile{Name: fi.Name, Disk: fi.Disk, Hash: fi.Hash, Size: fi.Size, ModTime: fi.ModTime, Exec: fi.Exec, Deleted: fi.Deleted}
+	s := &storeFile{Name: fi.Name, Disk: fi.Disk, Hash: fi.Hash, Size: fi.Size, ModTime: fi.ModTime, Exec: fi.Exec, Deleted: fi.Deleted, DeletedAt: fi.StoreDeletedAt}
 	for peer, counter := range fi.Version {
 		s.Version = append(s.Version, storePair{peer, counter})
 	}

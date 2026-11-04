@@ -31,20 +31,18 @@ func TestRecoveryProcess(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
-	calls := 0
-	f.persistHooks.syncDir = func(d *os.File) error {
-		if err := syncDir(d); err != nil {
-			return err
-		}
-		calls++
-		if fmt.Sprint(calls) == mode {
+	f.SetPersistenceProbe(PersistenceProbe{Phase: func(_, phase string) {
+		if (mode == "1" && phase == "G3") || (mode == "3" && phase == "G4") || (mode == "4" && phase == "G5") {
 			fmt.Println("ready")
-			for {
-				time.Sleep(time.Hour)
-			}
+			select {}
+		}
+	}, Fault: func(_, phase string, _, _ uint64) error {
+		if mode == "2" && phase == "G3a" {
+			fmt.Println("ready")
+			select {}
 		}
 		return nil
-	}
+	}})
 	fi := incoming("new", Vector{"A": 1, "B": 1}, 200e9)
 	if n, failed := f.ApplyRemote(context.Background(), "B", []FileInfo{fi}, bodyFetch("new"), nil); n != 1 || failed != 0 {
 		t.Fatalf("apply %d/%d", n, failed)
@@ -68,7 +66,11 @@ func killRecoveryProcess(t *testing.T, home, mode string) {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	scanner := bufio.NewScanner(out)
 	if !scanner.Scan() || scanner.Text() != "ready" {
-		t.Fatal("child did not reach crash barrier")
+		lines := scanner.Text()
+		for scanner.Scan() {
+			lines += "\n" + scanner.Text()
+		}
+		t.Fatalf("child did not reach crash barrier: %s (%v)", lines, scanner.Err())
 	}
 	if err = cmd.Process.Kill(); err != nil {
 		t.Fatal(err)

@@ -87,6 +87,9 @@ type FileInfo struct {
 	// Disk — фактическое имя на диске, если оно отличается от Name
 	// (например, NFD-имя на Linux). Только локальное, пиру не нужно.
 	Disk string `json:"disk,omitempty"`
+	// StoreDeletedAt is populated only in private group-intent copies, never
+	// published or accepted from peers. It preserves the exact store digest.
+	StoreDeletedAt int64 `json:"store_deleted_at,omitempty"`
 }
 
 func (fi *FileInfo) diskPath() string {
@@ -150,7 +153,9 @@ type Folder struct {
 
 	// scanMu сериализует сканирование и запись файлов с пира, чтобы скан
 	// не принял только что записанный файл за удалённый (и наоборот).
-	scanMu sync.Mutex
+	scanMu           sync.Mutex
+	applyMu          sync.Mutex
+	applyCoordinator *groupCoordinator
 	// Lock order: scanMu → saveMu → mu. I/O never holds mu.
 	saveMu            sync.Mutex
 	generation        uint64 // saveMu; attempts, including failed saves
@@ -234,7 +239,7 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 	}
 	f.wireStore()
 	if err = f.initRoot(nil); err == nil {
-		err = f.recoverIntent()
+		err = f.recoverApplyIntent()
 	}
 	if err != nil {
 		f.Close()

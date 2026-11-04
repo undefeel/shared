@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 )
 
 // Fetcher скачивает содержимое файла fi у пира в w.
@@ -93,6 +94,7 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 	for i := range remote {
 		r := remote[i]
 		r.Disk = ""
+		r.StoreDeletedAt = 0
 		if !r.Deleted && (r.Size < 0 || !validSHA256(r.Hash)) {
 			f.log.Printf("%s: пропущена некорректная запись %q (размер или SHA-256)", peer, r.Name)
 			failed++
@@ -136,34 +138,50 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		progress.Plan(files, bytes)
 	}
 
-	for _, st := range steps {
-		if ctx.Err() != nil {
-			return applied, failed + 1
+	// Keep enough operations in flight to fill a group; result reporting remains
+	// serialized because Progress implementations need not be concurrent-safe.
+	type result struct {
+		st  step
+		err error
+	}
+	results := make(chan result, groupCount)
+	var wg sync.WaitGroup
+	for start := 0; start < len(steps); start += groupCount {
+		end := min(start+groupCount, len(steps))
+		for _, st := range steps[start:end] {
+			wg.Add(1)
+			go func(st step) {
+				defer wg.Done()
+				final, err := f.applyOne(ctx, peer, generation, st, fetch)
+				results <- result{final, err}
+			}(st)
 		}
-		final, err := f.applyOne(ctx, peer, generation, st, fetch)
-		if err != nil {
-			f.log.Printf("%s: %s: %v", peer, st.r.Name, err)
-			failed++
-			continue
-		}
-		if final.act == skip {
-			continue
-		}
-		st = final
-		applied++
-		if progress != nil && st.act != mergeOnly {
-			ev, n := EventReceived, int64(0)
-			switch {
-			case st.r.Deleted:
-				ev = EventDeleted
-			case st.act == takeWithConflict:
-				ev = EventConflict
+		for range steps[start:end] {
+			res := <-results
+			st := res.st
+			if res.err != nil {
+				f.log.Printf("%s: %s: %v", peer, st.r.Name, res.err)
+				failed++
+				continue
 			}
-			if st.needsDownload() {
-				n = st.r.Size
+			if st.act == skip {
+				continue
 			}
-			progress.Done(st.r, ev, n)
+			applied++
+			if progress != nil && st.act != mergeOnly {
+				ev, n := EventReceived, int64(0)
+				if st.r.Deleted {
+					ev = EventDeleted
+				} else if st.act == takeWithConflict {
+					ev = EventConflict
+				}
+				if st.needsDownload() {
+					n = st.r.Size
+				}
+				progress.Done(st.r, ev, n)
+			}
 		}
+		wg.Wait()
 	}
 	return applied, failed
 }
@@ -180,14 +198,20 @@ func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, s
 		return st, err
 	}
 	defer prepared.close(f)
-	return f.applyStaged(ctx, peer, generation, st, prepared)
+	return f.submitApply(ctx, peer, generation, st, prepared)
 }
 
 func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64, st step, prepared *stagedApply) (step, error) {
+	return f.prepareApply(ctx, peer, generation, st, prepared, nil)
+}
+
+func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint64, st step, prepared *stagedApply, batch *applyBatch) (step, error) {
 	r := st.r
 	tmp := prepared.tmp
-	f.scanMu.Lock()
-	defer f.scanMu.Unlock()
+	if batch == nil {
+		f.scanMu.Lock()
+		defer f.scanMu.Unlock()
+	}
 	if err := ctx.Err(); err != nil {
 		return st, err
 	}
@@ -197,17 +221,43 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 	if err := f.guardRoot(); err != nil {
 		return st, err
 	}
-	f.saveMu.Lock()
-	defer f.saveMu.Unlock()
-	f.mu.Lock()
-	next := make(map[string]*FileInfo, len(f.files)+1)
-	for k, v := range f.files {
-		c := *v
-		c.Version = v.Version.Copy()
-		next[k] = &c
+	if batch == nil {
+		f.saveMu.Lock()
+		defer f.saveMu.Unlock()
 	}
-	clock := f.clock
-	f.mu.Unlock()
+	var next map[string]*FileInfo
+	var clock uint64
+	if batch != nil {
+		next, clock = batch.next, batch.clock
+	} else {
+		f.mu.Lock()
+		next = copyApplyFiles(f.files)
+		clock = f.clock
+		f.mu.Unlock()
+	}
+	save := func(tree *commitTree) error {
+		if batch == nil {
+			return f.commitApply(next, clock, tree)
+		}
+		batch.clock = clock
+		if tree != nil {
+			batch.trees = append(batch.trees, tree)
+		}
+		return nil
+	}
+	var deferLater []func()
+	defer func() {
+		for i := len(deferLater) - 1; i >= 0; i-- {
+			deferLater[i]()
+		}
+	}()
+	cleanup := func(fn func()) {
+		if batch == nil {
+			deferLater = append(deferLater, fn)
+		} else {
+			batch.cleanup = append(batch.cleanup, fn)
+		}
+	}
 	l := next[r.Name]
 	disk := r.Name
 	if l != nil {
@@ -247,18 +297,13 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 			c.Version[f.me] = clock
 			l = &c
 			next[r.Name] = l
-			if err := f.commitApply(next, clock, nil); err != nil {
+			if err := save(nil); err != nil {
 				return st, err
 			}
-			// The first commit published next: detach before staging another.
-			detached := make(map[string]*FileInfo, len(next))
-			for k, v := range next {
-				c := *v
-				c.Version = v.Version.Copy()
-				detached[k] = &c
+			if batch == nil {
+				next = copyApplyFiles(next)
+				l = next[r.Name]
 			}
-			next = detached
-			l = next[r.Name]
 		}
 	}
 	act := f.decide(l, &r, peer)
@@ -269,7 +314,7 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 			c := *l
 			c.Version = l.Version.Merge(r.Version)
 			next[r.Name] = &c
-			return st, f.commitApply(next, clock, nil)
+			return st, save(nil)
 		}
 		return st, nil
 	}
@@ -277,7 +322,7 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 		c := *l
 		c.Version = l.Version.Merge(r.Version)
 		next[r.Name] = &c
-		return st, f.commitApply(next, clock, nil)
+		return st, save(nil)
 	}
 	if st.needsDownload() && tmp == "" {
 		return st, errLocalChanged
@@ -286,8 +331,9 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 	if err != nil {
 		return st, err
 	}
-	defer parent.Close()
+	cleanup(func() { parent.Close() })
 	r.Disk = ""
+	r.StoreDeletedAt = 0
 	if disk != r.Name {
 		r.Disk = disk
 	}
@@ -299,12 +345,12 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 		if err != nil {
 			return st, err
 		}
-		defer incoming.Close()
-		defer func() {
-			if f.Blocked() == nil {
+		cleanup(func() { incoming.Close() })
+		cleanup(func() {
+			if _, e := os.Stat(f.intentPath()); os.IsNotExist(e) {
 				_ = f.root.unlink(staged, false)
 			}
-		}()
+		})
 		var source *os.File
 		if tmp != "" {
 			source, err = f.root.openRead(tmp)
@@ -348,7 +394,7 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 		if e != nil {
 			return st, e
 		}
-		defer ancestor.Close()
+		cleanup(func() { ancestor.Close() })
 		tree.dirs = append(tree.dirs, ancestor)
 	}
 	if r.Deleted {
@@ -359,15 +405,17 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 		if e != nil {
 			return st, e
 		}
-		defer c.Close()
+		cleanup(func() { c.Close() })
 		tree.capture = c
 		tree.intent.Capture = c.Recovery
 		meta := scanStatFromInfo(info)
 		tree.intent.Identity = captureIdentity{meta.dev, meta.ino}
 	}
 	tree.mutate = func() error {
-		if err := ctx.Err(); err != nil {
-			return err
+		if batch == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if tree.capture != nil {
 			captured, e := openRegularAt(parent, path.Base(tree.capture.Recovery), unix.O_RDONLY, 0)
@@ -382,6 +430,9 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 				return e
 			}
 			if !os.SameFile(info, actual) || hash != l.Hash || (actual.Mode().Perm()&0100 != 0) != l.Exec {
+				if batch != nil {
+					return errLocalChanged
+				}
 				c := *l
 				c.Version = l.Version.Copy()
 				c.Version[f.me] = clock
@@ -406,7 +457,12 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 				st = step{l, r, act}
 			}
 			if act == takeWithConflict {
-				if _, e = tree.capture.promote(f.me, l.Hash); e != nil {
+				if batch != nil {
+					e = renameNoReplace(parent, path.Base(tree.capture.Recovery), parent, path.Base(batch.conflicts[r.Name]))
+				} else {
+					_, e = tree.capture.promote(f.me, l.Hash)
+				}
+				if e != nil {
 					return e
 				}
 				tree.discard = func() error { return nil }
@@ -456,8 +512,8 @@ func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64
 	}
 	clock++ // Reserve a local tick for an edit discovered after capture.
 	st.r = r
-	err = f.commitApply(next, clock, tree)
-	if err == nil && r.Deleted {
+	err = save(tree)
+	if batch == nil && err == nil && r.Deleted {
 		for dir := path.Dir(disk); dir != "."; dir = path.Dir(dir) {
 			if e := f.root.unlink(dir, true); e != nil {
 				break
@@ -505,13 +561,6 @@ func (f *Folder) download(ctx context.Context, r FileInfo, fetch Fetcher) (strin
 	}
 	if err == nil && hex.EncodeToString(h.Sum(nil)) != strings.ToLower(r.Hash) {
 		err = fmt.Errorf("хеш не совпал (файл менялся во время передачи)")
-	}
-	if err == nil {
-		syncFile := f.persistHooks.syncFile
-		if syncFile == nil {
-			syncFile = func(file *os.File) error { return file.Sync() }
-		}
-		err = syncFile(tmp)
 	}
 	if cerr := closeDownloadedFile(tmp); err == nil {
 		err = cerr

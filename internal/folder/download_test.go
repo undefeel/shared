@@ -112,7 +112,12 @@ func TestDownloadSyncFailureCleansTemp(t *testing.T) {
 	n := applySeed(t)
 	defer n.f.Close()
 	r := downloadRecord("body", 4)
-	n.f.persistHooks.syncFile = func(*os.File) error { return errors.New("sync failed") }
+	n.f.SetPersistenceProbe(PersistenceProbe{Fault: func(_, phase string, _, _ uint64) error {
+		if phase == "G1" {
+			return errors.New("sync failed")
+		}
+		return nil
+	}})
 	assertDownloadFailedCleanly(t, n, r, bodyFetch("body"))
 }
 
