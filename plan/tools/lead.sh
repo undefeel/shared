@@ -22,7 +22,7 @@ wait_for() {
   while :; do
     local left=$(( (deadline - $(date +%s)) * 1000 ))
     if (( left <= 0 )); then
-      echo "lead: implementer $ds still running; re-run: plan/tools/lead.sh --wait $ds"
+      echo "lead: implementer $ds still running. Do NOT end your turn (nobody will wake you) — re-run now: plan/tools/lead.sh --wait $ds"
       exit 3
     fi
     local out mine
@@ -50,7 +50,7 @@ if [[ "${1:-}" == "--wait-all" ]]; then
   deadline=$(( $(date +%s) + CHUNK_MS / 1000 ))
   while (( ${#pending[@]} > 0 )); do
     left=$(( (deadline - $(date +%s)) * 1000 ))
-    if (( left <= 0 )); then echo "lead: still running: ${pending[*]}; re-run: plan/tools/lead.sh --wait-all ${pending[*]}"; exit 3; fi
+    if (( left <= 0 )); then echo "lead: still running: ${pending[*]}. Do NOT end your turn (nobody will wake you) — re-run now: plan/tools/lead.sh --wait-all ${pending[*]}"; exit 3; fi
     out="$(orca orchestration check --wait --types "worker_done,escalation,question" --timeout-ms "$left" --json 2>/dev/null)" || { echo "$out"; exit 1; }
     jq -r '.result.messages[]? | "── [\(.type)] id=\(.id) from=\(.payload.dispatchId // "?") \(.subject // "")\n\(.body // "")"' <<<"$out"
     if jq -e '[.result.messages[]? | select(.type != "worker_done" and .type != "heartbeat")] | length > 0' <<<"$out" >/dev/null; then

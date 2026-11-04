@@ -18,7 +18,7 @@ wait_for() {
   while :; do
     local left=$(( (deadline - $(date +%s)) * 1000 ))
     if (( left <= 0 )); then
-      echo "self-review: reviewer $ds still running; re-run: plan/tools/self-review.sh --wait $ds"
+      echo "self-review: reviewer $ds still running. Do NOT end your turn (nobody will wake you) — re-run now: plan/tools/self-review.sh --wait $ds"
       exit 3
     fi
     local out
