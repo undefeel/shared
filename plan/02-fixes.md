@@ -41,7 +41,7 @@
 | 02-21 | Exec и локальные права | L2 | luna | 02-20 | done | `task_4fd2a3217c07` | `ctx_516f79518b7b` |
 | 02-22 | проверка размера folder | L2 | luna | 02-21 | done | `task_d05e01a8ba91` | `ctx_ba338ad0bdce` |
 | 02-23 | безопасная выдача /file | L3 | sol | 02-19, 02-22 | done | `task_a00a59d21e3f` | `ctx_fb7d634b252d` |
-| 02-24 | интеграция остановки демона и control | L3 | sol | 02-16, 02-20, 02-23 | review | `task_b26f087a7d18` | `ctx_8919cfefb2f1` |
+| 02-24 | интеграция остановки демона и control | L3 | sol | 02-16, 02-20, 02-23 | done | `task_b26f087a7d18` | `ctx_8919cfefb2f1` |
 | 02-25 | watcher после rebind | L2 | luna | 02-24 | todo | `task_2edf2066053f` | |
 | 02-26 | CLI подтверждения | L1 | antigravity | 02-24 | todo | `task_b276f2e4ca2a` | |
 | 02-27 | macOS меню | L2 | luna | 02-24 | todo | `task_79b6ee2d8284` | |
