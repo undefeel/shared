@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Ревью задачи (только чтение) в worktree её воркера: plan/tools/review.sh <ID> [luna|luna-low]
+# Ревью задачи (только чтение) в worktree её воркера: plan/tools/review.sh <ID> [luna|luna-low|gemini-medium]
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
 ID="$1"; EF=high; [[ "${2:-luna}" == luna-low ]] && EF=low
+AGENT=(--agent codex --model gpt-6-luna --effort "$EF")
+[[ "${2:-}" == gemini-medium ]] && AGENT=(--agent antigravity --model gemini-3.8-flash-medium)
 WT="$(dirname "$ROOT")/t$ID"; BR="undefeel/t$ID"
 mkdir -p plan/specs/review; S="plan/specs/review/$ID.md"
 cat > "$S" <<SPEC
@@ -10,7 +12,7 @@ cat > "$S" <<SPEC
 
 ## Target
 Ветка \`$BR\` в текущем worktree, коммиты: $(git log --format='%h' main.."$BR" | tr '\n' ' ').
-Что требовалось — \`plan/specs/$ID.md\`; общий проект — \`plan/design/folder.md\` (раздел «Решение владельца» важнее остального).
+Что требовалось — \`plan/specs/$ID.md\`; общий проект — \`plan/design/folder.md\` (раздел «Решение владельца» важнее остального) и для этапа 04 \`plan/design/perf.md\`.
 
 ## Change
 Проверь diff \`git diff main...$BR\` на соответствие spec и проекту и на баги: выход за корень и следование симлинкам, утечки fd, порядок блокировок scanMu → saveMu → mu, гонки с watcher/Scan/несколькими runPeer, превращение временной ошибки в удаление или tombstone, потеря данных при сбое между шагами, совместимость формата \`/index\` и \`/file\`. Проверь, что тесты из spec есть и действительно проверяют заявленное (а не проходят тривиально).
@@ -25,4 +27,4 @@ cat > "$S" <<SPEC
 Отчёт в теле \`worker_done\`.
 SPEC
 orca orchestration worker-start --spec-file "$S" --task-title "Ревью $ID" --worktree "path:$WT" \
-  --agent codex --model gpt-6-luna --effort "$EF" --json | jq -r '.result.dispatchId // .'
+  "${AGENT[@]}" --json | jq -r '.result.dispatchId // .'

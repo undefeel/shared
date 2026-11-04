@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Запуск воркера Orca для задачи плана.
 # Использование: plan/tools/start.sh <ID> [исполнитель] [path:<worktree>]
-#   исполнитель: gemini (по умолчанию, = antigravity) | luna | luna-low | sol | sol-low | sol-high
+#   исполнитель: gemini (по умолчанию, = antigravity) | gemini-medium | luna | luna-low | sol | sol-low | sol-high
 #                | haiku | sonnet | sonnet-low | sonnet-high
 #   path:<worktree> — запустить в существующем worktree (повтор, --retry-of передавать через RETRY_OF=<dispatch>)
 set -euo pipefail
@@ -20,6 +20,7 @@ case "$EXEC" in *-low) effort_override=low ;; *-high) effort_override=high ;; es
 
 case "$base" in
   opus|claude-opus*) echo "Ошибка: Opus воркером не запускается" >&2; exit 2 ;;
+  gemini-medium) agent=(--agent antigravity --model gemini-3.8-flash-medium) ;;  # уровень задан в ID модели
   gemini|antigravity) agent=(--agent antigravity)
        [[ -n "$effort_override" ]] && { echo "Ошибка: у antigravity нет --effort (нужен --model)" >&2; exit 2; } ;;
   haiku)  agent=(--agent claude --model claude-haiku-5-5);  effort=medium ;;
@@ -28,7 +29,7 @@ case "$base" in
   sol)    agent=(--agent codex  --model gpt-6.1-sol);       effort=medium ;;
   *) echo "Ошибка: неизвестный исполнитель '$EXEC'" >&2; exit 2 ;;
 esac
-if [[ "$base" != gemini && "$base" != antigravity ]]; then
+if [[ "$base" != gemini && "$base" != antigravity && "$base" != gemini-medium ]]; then
   agent+=(--effort "${effort_override:-$effort}")
 fi
 
