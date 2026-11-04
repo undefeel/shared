@@ -7,7 +7,7 @@
 | ID | Область | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
 | 01-01 | Сеть и криптография: identity, transport, discovery, relay, deploy | L3 | sol | — | done | `task_d76c49997c33` | `ctx_918c6d00edc3` |
-| 01-02 | Ядро синхронизации: folder, app/daemon, activity, config | L3 | sol | — | in_progress | `task_ed3de525e0eb` | `ctx_c7485e503bf5` |
+| 01-02 | Ядро синхронизации: folder, app/daemon, activity, config | L3 | sol | — | done | `task_ed3de525e0eb` | `ctx_c7485e503bf5` |
 | 01-03 | Локальное управление и клиенты: control-сокет, service, CLI, tray, macOS, Omarchy | L2 | luna | — | done | `task_5d7779f837e2` | `ctx_fd8d98d72f5a` |
 
 Критерии готовности каждой задачи: в ветке воркера закоммичен `plan/reviews/<ID>.md` по формату из spec; исходники не тронуты (`git diff --stat main -- . ':!plan'` пуст); `make test` зелёный.
