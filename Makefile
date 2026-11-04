@@ -1,4 +1,4 @@
-.PHONY: build mac app linux test clean omarchy
+.PHONY: build mac app linux test test-omarchy clean omarchy
 
 build: mac linux
 
@@ -17,6 +17,9 @@ linux:
 
 test:
 	go test -race ./...
+
+test-omarchy:
+	node --test omarchy/sharedir/tests/logic.test.mjs
 
 clean:
 	rm -rf bin

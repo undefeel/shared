@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Logic.js" as Logic
 
 // Состояние демона sharedir. Держит `sharedir watch`, который печатает
 // статус JSON-строкой при каждом изменении, и выполняет команды
@@ -25,6 +26,8 @@ Item {
 
   property var status: ({ running: false })
   readonly property bool running: status.running === true
+  readonly property var folderError: Logic.folderError(status)
+  readonly property var scanError: running ? status.scan_error || null : null
   readonly property bool paused: running && status.paused === true
   readonly property bool syncing: running && status.syncing === true
   readonly property var peers: status.peers || []
@@ -43,23 +46,38 @@ Item {
   readonly property bool active: running && (_desiredPaused === -1 ? !paused : _desiredPaused === 0)
 
   property string lastError: ""
+  property string lastResult: ""
+  property string folderAction: ""
   readonly property bool busy: controlProcess.running
 
   function apply(line) {
     var text = String(line || "").trim()
     if (text === "") return
-    try {
-      status = JSON.parse(text)
+    var parsed = Logic.parseStatus(text)
+    if (parsed) {
+      status = parsed
       if (_desiredPaused !== -1 && paused === (_desiredPaused === 1)) _desiredPaused = -1
-    } catch (e) {
-      lastError = "sharedir: " + e
+    } else {
+      lastError = "sharedir: invalid status"
     }
   }
 
   function run(args) {
     if (controlProcess.running) return
     lastError = ""
+    lastResult = ""
     controlProcess.command = [binary].concat(args)
+    controlProcess.running = true
+  }
+
+  function confirmFolder(action) {
+    if (!folderError || controlProcess.running || (action !== "reset" && action !== "rebind")) return
+    var argv = Logic.confirmArgv(binary, status, action)
+    if (!argv) return
+    folderAction = action
+    lastError = ""
+    lastResult = ""
+    controlProcess.command = argv
     controlProcess.running = true
   }
 
@@ -121,10 +139,13 @@ Item {
     command: []
     stderr: StdioCollector { id: controlStderr; waitForEnd: true }
     onExited: function(exitCode) {
+      var result = Logic.cliResult(root.status, root.folderAction, exitCode, controlStderr.text)
       if (exitCode !== 0) {
         root._desiredPaused = -1
-        root.lastError = String(controlStderr.text || "").trim()
       }
+      root.lastError = result.lastError === "Command failed" ? "" : result.lastError.trim()
+      root.lastResult = result.lastResult
+      root.folderAction = ""
     }
   }
 }

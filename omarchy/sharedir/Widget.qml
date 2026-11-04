@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
 import "Strings.js" as S
+import "Logic.js" as Logic
 
 // sharedir в баре Omarchy: виджет-статус и панель в духе Tailscale/Dropbox —
 // hero с переключателем, вкладки «Устройства» и «Активность».
@@ -24,12 +25,14 @@ Panel {
 
   property string tab: "devices"
   property string pairingId: ""
+  property string folderConfirmAction: ""
 
   function tr(key, args) { return S.t(root.lang, key, args) }
 
   // Фаза для иконки и hero — та же логика, что у приложения macOS.
   readonly property string phase: {
     if (!sync.running) return "down"
+    if (sync.folderError) return "blocked"
     if (!sync.active) return "paused"
     if (sync.peers.length === 0) return "nopeers"
     if (sync.syncing) return "syncing"
@@ -41,6 +44,7 @@ Panel {
     case "synced": return "󰉋"   // md-folder
     case "syncing": return "󰴋"  // md-folder_sync
     case "down": return "󰷌"     // md-folder_alert
+    case "blocked": return "󰷌"  // md-folder_alert
     default: return "󰉖"         // md-folder_outline
     }
   }
@@ -52,12 +56,16 @@ Panel {
     case "paused": return tr("Paused")
     case "nopeers": return tr("No devices")
     case "down": return tr("Not running")
+    case "blocked": return tr("Folder stopped")
     default: return tr("Offline")
     }
   }
 
   readonly property string statusLine: {
     if (sync.lastError !== "") return sync.lastError
+    if (sync.folderError) return Logic.folderErrorText(sync.status, root.lang)
+    var scanError = Logic.scanErrorText(sync.status, root.lang)
+    if (scanError !== "") return scanError
     switch (phase) {
     case "down": return tr("The sharedir daemon isn't running.")
     case "paused": return tr("Changes pile up locally and sync after you resume.")
@@ -217,10 +225,97 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             text: root.statusLine
-            color: sync.lastError !== "" ? root.urgent : root.dim
+            color: sync.lastError !== "" || sync.folderError || sync.scanError ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
+          }
+
+          Column {
+            visible: sync.folderError !== null || sync.lastResult !== ""
+            width: parent.width
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              text: sync.folderError ? (sync.folderError.code === "root_empty"
+                ? root.tr("The folder is empty. Choose carefully.")
+                : root.tr("Choose how to continue with this folder.")) : ""
+            }
+
+            Row {
+              visible: sync.folderError !== null && root.folderConfirmAction === ""
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                text: root.tr("Start over (reset)")
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: { root.folderConfirmAction = "reset"; sync.lastError = ""; sync.lastResult = "" }
+              }
+              Button {
+                text: root.tr("Keep this folder (rebind)")
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: { root.folderConfirmAction = "rebind"; sync.lastError = ""; sync.lastResult = "" }
+              }
+            }
+
+            Text {
+              visible: sync.folderError !== null && root.folderConfirmAction !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              text: root.folderConfirmAction === "reset"
+                ? root.tr("Reset explanation")
+                : (sync.folderError && sync.folderError.code === "root_empty"
+                  ? root.tr("Rebind empty warning") : root.tr("Rebind explanation"))
+            }
+
+            Row {
+              visible: sync.folderError !== null && root.folderConfirmAction !== ""
+              width: parent.width
+              spacing: Style.space(8)
+              Button {
+                text: root.tr("Confirm")
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                enabled: !sync.busy
+                onClicked: sync.confirmFolder(root.folderConfirmAction)
+              }
+              Button {
+                text: root.tr("Cancel")
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.folderConfirmAction = ""
+              }
+            }
+
+            Text {
+              visible: sync.lastResult !== ""
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: sync.lastResult === "folder-confirm-failed" || sync.lastResult === "folder-confirm-stale" ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              text: sync.lastResult === "folder-confirm-stale" ? root.tr("Folder status changed. Wait for an update, then confirm again.")
+                : sync.lastResult === "folder-reset-success" ? root.tr("Folder reset confirmed")
+                : sync.lastResult === "folder-rebind-success" ? root.tr("Folder rebind confirmed")
+                : root.tr("Confirmation failed; folder remains stopped")
+            }
           }
 
           Button {
