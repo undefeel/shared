@@ -7,7 +7,11 @@
 package transport
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -39,8 +43,22 @@ const (
 )
 
 type IndexResponse struct {
-	Seq   uint64            `json:"seq"`
-	Files []folder.FileInfo `json:"files"`
+	Seq        uint64            `json:"-"` // compatibility alias for callers; cursor is the wire field
+	Protocol   int               `json:"protocol"`
+	StoreEpoch string            `json:"storeEpoch"`
+	Cursor     uint64            `json:"cursor"`
+	Reset      bool              `json:"reset"`
+	Files      []folder.FileInfo `json:"files"`
+}
+
+// StateProvider must return durable epochs (stable across restart) and an atomic
+// index snapshot/cursor pair. Index implements epoch mismatch/compacted cursor
+// reset with a full baseline, bounded wait, cancellation, and exact-name refresh.
+// Returned records must omit local Disk/binding metadata. Calls run without
+// transport locks; the daemon supplies the real store adapter.
+type StateProvider interface {
+	Hello() Hello
+	Index(context.Context, string, uint64, time.Duration, string) (IndexResponse, error)
 }
 
 func peerID(rawCerts [][]byte) (string, error) {
@@ -80,6 +98,8 @@ const RelayHost = "relay"
 var ErrPeerPaused = errors.New("пир на паузе")
 
 type Server struct {
+	State            StateProvider
+	sessions         sync.Map // bounded, keyed by TLS connection state (never JSON identity)
 	Allowed          func(string) bool
 	WriteIdleTimeout time.Duration
 	PollTimeout      time.Duration
@@ -95,6 +115,8 @@ type Server struct {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /hello", s.hello)
+	mux.HandleFunc("POST /files", s.files)
 	mux.HandleFunc("GET /index", s.index)
 	mux.HandleFunc("GET /file", s.file)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +131,16 @@ func (s *Server) Handler() http.Handler {
 			host, _, _ := net.SplitHostPort(r.RemoteAddr)
 			if port, err := strconv.Atoi(r.Header.Get(portHeader)); err == nil && port > 0 && host != "" {
 				s.OnPeer(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw), net.JoinHostPort(host, strconv.Itoa(port)))
+			}
+		}
+		if r.Header.Get(ProtocolHeader) != "2" {
+			WriteProtocolIncompatible(w, r.Header.Get(ProtocolHeader))
+			return
+		}
+		if r.URL.Path != ProtocolHelloPath {
+			if _, ok := s.sessions.Load(connectionKey(r)); !ok {
+				http.Error(w, "hello required", http.StatusPreconditionRequired)
+				return
 			}
 		}
 		mux.ServeHTTP(w, r)
@@ -127,28 +159,71 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
+func connectionKey(r *http.Request) any {
+	if r.TLS != nil {
+		return r.TLS
+	}
+	return r.RemoteAddr // HTTP-only test fixtures
+}
+
+func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
+	if s.State == nil {
+		http.Error(w, "state unavailable", 503)
+		return
+	}
+	if _, err := DecodeHello(r.Body); err != nil {
+		var pe *ProtocolError
+		if errors.As(err, &pe) {
+			WriteProtocolIncompatible(w, pe.Received)
+		} else {
+			http.Error(w, err.Error(), 400)
+		}
+		return
+	}
+	// Keep negotiation bookkeeping bounded even if the listener does not expose
+	// connection-close callbacks. Eviction fails closed and requires a fresh hello.
+	count := 0
+	s.sessions.Range(func(k, v any) bool {
+		count++
+		if count >= 128 {
+			s.sessions.Delete(k)
+		}
+		return true
+	})
+	s.sessions.Store(connectionKey(r), struct{}{})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.State.Hello())
+}
+
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
-	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
+	if s.State == nil {
+		http.Error(w, "state unavailable", 503)
+		return
+	}
+	q := r.URL.Query()
+	since, _ := strconv.ParseUint(q.Get("since"), 10, 64)
 	timeout := s.PollTimeout
 	if timeout <= 0 {
 		timeout = pollTimeout
 	}
+	if wait, err := time.ParseDuration(q.Get("wait") + "s"); err == nil && wait >= 0 && wait < timeout {
+		timeout = wait
+	}
 	generation := s.Folder.ConfirmedGeneration()
-	s.Folder.Wait(since, timeout)
+	out, err := s.State.Index(r.Context(), q.Get("epoch"), since, timeout, q.Get("name"))
 	if !s.authorize(w, r) {
 		return
 	}
-	if (s.Paused != nil && s.Paused()) || (s.Folder != nil && s.Folder.Blocked() != nil) {
-		http.Error(w, "paused", http.StatusServiceUnavailable)
+	if err != nil || (s.Paused != nil && s.Paused()) || s.Folder.CheckRead(generation) != nil {
+		http.Error(w, "folder unavailable", 503)
 		return
 	}
-	files, seq := s.Folder.Snapshot()
-	if s.Folder.CheckRead(generation) != nil {
-		http.Error(w, "folder unavailable", http.StatusServiceUnavailable)
-		return
+	out.Protocol = ProtocolVersion
+	for i := range out.Files {
+		out.Files[i].Disk = ""
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(IndexResponse{Seq: seq, Files: files})
+	json.NewEncoder(w).Encode(out)
 }
 
 func (s *Server) file(w http.ResponseWriter, r *http.Request) {
@@ -169,8 +244,28 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	defer http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size, 10))
-	if _, err := io.Copy(&versionWriter{progressWriter: progressWriter{w: w, idle: s.writeIdle()}, folder: s.Folder, generation: generation}, f); err == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+	var dst io.Writer = &versionWriter{progressWriter: progressWriter{w: w, idle: s.writeIdle()}, folder: s.Folder, generation: generation}
+	input := bufio.NewReaderSize(f, compressionSampleSize)
+	compress := false
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && fi.Size >= 1024 && !knownIncompressible(fi.Name) {
+		sample, err := input.Peek(int(min(fi.Size, compressionSampleSize)))
+		if err != nil {
+			http.Error(w, "read failed", 409)
+			return
+		}
+		var probe bytes.Buffer
+		zw, _ := gzip.NewWriterLevel(&probe, gzip.BestSpeed)
+		zw.Write(sample)
+		zw.Close()
+		compress = probe.Len()*8 <= len(sample)*7
+	}
+	if compress {
+		w.Header().Set("Content-Encoding", "gzip")
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(fi.Size, 10))
+	}
+
+	if _, n, _, _, err := EncodeBody(dst, input, fi.Name, compress, fi.Size); err == nil && n == fi.Size && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		s.OnServed(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw), fi)
 	}
 }
@@ -190,6 +285,8 @@ func (w *versionWriter) Write(p []byte) (int, error) {
 }
 
 type Client struct {
+	// LocalHello supplies durable local epochs; set before concurrent use.
+	LocalHello      func() Hello
 	http            *http.Client
 	port            int
 	BodyIdleTimeout time.Duration
@@ -215,14 +312,72 @@ func NewClient(id *identity.Identity, peer string, port int, relayDial func(cont
 			return nil
 		},
 	}
-	return &Client{port: port, http: &http.Client{Transport: &http.Transport{
+	c := &Client{port: port, http: &http.Client{Transport: &http.Transport{
 		TLSClientConfig:       tlsCfg,
 		ResponseHeaderTimeout: pollTimeout + 10*time.Second,
 		DialContext:           dialer(relayDial),
 		TLSHandshakeTimeout:   5 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		ForceAttemptHTTP2:     true,
+		DisableCompression:    true,
 	}}}
+	c.http.Transport = &helloTransport{base: c.http.Transport, port: port, client: c}
+	return c
+}
+
+// Negotiate before each operation, including after reconnect or address changes.
+// No successful TLS connection is treated as protocol compatibility evidence.
+type helloTransport struct {
+	base   http.RoundTripper
+	port   int
+	client *Client
+}
+
+func (t *helloTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
+}
+func (t *helloTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	helloCtx, cancel := context.WithTimeout(r.Context(), BodyIdleTimeout)
+	defer cancel()
+	h := r.Clone(helloCtx)
+	u := *r.URL
+	u.Path = ProtocolHelloPath
+	u.RawQuery = ""
+	h.URL = &u
+	h.Method = http.MethodPost
+	local := Hello{Protocol: ProtocolVersion, Features: []string{"files", "gzip"}}
+	if t.client != nil && t.client.LocalHello != nil {
+		local = t.client.LocalHello()
+	}
+	local.Protocol = ProtocolVersion
+	b, _ := json.Marshal(local)
+	h.Body = io.NopCloser(bytes.NewReader(b))
+	h.ContentLength = int64(len(b))
+	h.Header = make(http.Header)
+	h.Header.Set(ProtocolHeader, "2")
+	h.Header.Set("Content-Type", "application/json")
+	h.Header.Set(portHeader, strconv.Itoa(t.port))
+	resp, err := t.base.RoundTrip(h)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != 200 {
+		resp.Body.Close()
+		if resp.StatusCode == 503 {
+			return nil, ErrPeerPaused
+		}
+		return nil, &ProtocolError{Expected: 2, Received: resp.Status}
+	}
+	_, err = DecodeHello(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	r = r.Clone(r.Context())
+	r.Header.Set(ProtocolHeader, "2")
+	return t.base.RoundTrip(r)
 }
 
 func dialer(relayDial func(context.Context) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
@@ -245,6 +400,11 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 		return nil, err
 	}
 	req.Header.Set(portHeader, strconv.Itoa(c.port))
+	req.Header.Set(ProtocolHeader, "2")
+	req.Header.Set("Accept-Encoding", "identity")
+	if strings.HasPrefix(addr, RelayHost+":") {
+		req.Header.Set("Accept-Encoding", "gzip")
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -263,9 +423,14 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 
 // Index ждёт изменения индекса пира относительно since (long-poll).
 func (c *Client) Index(ctx context.Context, addr string, since uint64) (*IndexResponse, error) {
+	return c.IndexSince(ctx, addr, "", since, "")
+}
+
+// IndexSince preserves the peer epoch/cursor; name requests refresh only that record.
+func (c *Client) IndexSince(ctx context.Context, addr, epoch string, since uint64, name string) (*IndexResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, pollTimeout+20*time.Second)
 	defer cancel()
-	resp, err := c.get(ctx, addr, "/index", url.Values{"since": {strconv.FormatUint(since, 10)}})
+	resp, err := c.get(ctx, addr, "/index", url.Values{"since": {strconv.FormatUint(since, 10)}, "epoch": {epoch}, "name": {name}})
 	if err != nil {
 		return nil, err
 	}
@@ -328,6 +493,15 @@ func decodeIndex(out *IndexResponse, r io.Reader) error {
 			return errors.New("invalid index field")
 		}
 		switch strings.ToLower(name) {
+		case "protocol":
+			err = d.Decode(&out.Protocol)
+		case "storeepoch":
+			err = d.Decode(&out.StoreEpoch)
+		case "reset":
+			err = d.Decode(&out.Reset)
+		case "cursor":
+			err = d.Decode(&out.Cursor)
+			out.Seq = out.Cursor
 		case "seq":
 			err = d.Decode(&out.Seq)
 		case "files":
@@ -395,7 +569,11 @@ func (c *Client) Fetcher(addr string) folder.Fetcher {
 			return err
 		}
 		defer resp.Body.Close()
-		n, err := io.Copy(w, io.LimitReader(c.progressBody(resp.Body, cancel), fi.Size+1))
+		encoding := resp.Header.Get("Content-Encoding")
+		if encoding == "" {
+			encoding = "identity"
+		}
+		n, _, err := DecodeBody(w, c.progressBody(resp.Body, cancel), encoding, fi.Size)
 		if err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package folder_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,37 @@ import (
 	"sharedir/internal/folder"
 	"sharedir/internal/transport"
 )
+
+type httpState struct{ f *folder.Folder }
+
+func (s httpState) Hello() transport.Hello {
+	return transport.Hello{Protocol: 2, StoreEpoch: "test-store", PeerSetEpoch: "test-peers"}
+}
+func (s httpState) Index(_ context.Context, epoch string, since uint64, wait time.Duration, name string) (transport.IndexResponse, error) {
+	s.f.Wait(since, wait)
+	files, seq := s.f.Snapshot()
+	return transport.IndexResponse{Protocol: 2, StoreEpoch: "test-store", Cursor: seq, Reset: epoch != "test-store", Files: files}, nil
+}
+func helloHTTP(t *testing.T, c *http.Client, addr string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", addr+"/hello", strings.NewReader(`{"protocol":2,"storeEpoch":"test","peerSetEpoch":"test","features":[]}`))
+	req.Header.Set(transport.ProtocolHeader, "2")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatal("hello", resp.Status)
+	}
+}
+func getHTTP(c *http.Client, addr string) (*http.Response, error) {
+	req, _ := http.NewRequest("GET", addr, nil)
+	req.Header.Set(transport.ProtocolHeader, "2")
+	req.Header.Set("Accept-Encoding", "identity")
+	return c.Do(req)
+}
 
 func httpFolder(t *testing.T, size int64) (*folder.Folder, folder.FileInfo) {
 	t.Helper()
@@ -67,14 +99,15 @@ func TestBlockedIndexAlreadyWaitingIntegration(t *testing.T) {
 	entered := make(chan struct{})
 	folder.SetWaitEntered(f, func() { close(entered) })
 	_, seq := f.Snapshot()
-	server := httptest.NewServer((&transport.Server{Folder: f, PollTimeout: 10 * time.Second}).Handler())
+	server := httptest.NewServer((&transport.Server{Folder: f, State: httpState{f}, PollTimeout: 10 * time.Second}).Handler())
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
+	helloHTTP(t, client, server.URL)
 	done := make(chan struct{})
 	var resp *http.Response
 	var err error
 	go func() {
-		resp, err = client.Get(server.URL + "/index?since=" + strconv.FormatUint(seq, 10))
+		resp, err = getHTTP(client, server.URL+"/index?since="+strconv.FormatUint(seq, 10))
 		close(done)
 	}()
 	awaitHTTPBarrier(t, entered)
@@ -115,14 +148,19 @@ func TestRebindInterruptsHTTPFileIntegration(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
-	h := (&transport.Server{Folder: f}).Handler()
+	h := (&transport.Server{Folder: f, State: httpState{f}}).Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/file" {
+			h.ServeHTTP(w, r)
+			return
+		}
 		h.ServeHTTP(&firstChunkBarrier{ResponseWriter: w, entered: entered, release: release}, r)
 	}))
 	defer server.Close()
 	defer unblock()
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(server.URL + "/file?name=item&hash=" + fi.Hash)
+	helloHTTP(t, client, server.URL)
+	resp, err := getHTTP(client, server.URL+"/file?name=item&hash="+fi.Hash)
 	if err != nil {
 		t.Fatal(err)
 	}

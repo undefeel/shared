@@ -162,9 +162,9 @@ func TestRequestRevocation(t *testing.T) {
 	allowed.Store(true)
 	s := &Server{Allowed: func(string) bool { return allowed.Load() }, Paused: func() bool { return true }}
 	cert := &x509.Certificate{Raw: []byte("peer")}
-	h := s.Handler()
+	h := readyHandler(s)
 	request := func() int {
-		r := httptest.NewRequest("GET", "https://peer/index", nil)
+		r := v2Request("GET", "https://peer/index", nil)
 		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -420,11 +420,11 @@ func TestLongPollRevocation(t *testing.T) {
 	}
 	_, seq := f.Snapshot()
 	var calls atomic.Int32
-	s := &Server{Folder: f, PollTimeout: time.Millisecond, Allowed: func(string) bool { return calls.Add(1) == 1 }}
-	r := httptest.NewRequest("GET", fmt.Sprintf("https://peer/index?since=%d", seq), nil)
+	s := &Server{Folder: f, State: testState{f}, PollTimeout: time.Millisecond, Allowed: func(string) bool { return calls.Add(1) == 1 }}
+	r := v2Request("GET", fmt.Sprintf("https://peer/index?since=%d", seq), nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: []byte("peer")}}}
 	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
+	readyHandler(s).ServeHTTP(w, r)
 	if w.Code != 403 {
 		t.Fatalf("long-poll returned %d", w.Code)
 	}
