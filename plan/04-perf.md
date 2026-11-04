@@ -65,7 +65,7 @@
 | 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | done | `task_4f16c7b18aaf` | `ctx_7f65458f1bbd` |
 | 04-16 | миграция helpers | L3 | sol | 04-15 | done | `task_b65eaf5cc387` | `ctx_56c75a23509c` |
 | 04-17 | подключить store Open/save | L3 | sol | 04-16 | in_progress | `task_07548a50ab81` | `ctx_9b7c2630b534` |
-| 04-18 | control persistence | L3 | sol | 04-17 | todo | `task_579c31020cbe` |  |
+| 04-18 | control persistence (объединена с 04-17) | L3 | sol | 04-17 | merged | `task_579c31020cbe` |  |
 | 04-19 | commit группы | L3 | sol | 04-18 | todo | `task_8b9cce11d4db` |  |
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_2bf0b88271c6` |  |
 | 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_708e0596d8b3` |  |
@@ -103,3 +103,4 @@
 - 04-15: только примитивы hooks/flush; подключение вызывающих — 04-17 (store/journal), 04-19 (commit G1–G5), 04-21/22 (apply).
 - 04-30 должна зарегистрировать mux.HandleFunc("POST /files", s.files) (обработчик из 04-28) — напомнить воркеру при вопросах.
 - API из 04-15 для следующих задач: 04-17 — persistHooks.write(kind,path,writer,data), durableFile(file,phase), fsyncOnly(file,phase), phase(txID,phase); 04-19 — fsyncOnly на каждый inode/каталог G1, затем один fullSyncDevices(files,phase), phase-callbacks G1–G5; 04-21/22 — fsyncOnly/clockNow; harness — SetPersistenceProbe до конкурентного использования, PersistenceStats. Устаревший текст про FULLFSYNC на файл в perf.md R1/R3/R20 перекрыт решением владельца п.1.
+- 04-18 объединена с 04-17 (ownership расширен на rootstate.go, rootstate_test.go, journal_test.go, commit_test.go, бюджет ~600 строк); после мержа 04-17 задачу 04-18 в Orca отметить completed «merged into 04-17», чтобы разблокировать зависимые.
