@@ -36,6 +36,7 @@ const usage = `sharedir — синхронизация папки между м�
   status [--json]                     состояние синхронизации и найденные устройства
   watch                               JSON-строка статуса при каждом изменении (для UI)
   pause | resume                      поставить синхронизацию на паузу / продолжить
+  folder-confirm --action reset|rebind --token ТОКЕН  подтвердить решение по остановленной папке
   id                                  показать ID этого устройства
   pair ID [--name ИМЯ] [--addr IP[:ПОРТ]]  доверять устройству (делается на обеих машинах)
   unpair ID                           перестать доверять устройству
@@ -69,6 +70,8 @@ func main() {
 		err = cmdRelay(home, args)
 	case "pause", "resume":
 		err = app.NewCtl(home).SetPaused(cmd == "pause")
+	case "folder-confirm":
+		err = cmdFolderConfirm(home, args)
 	case "id":
 		err = cmdID(home)
 	case "pair":
@@ -187,6 +190,10 @@ func cmdStatus(home string, args []string) error {
 	if err != nil {
 		return errors.New(i18n.T("daemon is not running"))
 	}
+	if st.FolderError != nil {
+		fmt.Printf("⚠️  %s: %s\n", i18n.T("Folder is blocked"), st.FolderError.Message)
+		fmt.Printf("   %s\n", i18n.T("Confirm with: sharedir folder-confirm --action reset|rebind --token %s", st.FolderError.Token))
+	}
 	if st.Paused {
 		fmt.Println(i18n.T("Sync is paused (sharedir resume)"))
 	}
@@ -297,4 +304,21 @@ func cmdUnpair(home string, args []string) error {
 		}
 	}
 	return err
+}
+
+func cmdFolderConfirm(home string, args []string) error {
+	fs := flag.NewFlagSet("folder-confirm", flag.ContinueOnError)
+	action := fs.String("action", "", "действие: reset или rebind")
+	token := fs.String("token", "", "токен подтверждения из status")
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *action != "reset" && *action != "rebind" {
+		return errors.New("требуется явное действие: --action reset|rebind")
+	}
+	if strings.TrimSpace(*token) == "" {
+		return errors.New("требуется токен подтверждения: --token ТОКЕН")
+	}
+	return app.NewCtl(home).ConfirmFolder(*token, *action)
 }
