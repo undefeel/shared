@@ -87,7 +87,7 @@
 | 04-53 | QML error UI | L2 | luna | 04-32 | superseded→04-61 | `task_2de5a1abd8c5` |  |
 | 04-54 | perf harness | L3 | sol | 04-32, 04-50 | superseded→04-62 | `task_6d7100767724` |  |
 | 04-60 | параллельные загрузки + конвейер демона (04-24 + 04-32) | L3 | sol-ведущий → luna | 04-22, 04-31b | done | `task_b4f8161c2d37` | `ctx_1156c3f2450d` |
-| 04-61 | ошибка несовместимого пира в меню macOS и виджете (04-52 + 04-53) | L2 | luna | 04-60 | in_progress | `task_455d411788a5` | `ctx_e8e0e649c5df` |
+| 04-61 | ошибка несовместимого пира в меню macOS и виджете (04-52 + 04-53) | L2 | luna→sol (эскалация) | 04-60 | in_progress | `task_455d411788a5` | `task_455d411788a5 cannot retry from Dispatch ctx_e8e0e649c5df. Orchestration mutation request ID: af2c5026-525d-4eef-8b5e-58ae76f83d97.","data":{"taskId":"task_455d411788a5","status":"dispatched","unmetDependencies":[],"retryOf":"ctx_e8e0e649c5df","nextSteps":["--retry-of must name the latest settled Dispatch of a failed or blocked Task; check orca orchestration dispatch-show --task task_455d411788a5 --json and orca orchestration worker-show --dispatch ctx_e8e0e649c5df --json."],"orchestrationRequestId":"af2c5026-525d-4eef-8b5e-58ae76f83d97","originalCommand":["/Applications/Orca.app/Contents/Resources/bin/orca","orchestration","worker-start","--task","task_455d411788a5","--worktree","path:/Users/kodoku/orca/workspaces/sharedir/t04-61","--agent","codex","--model","gpt-6.1-sol","--effort","medium","--retry-of","ctx_e8e0e649c5df","--json"]}}}` |
 | 04-62 | бенчмарк и замер порогов (04-54) | L3 | sol-ведущий → luna | 04-60 | in_progress | `task_6e2f278b040d` | `ctx_0827930458b3` |
 
 Волны B (04-33…04-41) и C (04-42…04-49, 04-51, 04-55…04-57) — задачи и spec создаются после замера волны A. Ownership и тесты каждой задачи — таблица «Задачи реализации» в `plan/design/perf.md`.
@@ -127,3 +127,4 @@
 - 04-60: лид закончил ход, ожидая ревью luna (22:08), и простаивал ~25 мин, пока отчёт лежал в его inbox; разбужен send'ом. В spec ведущих добавлять: «не заканчивай ход во время ожидания, перезапускай lead.sh/self-review.sh --wait при коде 3». При старте 04-62 отправить это сообщением.
 - Сторож в wait.sh будит простаивающих лидов; скрипты на коде 3 пишут «не заканчивай ход». 04-62 spec дополнен (Orca-задачу пересоздать при старте).
 - 04-61: первый воркер закончил ход после разведки без реализации (outcome failed) — перезапуск RETRY_OF тем же luna.
+- 04-61: luna (medium) дважды заканчивала ход после разведки без реализации — эскалация на sol.
