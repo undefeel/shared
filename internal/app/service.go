@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	launchdLabel = "dev.sharedir.agent"
+	launchdLabel    = "dev.sharedir.agent"
 	systemdUnitName = "sharedir.service"
 )
 
@@ -49,6 +49,7 @@ func launchdPlist(exe, home string) string {
 `, xmlEscape(launchdLabel), xmlEscape(exe), xmlEscape(home), xmlEscape(logPath), xmlEscape(logPath))
 }
 
+// В ExecStart systemd раскрывает $VAR, поэтому там $ удваивается; в Environment — нет.
 func systemdUnit(exe, home string) (string, error) {
 	if strings.ContainsAny(exe, "\n\r") || strings.ContainsAny(home, "\n\r") {
 		return "", fmt.Errorf("путь содержит перевод строки")
@@ -66,7 +67,7 @@ RestartSec=5
 
 [Install]
 WantedBy=graphical-session.target
-`, escapeSystemdValue(exe), escapeSystemdValue(home))
+`, strings.ReplaceAll(escapeSystemdValue(exe), "$", "$$"), escapeSystemdValue(home))
 	return content, nil
 }
 
