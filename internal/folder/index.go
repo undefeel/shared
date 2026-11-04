@@ -151,6 +151,7 @@ type Folder struct {
 	generation        uint64       // saveMu; attempts, including failed saves
 	durableGeneration uint64       // saveMu; advances only after directory flush
 	persistHooks      persistHooks // set before concurrent use, for fault injection
+	waitEntered       func()       // Test barrier, set before concurrent use; nil in production.
 
 	mu        sync.Mutex
 	files     map[string]*FileInfo
@@ -362,6 +363,9 @@ func (f *Folder) Wait(since uint64, timeout time.Duration) {
 	}
 	ch := f.changed
 	f.mu.Unlock()
+	if f.waitEntered != nil {
+		f.waitEntered()
+	}
 	select {
 	case <-ch:
 	case <-time.After(timeout):
