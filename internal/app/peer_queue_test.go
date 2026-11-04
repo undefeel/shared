@@ -49,10 +49,17 @@ func TestPeerQueueFailureDoesNotRepeatAcceptedIndex(t *testing.T) {
 	if epoch, cursor, ok := q.cursor("p"); !ok || epoch != "epoch" || cursor != 64 {
 		t.Fatalf("applied cursor = %q/%d/%v", epoch, cursor, ok)
 	}
-	for attempt := uint(1); attempt < 16; attempt++ {
+	for attempt := uint(1); attempt <= 7; attempt++ {
 		d := peerRetryDelay(attempt)
-		if d < peerRetryMin || d > peerRetryMax {
+		base := peerRetryMin << (attempt - 1)
+		if d < base || d > base+base/5 {
 			t.Fatalf("backoff(%d) = %v", attempt, d)
+		}
+	}
+	for attempt := uint(8); attempt <= 32; attempt++ {
+		d := peerRetryDelay(attempt)
+		if d < 24*time.Second || d > 30*time.Second {
+			t.Fatalf("capped backoff(%d) = %v, want 24s..30s", attempt, d)
 		}
 	}
 	if d := peerRetryDelay(2); d < 500*time.Millisecond || d > 600*time.Millisecond {
@@ -72,7 +79,7 @@ func TestPeerQueueNewerVersionReplacesPending(t *testing.T) {
 		t.Fatal("index not accepted")
 	}
 	q.failed("p", "epoch", old, now)
-	if !q.accept("p", "epoch", 2, false, []folder.FileInfo{old, newer}) {
+	if !q.accept("p", "epoch", 2, false, []folder.FileInfo{old, newer, old, newer}) {
 		t.Fatal("newer index not accepted")
 	}
 	got := q.due("p", now, 0)
@@ -86,6 +93,9 @@ func TestPeerQueueNewerVersionReplacesPending(t *testing.T) {
 	q.applied("p", "epoch", newer)
 	if len(q.due("p", now, 0)) != 0 {
 		t.Fatal("durably applied version remains pending")
+	}
+	if epoch, cursor, ok := q.cursor("p"); !ok || epoch != "epoch" || cursor != 2 {
+		t.Fatalf("cursor after duplicate records = %q/%d/%v", epoch, cursor, ok)
 	}
 }
 

@@ -248,6 +248,113 @@ func TestDownloadPoolBoundsProducersWhileCommitBlocked(t *testing.T) {
 	}
 }
 
+func TestDownloadPoolBlocksByteBudgetAndOversizedProducers(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	n.f.SetDownloadConcurrency(8)
+	gate := make(chan struct{})
+	entered := make(chan string, 4)
+	fetch := func(_ context.Context, fi FileInfo, _ io.Writer) error {
+		entered <- fi.Name
+		<-gate
+		return fmt.Errorf("release test fetch")
+	}
+	start := func(peer, name string, size int64) <-chan struct{} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = n.f.ApplyRemote(context.Background(), peer, []FileInfo{{Name: name, Size: size, Hash: hex.EncodeToString(make([]byte, 32)), Version: Vector{peer: 1}}}, fetch, nil)
+		}()
+		return done
+	}
+	// Two live fetches consume the full byte budget; a third producer waits
+	// before invoking its fetcher even though operation slots remain.
+	n.f.scanMu.Lock()
+	doneA := start("B", "half-a", maxStagedBytes/2)
+	doneB := start("C", "half-b", maxStagedBytes/2)
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			n.f.scanMu.Unlock()
+			t.Fatal("byte-budget producers did not start")
+		}
+	}
+	doneC := start("D", "over-byte", 1)
+	select {
+	case name := <-entered:
+		n.f.scanMu.Unlock()
+		t.Fatalf("byte-budget producer %q fetched early", name)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(gate)
+	n.f.scanMu.Unlock()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("third producer did not enter after byte budget drained")
+	}
+	for _, done := range []<-chan struct{}{doneA, doneB, doneC} {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("byte-budget producer did not drain")
+		}
+	}
+
+	// An oversized request waits for all ordinary staging to drain, rather
+	// than being admitted alongside a live ordinary producer.
+	gate2 := make(chan struct{})
+	startedOrdinary := make(chan struct{})
+	ordinaryDone := make(chan struct{})
+	go func() {
+		defer close(ordinaryDone)
+		_, _ = n.f.ApplyRemote(context.Background(), "E", []FileInfo{{Name: "ordinary", Size: 1, Hash: hex.EncodeToString(make([]byte, 32)), Version: Vector{"E": 1}}}, func(context.Context, FileInfo, io.Writer) error {
+			close(startedOrdinary)
+			<-gate2
+			return fmt.Errorf("release ordinary")
+		}, nil)
+	}()
+	select {
+	case <-startedOrdinary:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ordinary producer did not start")
+	}
+	oversizedEntered := make(chan struct{})
+	oversizedGate := make(chan struct{})
+	oversizedDone := make(chan struct{})
+	go func() {
+		defer close(oversizedDone)
+		_, _ = n.f.ApplyRemote(context.Background(), "F", []FileInfo{{Name: "oversized", Size: maxStagedBytes + 1, Hash: hex.EncodeToString(make([]byte, 32)), Version: Vector{"F": 1}}}, func(context.Context, FileInfo, io.Writer) error {
+			close(oversizedEntered)
+			<-oversizedGate
+			return fmt.Errorf("release oversized")
+		}, nil)
+	}()
+	select {
+	case name := <-entered:
+		t.Fatalf("oversized producer %q entered beside ordinary staging", name)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(gate2)
+	select {
+	case <-oversizedEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("oversized producer did not enter after ordinary drain")
+	}
+	select {
+	case <-ordinaryDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ordinary producer did not drain")
+	}
+	close(oversizedGate)
+	select {
+	case <-oversizedDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("oversized producer did not drain")
+	}
+}
+
 func TestDownloadCancellationReleasesPoolAndTemporaryFile(t *testing.T) {
 	n := newNode(t, "A")
 	defer n.f.Close()

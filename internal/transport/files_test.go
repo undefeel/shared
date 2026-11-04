@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,6 +98,26 @@ func TestFilesChangesBetweenFrames(t *testing.T) {
 		})
 	}
 }
+
+func TestSingleFileKnownTombstoneReturnsVersionChanged(t *testing.T) {
+	f, fi := fileFixture(t)
+	if err := os.WriteFile(filepath.Join(f.Root, "b"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.Root, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("GET", "/file?name=a&hash="+fi.Hash, nil)
+	w := httptest.NewRecorder()
+	(&Server{Folder: f}).file(w, r)
+	if w.Code != http.StatusConflict || strings.TrimSpace(w.Body.String()) != "version_changed" {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
 func TestFilesLimitsAndBlocked(t *testing.T) {
 	f, fi := fileFixture(t)
 	for _, items := range [][]BatchItem{

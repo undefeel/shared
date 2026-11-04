@@ -97,6 +97,7 @@ const RelayHost = "relay"
 // ErrPeerPaused — пир поставил синхронизацию на паузу.
 var ErrPeerPaused = errors.New("пир на паузе")
 var ErrVersionChanged = errors.New("peer file version changed")
+var ErrFileUnavailable = errors.New("peer file unavailable")
 
 type Server struct {
 	State            StateProvider
@@ -239,7 +240,7 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 		message := "file unavailable"
 		if err != nil {
 			known, _, exists := s.Folder.Lookup(q.Get("name"))
-			if exists && !known.Deleted && known.Hash != q.Get("hash") {
+			if exists && (known.Deleted || known.Hash != q.Get("hash")) {
 				message = "version_changed"
 			}
 		}
@@ -430,6 +431,9 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 		resp.Body.Close()
 		if strings.TrimSpace(string(body)) == "version_changed" {
 			return nil, ErrVersionChanged
+		}
+		if strings.TrimSpace(string(body)) == "file unavailable" {
+			return nil, ErrFileUnavailable
 		}
 		return nil, fmt.Errorf("%s: %s", resp.Status, body)
 	}

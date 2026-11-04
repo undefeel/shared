@@ -102,10 +102,13 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 	if !queue.accept(serverID.ID, epoch, cursor, false, remote) {
 		t.Fatal("index rejected")
 	}
-	// Advance the large record after its index snapshot; the old hash must
-	// trigger an exact-name refresh, then retry with the returned version.
-	largeBody = strings.Repeat("updated-large-body-", 30000)
-	if err := os.WriteFile(filepath.Join(source.Root, "large"), []byte(largeBody), 0600); err != nil {
+	// Delete one batch-sized and one single-file record after the index
+	// snapshot. Both unavailable paths must refresh by exact name and apply the
+	// returned tombstones before the accepted cursor can settle.
+	if err := os.Remove(filepath.Join(source.Root, "small-0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(source.Root, "large")); err != nil {
 		t.Fatal(err)
 	}
 	if err := source.Scan(); err != nil {
@@ -115,27 +118,30 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 	d := &Daemon{folder: destination}
 	destination.SetDownloadConcurrency(2)
 	got, failed := d.applyPeerDue(context.Background(), client, addr, serverID.ID, clientID.Short(), epoch, queue.activeCursor(serverID.ID), due, queue, nil)
-	if got != 3 || failed != 1 {
+	if got != 2 || failed != 2 {
 		t.Fatalf("applied=%d failed=%d", got, failed)
 	}
 	if _, _, ok := queue.cursor(serverID.ID); ok {
 		t.Fatal("cursor advanced before changed large body retry")
 	}
-	if batches.Load() != 1 || singles.Load() != 1 || namedRefreshes.Load() != 1 || fullIndexes.Load() != 0 {
+	if batches.Load() != 1 || singles.Load() != 1 || namedRefreshes.Load() != 2 || fullIndexes.Load() != 0 {
 		t.Fatalf("transport paths: /files=%d /file=%d", batches.Load(), singles.Load())
 	}
 	due = queue.due(serverID.ID, time.Now(), 64)
-	if len(due) != 1 || due[0].Name != "large" {
+	if len(due) != 2 {
 		t.Fatalf("retry queue=%#v", due)
 	}
 	got, failed = d.applyPeerDue(context.Background(), client, addr, serverID.ID, clientID.Short(), epoch, queue.activeCursor(serverID.ID), due, queue, nil)
-	if got != 1 || failed != 0 {
+	if got != 2 || failed != 0 {
 		t.Fatalf("retry applied=%d failed=%d", got, failed)
 	}
-	if batches.Load() != 1 || singles.Load() != 2 || namedRefreshes.Load() != 1 || fullIndexes.Load() != 0 {
+	if batches.Load() != 1 || singles.Load() != 1 || namedRefreshes.Load() != 2 || fullIndexes.Load() != 0 {
 		t.Fatalf("retries batches=%d singles=%d named=%d full=%d", batches.Load(), singles.Load(), namedRefreshes.Load(), fullIndexes.Load())
 	}
 	for _, fi := range remote {
+		if fi.Name == "small-0" || fi.Name == "large" {
+			continue
+		}
 		data, err := os.ReadFile(filepath.Join(destination.Root, fi.Name))
 		if err != nil {
 			t.Fatal(err)
@@ -150,6 +156,11 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 	}
 	if _, appliedCursor, ok := queue.cursor(serverID.ID); !ok || appliedCursor != cursor {
 		t.Fatalf("queue cursor=%d/%v", appliedCursor, ok)
+	}
+	for _, name := range []string{"small-0", "large"} {
+		if _, err := os.Stat(filepath.Join(destination.Root, name)); !os.IsNotExist(err) {
+			t.Fatalf("deleted record %q remains: %v", name, err)
+		}
 	}
 }
 

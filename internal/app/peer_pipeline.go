@@ -40,7 +40,7 @@ func (d *Daemon) applyPeerDue(ctx context.Context, client *transport.Client, add
 				if result.Header.Status == "ok" {
 					bodies[byID[id].Name] = result.Body
 				}
-				if result.Header.Status == "version_changed" {
+				if result.Header.Status == "version_changed" || result.Header.Status == "not_found" {
 					changed = append(changed, byID[id])
 				}
 			}
@@ -65,7 +65,9 @@ func (d *Daemon) applyPeerDue(ctx context.Context, client *transport.Client, add
 			qe := queue.activeEpoch(peerID)
 			if err != nil {
 				queue.failed(peerID, qe, fi, time.Now())
-				if errors.Is(err, transport.ErrVersionChanged) {
+				// A known unavailable/stale response can race the index snapshot.
+				// An exact refresh is harmless: only a returned record replaces work.
+				if errors.Is(err, transport.ErrVersionChanged) || errors.Is(err, transport.ErrFileUnavailable) || errors.Is(err, transport.ErrPeerPaused) {
 					changed = append(changed, fi)
 				}
 			} else {
