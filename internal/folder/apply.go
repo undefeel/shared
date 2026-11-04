@@ -452,7 +452,7 @@ func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint6
 		if err != nil {
 			return st, err
 		}
-		_, err = io.Copy(incoming, source)
+		err = cloneInto(source, incoming, r.Size)
 		if tmp != "" {
 			source.Close()
 		}
