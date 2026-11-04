@@ -12,7 +12,7 @@ import (
 func persistFolder(t *testing.T) *Folder {
 	t.Helper()
 	return &Folder{statePath: filepath.Join(t.TempDir(), "index.json"), files: map[string]*FileInfo{
-		"a": {Name: "a", Disk: "local-a", Version: Vector{"me": 1}},
+		"a": {Name: "a", Disk: "a", Version: Vector{"me": 1}},
 	}}
 }
 func readPersisted(t *testing.T, f *Folder) persisted {
