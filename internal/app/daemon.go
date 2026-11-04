@@ -115,10 +115,11 @@ type Daemon struct {
 	ID   *identity.Identity
 	Log  *log.Logger
 
-	ctx    context.Context
-	folder *folder.Folder
-	disc   *discovery.Discovery
-	act    *activity
+	ctx           context.Context
+	folder        *folder.Folder
+	folderFactory folderFactory
+	disc          *discovery.Discovery
+	act           *activity
 
 	lifecycle    sync.Mutex
 	workers      sync.WaitGroup
@@ -172,7 +173,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	defer ctl.Close()
 
-	d.folder, err = folder.Open(cfg.Folder, filepath.Join(d.Home, "index.json"), d.ID.Short(), d.Log)
+	d.folder, err = d.openFolder(cfg.Folder, filepath.Join(d.Home, "index.json"))
 	if err != nil {
 		return err
 	}
