@@ -41,7 +41,7 @@ struct MenuBarIcon: View {
             }
         case .setup, .noPeers:
             Image(systemName: "folder.badge.plus")
-        case .notRunning:
+        case .notRunning, .incompatible:
             Image(systemName: "exclamationmark.triangle")
         case .starting, .paused, .offline:
             Image(systemName: "folder")

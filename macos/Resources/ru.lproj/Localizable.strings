@@ -111,3 +111,5 @@
 "to %@" = "на %@";
 "conflict, both versions kept" = "конфликт, сохранены обе версии";
 "deleted" = "удалён";
+
+"Update the other machine to the same sharedir version" = "Обновите sharedir на другом компьютере до той же версии";

@@ -29,6 +29,7 @@ Item {
   readonly property var folderError: Logic.folderError(status)
   readonly property var scanError: running ? status.scan_error || null : null
   readonly property bool paused: running && status.paused === true
+  readonly property bool incompatible: peers.some(Logic.incompatiblePeer)
   readonly property bool syncing: running && status.syncing === true
   readonly property var peers: status.peers || []
   readonly property var candidates: status.candidates || []

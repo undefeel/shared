@@ -30,20 +30,14 @@ Panel {
   function tr(key, args) { return S.t(root.lang, key, args) }
 
   // Фаза для иконки и hero — та же логика, что у приложения macOS.
-  readonly property string phase: {
-    if (!sync.running) return "down"
-    if (sync.folderError) return "blocked"
-    if (!sync.active) return "paused"
-    if (sync.peers.length === 0) return "nopeers"
-    if (sync.syncing) return "syncing"
-    return sync.anyConnected ? "synced" : "offline"
-  }
+  readonly property string phase: Logic.phase(sync.status, sync.active)
 
   readonly property string barGlyph: {
     switch (phase) {
     case "synced": return "󰉋"   // md-folder
     case "syncing": return "󰴋"  // md-folder_sync
     case "down": return "󰷌"     // md-folder_alert
+    case "incompatible": return "󰷌"
     case "blocked": return "󰷌"  // md-folder_alert
     default: return "󰉖"         // md-folder_outline
     }
@@ -56,6 +50,7 @@ Panel {
     case "paused": return tr("Paused")
     case "nopeers": return tr("No devices")
     case "down": return tr("Not running")
+    case "incompatible": return tr("Incompatible version")
     case "blocked": return tr("Folder stopped")
     default: return tr("Offline")
     }
@@ -64,6 +59,7 @@ Panel {
   readonly property string statusLine: {
     if (sync.lastError !== "") return sync.lastError
     if (sync.folderError) return Logic.folderErrorText(sync.status, root.lang)
+    if (phase === "incompatible") return tr("Update the other machine to the same sharedir version")
     var scanError = Logic.scanErrorText(sync.status, root.lang)
     if (scanError !== "") return scanError
     switch (phase) {
