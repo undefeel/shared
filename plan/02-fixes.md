@@ -45,7 +45,7 @@
 | 02-25 | watcher после rebind | L2 | luna | 02-24 | done | `task_2edf2066053f` | `ctx_b44e8eb6d5a7` |
 | 02-26 | CLI подтверждения | L1 | antigravity | 02-24 | done | `task_b276f2e4ca2a` | `ctx_4fd6990a24df` |
 | 02-27 | macOS меню | L2 | luna | 02-24 | done | `task_79b6ee2d8284` | `ctx_77640c0ab8b9` |
-| 02-28 | Omarchy виджет | L2 | luna | 02-26 | review | `task_2e483d867673` | `ctx_3f216c07fbb9` |
+| 02-28 | Omarchy виджет | L2 | luna | 02-26 | done | `task_2e483d867673` | `ctx_3f216c07fbb9` |
 | 02-29 | фиксация политики README | L1 | haiku | 02-21, 02-24, 02-26 | done | `task_56f08d93d87a` | `ctx_553058e207dd` |
 | 02-30 | сквозная crash/concurrency приёмка | L3 | sol | 02-25, 02-26 | done | `task_d4e9297f1093` | `ctx_3897963ce394` |
 
