@@ -15,7 +15,7 @@
 | 02-03 | Discovery: лимит таблицы и частоты | 01-01-03 (UDP) | L2 | luna | `internal/discovery/*` | — | done | `task_a5e353dcfa14` | `ctx_2fa06cb0b7c8` |
 | 02-04 | Transport + сервер демона: отзыв доступа, таймауты, лимиты индекса и загрузки | 01-01-01, -02, -03 (incoming), -04, -05 | L3 | sol | `internal/transport/*`, `internal/app/daemon.go` (сеть), `internal/app/relay.go` | — | done | `task_ca25c330076e` | `ctx_3f0f2affa738` |
 | 02-05 | Приватный каталог control-сокета, проверка владельца | 01-03-01 | L2 | luna | `internal/config/*`, `internal/app/control*.go`, `macos/SharedirBar/ControlClient.swift` | — | done | `task_2a3f085b8dd9` | `ctx_63df2dd8b8c7` |
-| 02-06 | Экранирование plist/unit, гонка activity | 01-03-02, 01-02-12 | L1 | antigravity | `internal/app/service*.go`, `internal/app/activity*.go` | — (в очереди: слот после первого освободившегося) | in_progress | `task_a66d31b76476` | `ctx_5d00c9c8109a` |
+| 02-06 | Экранирование plist/unit, гонка activity | 01-03-02, 01-02-12 | L1 | antigravity | `internal/app/service*.go`, `internal/app/activity*.go` | — (в очереди: слот после первого освободившегося) | done | `task_a66d31b76476` | `ctx_5d00c9c8109a` |
 
 02-04 дробить не стал: отзыв доступа, таймауты и лимиты — это одна обёртка listener и один набор callback'ов в `transport.go` и `daemon.go`. Если разделить, две задачи будут править одни и те же строки.
 
