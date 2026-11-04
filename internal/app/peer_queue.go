@@ -37,6 +37,7 @@ func newPeerQueue() *peerQueue {
 	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), blocked: make(map[string]int)}
 }
 
+// accept queues candidates; false may queue a prefix, but never advances cursor.
 func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files []folder.FileInfo) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -51,51 +52,58 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 	}
 	old, known := q.cursors[peer]
 	newEpoch := reset || (known && old.epoch != epoch)
-	base := len(q.pending)
 	if newEpoch {
 		for key := range q.pending {
-			if key.peer == peer {
-				base--
+			if key.peer == peer && key.epoch != epoch {
+				delete(q.pending, key)
 			}
 		}
 	}
+	if q.blocked[peer] > 0 && !newEpoch {
+		return false
+	}
 	adds := make(map[peerItemKey]peerPending, len(files))
+	left := 0
+	added := 0
 	for _, fi := range files {
 		fi.Disk = ""
 		fi.Version = fi.Version.Copy()
 		key := peerItemKey{peer, epoch, fi.Name}
-		previous, exists := q.pending[key]
-		if newEpoch {
-			exists = false
+		if _, duplicate := adds[key]; duplicate {
+			continue
 		}
+		previous, exists := q.pending[key]
 		if !exists {
-			if _, duplicate := adds[key]; !duplicate {
-				base++
+			if len(q.pending)+added >= peerPendingLimit {
+				left++
+				continue
 			}
 			adds[key] = peerPending{info: fi}
+			added++
 			continue
 		}
 		if samePeerVersion(previous.info, fi) {
+			adds[key] = previous
+			continue
+		}
+		if previous.info.Version.Compare(fi.Version) == folder.Greater {
 			adds[key] = previous
 		} else {
 			adds[key] = peerPending{info: fi}
 		}
 	}
-	if base > peerPendingLimit {
-		q.blocked[peer] = base - len(q.pending)
-		return false
-	}
-	if newEpoch {
-		for key := range q.pending {
-			if key.peer == peer {
-				delete(q.pending, key)
-			}
+	if left > 0 {
+		for key, item := range adds {
+			q.pending[key] = item
 		}
+		q.blocked[peer] = left
+		return false
 	}
 	for key, item := range adds {
 		q.pending[key] = item
 	}
 	q.cursors[peer] = peerCursor{epoch: epoch, cursor: cursor}
+	delete(q.blocked, peer)
 	return true
 }
 
@@ -146,11 +154,12 @@ func peerRetryDelay(attempt uint) time.Duration {
 	if delay > peerRetryMax {
 		delay = peerRetryMax
 	}
-	// Positive jitter prevents peers from retrying in lockstep while preserving
-	// the specified 250 ms…30 s envelope.
 	span := int64(delay / 5)
 	if span == 0 {
 		return delay
+	}
+	if delay == peerRetryMax {
+		return delay - time.Duration(rand.Int63n(span+1))
 	}
 	jittered := delay + time.Duration(rand.Int63n(span+1))
 	if jittered > peerRetryMax {
