@@ -19,7 +19,7 @@ type peerQueue struct {
 	mu      sync.Mutex
 	pending map[peerItemKey]peerPending
 	cursors map[string]peerCursor
-	blocked map[string]int // slots that must drain before polling may resume
+	blocked map[string]bool
 }
 
 type peerItemKey struct{ peer, epoch, name string }
@@ -34,7 +34,7 @@ type peerPending struct {
 }
 
 func newPeerQueue() *peerQueue {
-	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), blocked: make(map[string]int)}
+	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), blocked: make(map[string]bool)}
 }
 
 // accept queues candidates; false may queue a prefix, but never advances cursor.
@@ -48,18 +48,19 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		q.cursors = make(map[string]peerCursor)
 	}
 	if q.blocked == nil {
-		q.blocked = make(map[string]int)
+		q.blocked = make(map[string]bool)
 	}
 	old, known := q.cursors[peer]
 	newEpoch := reset || (known && old.epoch != epoch)
 	if newEpoch {
 		for key := range q.pending {
-			if key.peer == peer && key.epoch != epoch {
+			if key.peer == peer && (reset || key.epoch != epoch) {
 				delete(q.pending, key)
 			}
 		}
+		delete(q.blocked, peer)
 	}
-	if q.blocked[peer] > 0 && !newEpoch {
+	if q.blocked[peer] && !newEpoch {
 		return false
 	}
 	adds := make(map[peerItemKey]peerPending, len(files))
@@ -69,7 +70,10 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		fi.Disk = ""
 		fi.Version = fi.Version.Copy()
 		key := peerItemKey{peer, epoch, fi.Name}
-		if _, duplicate := adds[key]; duplicate {
+		if previous, duplicate := adds[key]; duplicate {
+			if !samePeerVersion(previous.info, fi) && previous.info.Version.Compare(fi.Version) != folder.Greater {
+				adds[key] = peerPending{info: fi}
+			}
 			continue
 		}
 		previous, exists := q.pending[key]
@@ -96,7 +100,7 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		for key, item := range adds {
 			q.pending[key] = item
 		}
-		q.blocked[peer] = left
+		q.blocked[peer] = true
 		return false
 	}
 	for key, item := range adds {
@@ -174,12 +178,8 @@ func (q *peerQueue) applied(peer, epoch string, info folder.FileInfo) {
 	key := peerItemKey{peer, epoch, info.Name}
 	if item, ok := q.pending[key]; ok && samePeerVersion(item.info, info) {
 		delete(q.pending, key)
-		for blockedPeer, slots := range q.blocked {
-			if slots > 1 {
-				q.blocked[blockedPeer] = slots - 1
-			} else {
-				delete(q.blocked, blockedPeer)
-			}
+		if len(q.pending) < peerPendingLimit {
+			clear(q.blocked)
 		}
 	}
 }
@@ -194,5 +194,5 @@ func (q *peerQueue) cursor(peer string) (epoch string, cursor uint64, ok bool) {
 func (q *peerQueue) canPoll(peer string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.blocked[peer] == 0 && len(q.pending) < peerPendingLimit
+	return !q.blocked[peer] && len(q.pending) < peerPendingLimit
 }

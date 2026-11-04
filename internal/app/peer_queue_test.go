@@ -54,7 +54,7 @@ func TestPeerQueueNewerVersionReplacesPending(t *testing.T) {
 		t.Fatal("index not accepted")
 	}
 	q.failed("p", "epoch", old, now)
-	if !q.accept("p", "epoch", 2, false, []folder.FileInfo{newer}) {
+	if !q.accept("p", "epoch", 2, false, []folder.FileInfo{old, newer}) {
 		t.Fatal("newer index not accepted")
 	}
 	got := q.due("p", now, 0)
@@ -73,7 +73,7 @@ func TestPeerQueueNewerVersionReplacesPending(t *testing.T) {
 
 func TestPeerQueueOverflowDoesNotAdvanceCursorOrLoseWork(t *testing.T) {
 	q := newPeerQueue()
-	files := make([]folder.FileInfo, peerPendingLimit+1)
+	files := make([]folder.FileInfo, 2*peerPendingLimit+1)
 	for i := range files {
 		files[i] = queueInfo(fmt.Sprintf("f%05d", i), 1)
 	}
@@ -89,11 +89,13 @@ func TestPeerQueueOverflowDoesNotAdvanceCursorOrLoseWork(t *testing.T) {
 	if got := len(q.due("p", time.Now(), 0)); got != peerPendingLimit {
 		t.Fatalf("pending = %d, want %d", got, peerPendingLimit)
 	}
-	q.applied("p", "epoch", files[0])
+	for _, fi := range files[:peerPendingLimit] {
+		q.applied("p", "epoch", fi)
+	}
 	if !q.canPoll("p") {
 		t.Fatal("poll still blocked after capacity freed")
 	}
-	if !q.accept("p", "epoch", 11, false, files[peerPendingLimit:]) {
+	if !q.accept("p", "epoch", 11, false, files[len(files)-1:]) {
 		t.Fatal("index not accepted after freeing capacity")
 	}
 	if _, cursor, _ := q.cursor("p"); cursor != 11 {
