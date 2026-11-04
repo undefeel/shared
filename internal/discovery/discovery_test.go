@@ -121,6 +121,66 @@ func TestDeviceTableIsBounded(t *testing.T) {
 	}
 }
 
+func TestDeviceTableKeepsPairedPeerDuringFlood(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	peerID := identity.IDFromCert([]byte("paired peer"))
+	d := &Discovery{devices: map[string]Device{}, now: func() time.Time { return now }, keep: func(id string) bool { return id == peerID }}
+	d.remember(Announcement{ID: peerID, Name: "paired"}, "192.0.2.1:1", now)
+	for i := 0; i < maxDevices-1; i++ {
+		id := identity.IDFromCert([]byte("fake " + strconv.Itoa(i)))
+		d.remember(Announcement{ID: id}, "192.0.2.2:1", now)
+	}
+	for i := 0; i < 10_000; i++ {
+		id := identity.IDFromCert([]byte("flood " + strconv.Itoa(i)))
+		d.remember(Announcement{ID: id}, "192.0.2.3:1", now)
+	}
+	if _, ok := d.devices[peerID]; !ok {
+		t.Fatal("paired peer was evicted by announcement flood")
+	}
+	if got := len(d.devices); got != maxDevices {
+		t.Fatalf("device table has %d entries, want %d", got, maxDevices)
+	}
+}
+
+func TestDeviceTableDoesNotAddWhenAllEntriesAreKept(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	d := &Discovery{devices: map[string]Device{}, now: func() time.Time { return now }, keep: func(string) bool { return true }}
+	for i := 0; i < maxDevices; i++ {
+		id := identity.IDFromCert([]byte("kept " + strconv.Itoa(i)))
+		d.remember(Announcement{ID: id}, "192.0.2.1:1", now)
+	}
+	newID := identity.IDFromCert([]byte("new unknown"))
+	d.remember(Announcement{ID: newID}, "192.0.2.2:1", now)
+	if got := len(d.devices); got != maxDevices {
+		t.Fatalf("device table has %d entries, want %d", got, maxDevices)
+	}
+	if _, ok := d.devices[newID]; ok {
+		t.Fatal("unknown ID was added while every entry was kept")
+	}
+}
+
+func TestDeviceTableStillEvictsOldestWithoutKeep(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	d := &Discovery{devices: map[string]Device{}, now: func() time.Time { return now }}
+	var oldestID string
+	for i := 0; i < maxDevices; i++ {
+		id := identity.IDFromCert([]byte("device " + strconv.Itoa(i)))
+		if i == 0 {
+			oldestID = id
+		}
+		d.remember(Announcement{ID: id}, "192.0.2.1:1", now)
+		now = now.Add(time.Millisecond)
+	}
+	newID := identity.IDFromCert([]byte("replacement"))
+	d.remember(Announcement{ID: newID}, "192.0.2.2:1", now)
+	if _, ok := d.devices[oldestID]; ok {
+		t.Fatal("oldest device was not evicted without Keep")
+	}
+	if _, ok := d.devices[newID]; !ok {
+		t.Fatal("new device was not added without Keep")
+	}
+}
+
 func TestRememberRemovesExpiredDevicesAndRefreshesKnownDevice(t *testing.T) {
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	d := &Discovery{devices: map[string]Device{}, now: func() time.Time { return now }}

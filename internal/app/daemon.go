@@ -202,7 +202,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.Log.Printf("слушаю TCP :%d", cfg.Port)
 
 	if cfg.Discovery {
-		d.disc, err = discovery.Start(ctx, cfg.DiscoveryPort, discovery.Announcement{ID: d.ID.ID, Name: cfg.Name, Port: cfg.Port}, d.Log, d.peerOnLAN)
+		d.disc, err = discovery.StartWithKeep(ctx, cfg.DiscoveryPort, discovery.Announcement{ID: d.ID.ID, Name: cfg.Name, Port: cfg.Port}, d.Log, d.peerOnLAN, d.isPeer)
 		if err != nil {
 			d.Log.Printf("обнаружение в LAN отключено: %v", err)
 		}
