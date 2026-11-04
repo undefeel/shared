@@ -58,7 +58,7 @@
 |---|---|---|---|---|---|---|---|
 | 04-10 | codec schema=3 | L3 | sol | — | done | `task_e0012807b32a` | `ctx_f30215cc8b18` |
 | 04-11 | append/replay | L3 | sol | 04-10 | done | `task_424caacccdd1` | `ctx_2981398b175d` |
-| 04-12 | compaction | L3 | sol | 04-11 | review | `task_624dcd4c677c` | `ctx_07816d30425c` |
+| 04-12 | compaction | L3 | sol | 04-11 | done | `task_624dcd4c677c` | `ctx_07816d30425c` |
 | 04-13 | типы group-intent | L3 | sol | 04-10 | done | `task_2b2c1fbdeff6` | `ctx_7d0a1d8dd9d1` |
 | 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | review | `task_6567310b9d6e` | `ctx_27f7d054fd36` |
 | 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | `task_0f5916456a72` |  |
