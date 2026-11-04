@@ -36,7 +36,7 @@
 | 02-16 | барьер корня в Scan | L2 | luna | 02-15 | done | `task_95fcc8bb5687` | `ctx_c46b97ebf731` |
 | 02-17 | capture и уникальные conflicts | L3 | sol | 02-11, 02-15 | done | `task_efec4aa7296e` | `ctx_63d520c09566` |
 | 02-18 | intent и recovery | L3 | sol | 02-12, 02-15, 02-17 | done | `task_f9e9cd0474af` | `ctx_d8045c5da3ce` |
-| 02-19 | commit coordinator | L3 | sol | 02-16, 02-18 | todo | `task_b28f3827a7bf` | |
+| 02-19 | commit coordinator | L3 | sol | 02-16, 02-18 | in_progress | `task_b28f3827a7bf` | `ctx_c338e098d63a` |
 | 02-20 | повторное решение и применение | L3 | sol | 02-14, 02-16, 02-19 | todo | `task_4f09f0705869` | |
 | 02-21 | Exec и локальные права | L2 | luna | 02-20 | todo | `task_4fd2a3217c07` | |
 | 02-22 | проверка размера folder | L2 | luna | 02-21 | todo | `task_d05e01a8ba91` | |
