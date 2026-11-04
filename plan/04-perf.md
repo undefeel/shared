@@ -60,7 +60,7 @@
 | 04-11 | append/replay | L3 | sol | 04-10 | done | `task_424caacccdd1` | `ctx_2981398b175d` |
 | 04-12 | compaction | L3 | sol | 04-11 | done | `task_624dcd4c677c` | `ctx_07816d30425c` |
 | 04-13 | типы group-intent | L3 | sol | 04-10 | done | `task_2b2c1fbdeff6` | `ctx_7d0a1d8dd9d1` |
-| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | review | `task_6567310b9d6e` | `ctx_27f7d054fd36` |
+| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | done | `task_6567310b9d6e` | `ctx_27f7d054fd36` |
 | 04-14b | доработка 04-14: тест смешанного частичного состояния группы (ревью: major «нет вызова» отклонён — это 04-17) | L2 | luna | — | done | `task_b7b3a6427a8b` | `ctx_7891e528206d` |
 | 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | `task_4f16c7b18aaf` |  |
 | 04-16 | миграция helpers | L3 | sol | 04-15 | todo | `task_b65eaf5cc387` |  |
