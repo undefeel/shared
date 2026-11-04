@@ -55,19 +55,25 @@ func NewBoundedLogWriter(path string) (*BoundedLogWriter, error) {
 // launch agent has no journal and diagnostics go to a bounded log file.
 // The returned close function is always safe to call.
 func NewRunLogOutput(goos, path string, stderr io.Writer) (io.Writer, func() error, error) {
+	terminal := false
+	redirect := false
+	if goos == "darwin" {
+		if f, ok := stderr.(*os.File); ok {
+			_, ioctlErr := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+			terminal = ioctlErr == nil
+			redirect = !terminal
+		}
+	}
+	return newRunLogOutput(goos, path, stderr, terminal, redirect)
+}
+
+func newRunLogOutput(goos, path string, stderr io.Writer, terminal, redirect bool) (io.Writer, func() error, error) {
 	if goos != "darwin" {
 		return stderr, func() error { return nil }, nil
 	}
 	w, err := NewBoundedLogWriter(path)
 	if err != nil {
 		return nil, nil, err
-	}
-	terminal := false
-	redirect := false
-	if f, ok := stderr.(*os.File); ok {
-		_, ioctlErr := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
-		terminal = ioctlErr == nil
-		redirect = !terminal
 	}
 	if terminal {
 		return io.MultiWriter(w, stderr), w.Close, nil

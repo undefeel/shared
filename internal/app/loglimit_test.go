@@ -133,6 +133,26 @@ func TestBoundedLogWriterDoesNotSplitWriteAcrossFiles(t *testing.T) {
 	}
 }
 
+func TestBoundedLogWriterAllowsSingleOversizedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	w, err := NewBoundedLogWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	line := bytes.Repeat([]byte("L"), logFileLimit+1)
+	if n, err := w.Write(line); err != nil || n != len(line) {
+		t.Fatalf("oversized Write = (%d, %v), want %d bytes", n, err, len(line))
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, line) {
+		t.Fatal("oversized line was split or changed")
+	}
+}
+
 func TestBoundedLogWriterRedirectsStderrAfterRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
 	oldStdout, err := unix.Dup(1)
@@ -248,6 +268,28 @@ func TestRunLogOutputUsesBoundedFileOnDarwin(t *testing.T) {
 	}
 	if string(got) != "file only" || stderr.Len() != 0 {
 		t.Fatalf("file = %q, stderr = %q", got, stderr.String())
+	}
+}
+
+func TestRunLogOutputIncludesStderrWhenInteractive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	var stderr bytes.Buffer
+	writer, closeOutput, err := newRunLogOutput("darwin", path, &stderr, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("interactive")); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeOutput(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "interactive" || stderr.String() != "interactive" {
+		t.Fatalf("file=%q stderr=%q", got, stderr.String())
 	}
 }
 
