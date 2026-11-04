@@ -21,9 +21,14 @@ import (
 )
 
 const (
-	magic    = "sharedir/1"
-	interval = 30 * time.Second
-	ttl      = 3 * interval
+	magic           = "sharedir/1"
+	interval        = 30 * time.Second
+	ttl             = 3 * interval
+	maxDevices      = 256
+	globalRateLimit = 1000 // announcements per second
+	perIPRateLimit  = 10   // announcements per second
+	maxRateLimitIPs = 4096
+	rateWindow      = time.Second
 )
 
 type Announcement struct {
@@ -53,8 +58,17 @@ type Discovery struct {
 	// пропажи дольше ttl или на новом адресе. Вызывается вне блокировки.
 	onSeen func(Device)
 
-	mu      sync.Mutex
-	devices map[string]Device
+	mu         sync.Mutex
+	devices    map[string]Device
+	rateMu     sync.Mutex
+	now        func() time.Time
+	globalRate rateWindowCounter
+	ipRates    map[string]rateWindowCounter
+}
+
+type rateWindowCounter struct {
+	start time.Time
+	count int
 }
 
 func Start(ctx context.Context, port int, self Announcement, logger *log.Logger, onSeen func(Device)) (*Discovery, error) {
@@ -78,7 +92,7 @@ func Start(ctx context.Context, port int, self Announcement, logger *log.Logger,
 		return nil, err
 	}
 	self.Magic = magic
-	d := &Discovery{conn: pc.(*net.UDPConn), port: port, self: self, log: logger, onSeen: onSeen, devices: map[string]Device{}}
+	d := &Discovery{conn: pc.(*net.UDPConn), port: port, self: self, log: logger, onSeen: onSeen, devices: map[string]Device{}, now: time.Now, ipRates: map[string]rateWindowCounter{}}
 	go d.recvLoop()
 	go d.sendLoop(ctx)
 	go func() { <-ctx.Done(); d.conn.Close() }()
@@ -160,23 +174,93 @@ func (d *Discovery) recvLoop() {
 		if id, err := identity.Normalize(a.ID); err != nil || id != a.ID {
 			continue
 		}
+		now := d.now()
+		if !d.allowAnnouncement(src.IP.String(), now) {
+			continue
+		}
 		addr := net.JoinHostPort(src.IP.String(), strconv.Itoa(a.Port))
-		d.mu.Lock()
-		prev, known := d.devices[a.ID]
-		dev := Device{ID: a.ID, Name: a.Name, Addr: addr, LastSeen: time.Now()}
-		d.devices[a.ID] = dev
-		d.mu.Unlock()
+		dev, prev, known := d.remember(a, addr, now)
 		if !known || prev.Addr != addr {
 			d.log.Printf("обнаружено устройство %q (%s) на %s", a.Name, identity.ShortID(a.ID), addr)
 		}
-		if d.onSeen != nil && (!known || prev.Addr != addr || time.Since(prev.LastSeen) > ttl) {
+		if d.onSeen != nil && (!known || prev.Addr != addr || now.Sub(prev.LastSeen) > ttl) {
 			d.onSeen(dev)
 		}
 		// Новому соседу или тому, кто просит, отвечаем сразу, не дожидаясь
 		// своего таймера. Ответ без Ask, так что пинг-понга не будет.
-		if a.Ask || !known || time.Since(prev.LastSeen) > interval {
+		if a.Ask || !known || now.Sub(prev.LastSeen) > interval {
 			d.conn.WriteToUDP(d.packet(false), &net.UDPAddr{IP: src.IP, Port: d.port})
 		}
+	}
+}
+
+func (d *Discovery) remember(a Announcement, addr string, now time.Time) (Device, Device, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.removeExpiredLocked(now)
+	prev, known := d.devices[a.ID]
+	dev := Device{ID: a.ID, Name: a.Name, Addr: addr, LastSeen: now}
+	if !known && len(d.devices) >= maxDevices {
+		d.removeOldestLocked()
+	}
+	d.devices[a.ID] = dev
+	return dev, prev, known
+}
+
+// allowAnnouncement applies one global and one per-source-IP fixed-window limit.
+// Expired source entries are pruned here so rate accounting also stays bounded.
+func (d *Discovery) allowAnnouncement(ip string, now time.Time) bool {
+	d.rateMu.Lock()
+	defer d.rateMu.Unlock()
+	d.globalRate = advanceRateWindow(d.globalRate, now)
+	for source, counter := range d.ipRates {
+		if rateWindowExpired(counter, now) {
+			delete(d.ipRates, source)
+		}
+	}
+	counter, exists := d.ipRates[ip]
+	if !exists && len(d.ipRates) >= maxRateLimitIPs {
+		return false
+	}
+	counter = advanceRateWindow(counter, now)
+	if d.globalRate.count >= globalRateLimit || counter.count >= perIPRateLimit {
+		return false
+	}
+	d.globalRate.count++
+	counter.count++
+	d.ipRates[ip] = counter
+	return true
+}
+
+func advanceRateWindow(counter rateWindowCounter, now time.Time) rateWindowCounter {
+	if counter.start.IsZero() || now.Sub(counter.start) >= rateWindow || now.Before(counter.start) {
+		return rateWindowCounter{start: now}
+	}
+	return counter
+}
+
+func rateWindowExpired(counter rateWindowCounter, now time.Time) bool {
+	return !counter.start.IsZero() && (now.Sub(counter.start) >= rateWindow || now.Before(counter.start))
+}
+
+func (d *Discovery) removeExpiredLocked(now time.Time) {
+	for id, dev := range d.devices {
+		if now.Sub(dev.LastSeen) > ttl || now.Before(dev.LastSeen) {
+			delete(d.devices, id)
+		}
+	}
+}
+
+func (d *Discovery) removeOldestLocked() {
+	var oldestID string
+	var oldest time.Time
+	for id, dev := range d.devices {
+		if oldestID == "" || dev.LastSeen.Before(oldest) {
+			oldestID, oldest = id, dev.LastSeen
+		}
+	}
+	if oldestID != "" {
+		delete(d.devices, oldestID)
 	}
 }
 
@@ -184,8 +268,10 @@ func (d *Discovery) recvLoop() {
 func (d *Discovery) Lookup(id string) (string, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	now := d.now()
+	d.removeExpiredLocked(now)
 	dev, ok := d.devices[id]
-	if !ok || time.Since(dev.LastSeen) > ttl {
+	if !ok {
 		return "", false
 	}
 	return dev.Addr, true
@@ -194,11 +280,11 @@ func (d *Discovery) Lookup(id string) (string, bool) {
 func (d *Discovery) Devices() []Device {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	now := d.now()
+	d.removeExpiredLocked(now)
 	var out []Device
 	for _, dev := range d.devices {
-		if time.Since(dev.LastSeen) <= ttl {
-			out = append(out, dev)
-		}
+		out = append(out, dev)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
