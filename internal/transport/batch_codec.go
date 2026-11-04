@@ -66,6 +66,10 @@ func (d *BatchDecoder) Next() (BatchFrame, error) {
 	}
 	var size [4]byte
 	if _, err := io.ReadFull(d.r, size[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			// The stream ended before the End frame: never report a clean EOF.
+			err = io.ErrUnexpectedEOF
+		}
 		return BatchFrame{}, fmt.Errorf("read batch frame length: %w", err)
 	}
 	headerLen := binary.BigEndian.Uint32(size[:])

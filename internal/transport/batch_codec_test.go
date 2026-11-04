@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -46,7 +48,9 @@ func TestBatchCodecRejectsTruncatedFrameAndMissingEnd(t *testing.T) {
 		BatchFrame{Header: BatchHeader{ID: "a", Status: "ok", Name: "a", Hash: "h", Size: 3, Encoding: "identity", WireSize: 3}, Body: []byte("abc")},
 		BatchFrame{Header: BatchHeader{End: true, Count: 1}},
 	)
-	for _, cut := range []int{len(BatchMagic) + 2, len(good) - 1} {
+	endOnly := batchStream(t, BatchFrame{Header: BatchHeader{End: true, Count: 1}})
+	missingEnd := len(good) - (len(endOnly) - len(BatchMagic)) // data frame complete, End frame absent
+	for _, cut := range []int{len(BatchMagic) + 2, missingEnd, len(good) - 1} {
 		d, err := NewBatchDecoder(bytes.NewReader(good[:cut]), nil)
 		if err != nil {
 			t.Fatal(err)
@@ -57,8 +61,8 @@ func TestBatchCodecRejectsTruncatedFrameAndMissingEnd(t *testing.T) {
 				break
 			}
 		}
-		if err == nil {
-			t.Fatalf("accepted truncated stream at %d", cut)
+		if err == nil || errors.Is(err, io.EOF) {
+			t.Fatalf("truncated stream at %d: want a non-EOF error, got %v", cut, err)
 		}
 	}
 }
@@ -89,9 +93,13 @@ func TestBatchCodecEnforcesWireAndPlainCapsBeforeBodyRead(t *testing.T) {
 		binary.BigEndian.PutUint32(prefix[:], uint32(len(encoded)))
 		b.Write(prefix[:])
 		b.Write(encoded)
+		b.Write(bytes.Repeat([]byte("x"), 64)) // body bytes present: rejection must come from the caps, not EOF
 		d, _ := NewBatchDecoder(&b, nil)
-		if _, err := d.Next(); err == nil {
-			t.Fatalf("accepted oversized header: %+v", h)
+		if _, err := d.Next(); err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("oversized header %+v: want a limit error, got %v", h, err)
+		}
+		if b.Len() != 64 {
+			t.Fatalf("decoder read %d body bytes before rejecting caps", 64-b.Len())
 		}
 	}
 }
