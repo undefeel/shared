@@ -79,7 +79,7 @@
 | 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_e5daddeebcf4` |  |
 | 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_6468fb67b8d5` |  |
 | 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_52c45bada091` |  |
-| 04-50 | bounded log writer | L2 | luna | — | in_progress | `task_9fc335af3492` | `ctx_e1f44b9ab3f9` |
+| 04-50 | bounded log writer | L2 | luna | — | done | `task_9fc335af3492` | `ctx_e1f44b9ab3f9` |
 | 04-50b | доработка 04-50 по ревью (полный spec вместо addendum) | L2 | luna | — | done | `task_32ef0f050af4` | `ctx_4867d3ffc33e` |
 | 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_fce47cc1494c` |  |
 | 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_2de5a1abd8c5` |  |
