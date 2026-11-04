@@ -92,33 +92,58 @@ func TestApplyGroupFailedCommitHasNoDone(t *testing.T) {
 	}
 }
 
-func TestApplyGroupResurrectsScanTombstone(t *testing.T) {
+func TestApplyGroupMergeOnlyEditDeleteDurable(t *testing.T) {
 	n := applySeed(t)
+	n.write(t, "gone", "gone", time.Unix(100, 0))
 	n.write(t, "keep", "keep", time.Unix(100, 0))
-	if err := os.Remove(filepath.Join(n.f.Root, "x")); err != nil {
+	if err := n.f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(n.f.Root, "gone")); err != nil {
 		t.Fatal(err)
 	}
 	if err := n.f.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	old, _, _ := n.f.Lookup("x")
+	old, _, _ := n.f.Lookup("gone")
 	if !old.Deleted {
-		t.Fatal("missing tombstone")
+		t.Fatal("missing Scan tombstone")
 	}
-	r := incoming("new", old.Version.Copy(), 200e9)
-	r.Version["B"]++
-	a, b := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, bodyFetch("new"), nil)
-	if a != 1 || b != 0 {
-		t.Fatalf("apply %d/%d", a, b)
+	edit := incoming("new", old.Version.Copy(), 200e9)
+	edit.Name = "gone"
+	edit.Version["B"]++
+	x, _, _ := n.f.Lookup("x")
+	del := FileInfo{Name: "x", Deleted: true, Version: x.Version.Copy()}
+	del.Version["B"]++
+	merge := incoming("keep", Vector{"B": 1}, 100e9)
+	merge.Name = "keep"
+	writes := 0
+	n.f.SetPersistenceProbe(PersistenceProbe{Write: func(kind, _ string, _ int, _ error) {
+		if kind == "log" {
+			writes++
+		}
+	}})
+	a, b := n.f.ApplyRemote(context.Background(), "B", []FileInfo{merge, edit, del}, bodyFetch("new"), nil)
+	if a != 3 || b != 0 || writes != 1 {
+		t.Fatalf("apply %d/%d writes %d", a, b, writes)
 	}
 	reopened, err := Open(n.f.Root, n.f.statePath, "A", n.f.log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	got, _, _ := reopened.Lookup("x")
-	if got.Deleted || got.Hash != r.Hash {
-		t.Fatal(got)
+	kept, _, _ := reopened.Lookup("keep")
+	deleted, _, _ := reopened.Lookup("x")
+	restored, _, _ := reopened.Lookup("gone")
+	if kept.Version["B"] != 1 || !deleted.Deleted || restored.Deleted || restored.Hash != edit.Hash {
+		t.Fatalf("replay: keep=%+v deleted=%+v restored=%+v", kept, deleted, restored)
+	}
+	body, err := os.ReadFile(filepath.Join(reopened.Root, "gone"))
+	if err != nil || string(body) != "new" {
+		t.Fatalf("resurrected body: %q %v", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(reopened.Root, "x")); !os.IsNotExist(err) {
+		t.Fatalf("deleted body remains: %v", err)
 	}
 }
 
