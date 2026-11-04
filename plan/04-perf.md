@@ -78,7 +78,7 @@
 | 04-28 | /files server | L3 | sol | 04-27 | done | `task_e088338343e8` | `ctx_5c31d9265c50` |
 | 04-29 | /files client | L2 | luna | 04-28 | done | `task_1162babf6097` | `ctx_8ab5f08608b4` |
 | 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | done | `task_e5daddeebcf4` | `ctx_4e1939fda48c` |
-| 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_6468fb67b8d5` |  |
+| 04-31 | retry queue primitive | L2 | luna | 04-30 | in_progress | `task_6468fb67b8d5` | `ctx_a7cd1dd8ec23` |
 | 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_52c45bada091` |  |
 | 04-50 | bounded log writer | L2 | luna | — | done | `task_9fc335af3492` | `ctx_e1f44b9ab3f9` |
 | 04-50b | доработка 04-50 по ревью (полный spec вместо addendum) | L2 | luna | — | done | `task_32ef0f050af4` | `ctx_4867d3ffc33e` |
