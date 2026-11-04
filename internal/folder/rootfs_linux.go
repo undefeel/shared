@@ -39,10 +39,7 @@ func (ops platformFSOps) syncFile(f *os.File) error {
 	if err := ops.fsync(int(f.Fd())); err != nil {
 		return err
 	}
-	if ops.fullSync != nil {
-		return ops.fullSync(f.Fd())
-	}
-	return nil
+	return ops.syncDevice(f)
 }
 
 // syncDir must be called for every changed directory, including new parents.
@@ -59,3 +56,12 @@ func platformOps() platformFSOps {
 }
 
 func (ops platformFSOps) syncDir(dir *os.File) error { return ops.fsync(int(dir.Fd())) }
+
+// syncDevice performs only the hardware flush; caller first fsyncs every inode
+// and directory and deduplicates devices within the group phase. Linux is a no-op.
+func (ops platformFSOps) syncDevice(f *os.File) error {
+	if ops.fullSync != nil {
+		return ops.fullSync(f.Fd())
+	}
+	return nil
+}
