@@ -66,7 +66,7 @@
 | 04-16 | миграция helpers | L3 | sol | 04-15 | done | `task_b65eaf5cc387` | `ctx_56c75a23509c` |
 | 04-17 | подключить store Open/save | L3 | sol | 04-16 | done | `task_07548a50ab81` | `ctx_9b7c2630b534` |
 | 04-18 | control persistence (объединена с 04-17) | L3 | sol | 04-17 | done | `task_579c31020cbe` |  |
-| 04-19 | commit группы | L3 | sol | 04-18 | in_progress | `task_8b9cce11d4db` | `ctx_28b45367fe67` |
+| 04-19 | commit группы | L3 | sol | 04-18 | done | `task_8b9cce11d4db` | `ctx_28b45367fe67` |
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_2bf0b88271c6` |  |
 | 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_708e0596d8b3` |  |
 | 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_f0f4420dc2f4` |  |
