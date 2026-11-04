@@ -2,14 +2,15 @@
 # Self-review run by a WORKER (not the coordinator): starts a read-only Gemini reviewer
 # in the current worktree, waits for its report, prints it and releases the reviewer.
 #
-#   plan/tools/self-review.sh <ID> [round]        start a review round (default round 1) and wait
+#   plan/tools/self-review.sh <ID> [round]        Gemini (flash, high effort) review round (default 1) and wait
+#   plan/tools/self-review.sh <ID> luna           final control review by luna (codex, high effort)
 #   plan/tools/self-review.sh --wait <dispatch>   keep waiting for an already started reviewer
 #
 # Exit codes: 0 = report printed; 3 = reviewer still running (re-run with --wait <dispatch>);
 #             other = error.
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
-MODEL=gemini-3.8-flash-medium
+MODEL=gemini-3.8-flash-high
 CHUNK_MS=480000   # stay below common 10-minute shell limits
 
 wait_for() {
@@ -44,7 +45,9 @@ if [[ "${1:-}" == "--wait" ]]; then
   wait_for "${2:?dispatch id}"
 fi
 
-ID="${1:?usage: self-review.sh <ID> [round]}"; ROUND="${2:-1}"
+ID="${1:?usage: self-review.sh <ID> [round|luna]}"; ROUND="${2:-1}"
+AGENT=(--agent antigravity --model "$MODEL")
+if [[ "$ROUND" == luna ]]; then AGENT=(--agent codex --model gpt-6-luna --effort high); fi
 SPEC_TASK="plan/specs/$ID.md"
 [[ -f "$SPEC_TASK" ]] || { echo "no $SPEC_TASK" >&2; exit 2; }
 BASE="$(git merge-base HEAD origin/main)"
@@ -74,7 +77,7 @@ None (read-only).
 Report in the \`worker_done\` body.
 SPEC
 out="$(orca orchestration worker-start --spec-file "$S" --task-title "Self-review $ID r$ROUND" \
-        --worktree current --agent antigravity --model "$MODEL" --json)" || { echo "$out"; exit 1; }
+        --worktree current "${AGENT[@]}" --json)" || { echo "$out"; exit 1; }
 ds="$(jq -r '.result.dispatchId // .result.dispatch.id // .dispatchId // empty' <<<"$out")"
 [[ -n "$ds" ]] || { echo "$out"; exit 1; }
 echo "self-review: started reviewer $ds for $ID round $ROUND"
