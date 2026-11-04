@@ -57,6 +57,7 @@ type Discovery struct {
 	// onSeen вызывается, когда устройство появилось в сети: впервые, после
 	// пропажи дольше ttl или на новом адресе. Вызывается вне блокировки.
 	onSeen func(Device)
+	keep   func(string) bool // immutable after StartWithKeep starts the receiver
 
 	mu         sync.Mutex
 	devices    map[string]Device
@@ -72,6 +73,13 @@ type rateWindowCounter struct {
 }
 
 func Start(ctx context.Context, port int, self Announcement, logger *log.Logger, onSeen func(Device)) (*Discovery, error) {
+	return StartWithKeep(ctx, port, self, logger, onSeen, nil)
+}
+
+// StartWithKeep starts discovery with an optional predicate for entries that
+// must not be evicted when the device table is full. The predicate runs
+// without d.mu, so it may safely acquire locks owned by its caller.
+func StartWithKeep(ctx context.Context, port int, self Announcement, logger *log.Logger, onSeen func(Device), keep func(string) bool) (*Discovery, error) {
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		var serr error
 		c.Control(func(fd uintptr) {
@@ -92,7 +100,7 @@ func Start(ctx context.Context, port int, self Announcement, logger *log.Logger,
 		return nil, err
 	}
 	self.Magic = magic
-	d := &Discovery{conn: pc.(*net.UDPConn), port: port, self: self, log: logger, onSeen: onSeen, devices: map[string]Device{}, now: time.Now, ipRates: map[string]rateWindowCounter{}}
+	d := &Discovery{conn: pc.(*net.UDPConn), port: port, self: self, log: logger, onSeen: onSeen, keep: keep, devices: map[string]Device{}, now: time.Now, ipRates: map[string]rateWindowCounter{}}
 	go d.recvLoop()
 	go d.sendLoop(ctx)
 	go func() { <-ctx.Done(); d.conn.Close() }()
@@ -196,15 +204,53 @@ func (d *Discovery) recvLoop() {
 
 func (d *Discovery) remember(a Announcement, addr string, now time.Time) (Device, Device, bool) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.removeExpiredLocked(now)
 	prev, known := d.devices[a.ID]
 	dev := Device{ID: a.ID, Name: a.Name, Addr: addr, LastSeen: now}
-	if !known && len(d.devices) >= maxDevices {
-		d.removeOldestLocked()
+	if known || len(d.devices) < maxDevices {
+		d.devices[a.ID] = dev
+		d.mu.Unlock()
+		return dev, prev, known
+	}
+	keep := d.keep
+	candidates := make(map[string]time.Time, len(d.devices))
+	for id, existing := range d.devices {
+		candidates[id] = existing.LastSeen
+	}
+	d.mu.Unlock()
+
+	// Keep may acquire daemon.mu; never call it while holding discovery.mu.
+	if keep != nil {
+		for id := range candidates {
+			if keep(id) {
+				delete(candidates, id)
+			}
+		}
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.removeExpiredLocked(now)
+	prev, known = d.devices[a.ID]
+	if known {
+		d.devices[a.ID] = dev
+		return dev, prev, true
+	}
+	if len(d.devices) >= maxDevices {
+		var oldestID string
+		var oldest time.Time
+		for id, seen := range candidates {
+			if current, exists := d.devices[id]; exists && current.LastSeen.Equal(seen) && (oldestID == "" || seen.Before(oldest)) {
+				oldestID, oldest = id, seen
+			}
+		}
+		if oldestID == "" {
+			return dev, Device{}, false
+		}
+		delete(d.devices, oldestID)
 	}
 	d.devices[a.ID] = dev
-	return dev, prev, known
+	return dev, prev, false
 }
 
 // allowAnnouncement applies one global and one per-source-IP fixed-window limit.
@@ -248,19 +294,6 @@ func (d *Discovery) removeExpiredLocked(now time.Time) {
 		if now.Sub(dev.LastSeen) > ttl || now.Before(dev.LastSeen) {
 			delete(d.devices, id)
 		}
-	}
-}
-
-func (d *Discovery) removeOldestLocked() {
-	var oldestID string
-	var oldest time.Time
-	for id, dev := range d.devices {
-		if oldestID == "" || dev.LastSeen.Before(oldest) {
-			oldestID, oldest = id, dev.LastSeen
-		}
-	}
-	if oldestID != "" {
-		delete(d.devices, oldestID)
 	}
 }
 
