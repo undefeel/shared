@@ -1,10 +1,10 @@
 # STATUS
 
-Run: run_9a6f2bef2b61 (этап 03)
+Run: run_9a6f2bef2b61 (этап 03 закрыт)
 Активные: 
 
 ## Очередь
-Пусто. Ждут владельца: Linux runtime-тесты на Omarchy, ручной smoke меню/виджета, решение по хвостам (plan/02-fixes.md).
+Пусто. Ждут владельца: Linux runtime-тесты на Omarchy, ручной smoke меню/виджета, проверка по docs/power-loss-check.md.
 
 ## Восстановление после обрыва
 1. Прочитай этот файл и `plan/PLAN.md`.
