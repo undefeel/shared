@@ -112,13 +112,15 @@ type Daemon struct {
 	disc   *discovery.Discovery
 	act    *activity
 
-	mu        sync.Mutex
-	cfg       *config.Config
-	peers     map[string]*peerRunner
-	incoming  map[string]Candidate // отклонённые незнакомые устройства
-	learned   map[string]string    // обратные адреса пиров, подключавшихся к нам
-	relaySt   *RelayStatus
-	relayKick chan struct{} // смена адреса relay в конфиге
+	mu           sync.Mutex
+	cfg          *config.Config
+	peers        map[string]*peerRunner
+	connections  transport.Connections
+	incomingSeen map[string]time.Time
+	incoming     map[string]Candidate // отклонённые незнакомые устройства
+	learned      map[string]string    // обратные адреса пиров, подключавшихся к нам
+	relaySt      *RelayStatus
+	relayKick    chan struct{} // смена адреса relay в конфиге
 	// OnChange вызывается при смене статуса (для трея).
 	OnChange func()
 }
@@ -173,14 +175,22 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	srv := &http.Server{
-		Handler:   (&transport.Server{Folder: d.folder, Log: d.Log, OnPeer: d.learn, Paused: d.Paused, OnServed: d.served}).Handler(),
-		TLSConfig: transport.ServerTLS(d.ID, d.isPeer, d.rejected),
-		ErrorLog:  log.New(discardTLSNoise{d.Log}, "", 0),
+		Handler:           (&transport.Server{Folder: d.folder, Log: d.Log, OnPeer: d.learn, Paused: d.Paused, OnServed: d.served, Allowed: d.isPeer}).Handler(),
+		TLSConfig:         transport.ServerTLS(d.ID, d.isPeer, d.rejected),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		ConnState: func(c net.Conn, state http.ConnState) {
+			d.connections.State(c, state)
+			if state == http.StateActive || state == http.StateIdle {
+				d.connections.Revoke(d.isPeer)
+			}
+		},
+		ErrorLog: log.New(discardTLSNoise{d.Log}, "", 0),
 	}
-	go srv.Serve(tls.NewListener(ln, srv.TLSConfig))
+	go srv.Serve(tls.NewListener(d.connections.Limit(ln), srv.TLSConfig))
 	// Тот же сервер принимает и каналы, пришедшие через relay.
 	relayLn := newConnListener()
-	go srv.Serve(tls.NewListener(relayLn, srv.TLSConfig))
+	go srv.Serve(tls.NewListener(d.connections.Limit(relayLn), srv.TLSConfig))
 	go d.relayLoop(ctx, relayLn)
 	defer srv.Close()
 	d.Log.Printf("слушаю TCP :%d", cfg.Port)
@@ -295,7 +305,16 @@ func (d *Daemon) learn(id, addr string) {
 
 func (d *Daemon) rejected(id string) {
 	d.mu.Lock()
+	d.pruneIncoming(time.Now())
+	if d.incomingSeen == nil {
+		d.incomingSeen = make(map[string]time.Time)
+	}
 	_, seen := d.incoming[id]
+	if !seen && len(d.incoming) >= 256 {
+		d.mu.Unlock()
+		return
+	}
+	d.incomingSeen[id] = time.Now()
 	d.incoming[id] = Candidate{ID: id, Source: "incoming"}
 	d.mu.Unlock()
 	if !seen {
@@ -306,6 +325,7 @@ func (d *Daemon) rejected(id string) {
 
 // syncPeers приводит набор запущенных клиентов в соответствие с конфигом.
 func (d *Daemon) syncPeers() {
+	d.connections.Revoke(d.isPeer)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	want := map[string]config.Peer{}
@@ -570,6 +590,7 @@ func (d *Daemon) Status() Status {
 			}
 		}
 	}
+	d.pruneIncoming(time.Now())
 	for id, c := range d.incoming {
 		if !seen[id] && d.cfg.FindPeer(id) == nil {
 			st.Candidates = append(st.Candidates, c)
@@ -623,6 +644,7 @@ func (d *Daemon) Unpair(id string) error {
 		err = d.cfg.Save(d.Home)
 	}
 	d.mu.Unlock()
+	d.connections.Revoke(d.isPeer)
 	if !ok {
 		return errors.New("no such paired device")
 	}
@@ -696,4 +718,14 @@ func (w discardTLSNoise) Write(p []byte) (int, error) {
 		w.l.Print(string(p))
 	}
 	return len(p), nil
+}
+
+// Called with d.mu held; bounded candidates expire after three discovery intervals.
+func (d *Daemon) pruneIncoming(now time.Time) {
+	for id, t := range d.incomingSeen {
+		if now.Sub(t) > 90*time.Second {
+			delete(d.incoming, id)
+			delete(d.incomingSeen, id)
+		}
+	}
 }
