@@ -64,7 +64,7 @@
 | 04-14b | доработка 04-14: тест смешанного частичного состояния группы (ревью: major «нет вызова» отклонён — это 04-17) | L2 | luna | — | done | `task_b7b3a6427a8b` | `ctx_7891e528206d` |
 | 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | done | `task_4f16c7b18aaf` | `ctx_7f65458f1bbd` |
 | 04-16 | миграция helpers | L3 | sol | 04-15 | done | `task_b65eaf5cc387` | `ctx_56c75a23509c` |
-| 04-17 | подключить store Open/save | L3 | sol | 04-16 | in_progress | `task_07548a50ab81` | `ctx_9b7c2630b534` |
+| 04-17 | подключить store Open/save | L3 | sol | 04-16 | done | `task_07548a50ab81` | `ctx_9b7c2630b534` |
 | 04-18 | control persistence (объединена с 04-17) | L3 | sol | 04-17 | merged | `task_579c31020cbe` |  |
 | 04-19 | commit группы | L3 | sol | 04-18 | todo | `task_8b9cce11d4db` |  |
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_2bf0b88271c6` |  |
