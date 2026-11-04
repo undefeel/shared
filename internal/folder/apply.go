@@ -172,24 +172,20 @@ var errLocalChanged = errors.New("файл изменён локально, по
 
 // applyOne treats step as a forecast only. Network I/O never holds scanMu.
 func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, st step, fetch Fetcher) (step, error) {
-	r := st.r
 	if e := f.Blocked(); e != nil {
 		return st, e
 	}
-	var tmp string
-	if st.act != mergeOnly && st.needsDownload() {
-		var err error
-		tmp, err = f.download(ctx, r, fetch)
-		if err != nil {
-			return st, err
-		}
+	prepared, err := f.stageApply(ctx, st, fetch)
+	if err != nil {
+		return st, err
 	}
-	downloaded := tmp
-	defer func() {
-		if downloaded != "" {
-			_ = f.root.unlink(downloaded, false)
-		}
-	}()
+	defer prepared.close(f)
+	return f.applyStaged(ctx, peer, generation, st, prepared)
+}
+
+func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64, st step, prepared *stagedApply) (step, error) {
+	r := st.r
+	tmp := prepared.tmp
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -221,20 +217,25 @@ func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, s
 		return st, errLocalChanged
 	}
 	// Register an external edit before deciding against the incoming vector.
-	var local *os.File
-	var info os.FileInfo
-	if l != nil && !l.Deleted {
-		var err error
-		local, err = f.root.openRead(disk)
+	local, info := prepared.local, prepared.info
+	if disk != prepared.disk || (l != nil && !l.Deleted) != (local != nil) {
+		return st, errLocalChanged
+	}
+	if local != nil {
+		// Only stat under scanMu; the bytes were verified during staging.
+		current, err := f.root.openRead(disk)
 		if err != nil {
 			return st, err
 		}
-		defer local.Close()
-		hash, actual, _, err := stableHash(local)
+		actual, err := current.Stat()
+		current.Close()
 		if err != nil {
 			return st, err
 		}
-		info = actual
+		if scanStatFromInfo(actual) != scanStatFromInfo(info) {
+			return st, errLocalChanged
+		}
+		hash := prepared.hash
 		if hash != l.Hash || (actual.Mode().Perm()&0100 != 0) != l.Exec {
 			c := *l
 			c.Hash = hash
@@ -373,6 +374,8 @@ func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, s
 			if e != nil {
 				return e
 			}
+			// Post-capture hashing stays under the serialized commit lock by design.
+			// A stat-only check would weaken protection against local writers.
 			hash, actual, _, e := stableHash(captured)
 			captured.Close()
 			if e != nil {
