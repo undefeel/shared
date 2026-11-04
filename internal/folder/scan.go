@@ -369,19 +369,22 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		}
 	}
 	f.mu.Unlock()
+	publish := func() {
+		f.files, f.clock, f.ignore, f.hashCache = next, clock, append([]string(nil), patterns...), hashCache
+		if changed > 0 {
+			f.notify()
+		}
+		f.lastScan = time.Now()
+	}
 	if dirty {
-		f.generation++
-		if err := f.persistLocked(p); err != nil {
+		if err := f.commitLocked(p, nil, publish); err != nil {
 			return err
 		}
+	} else {
+		f.mu.Lock()
+		publish()
+		f.mu.Unlock()
 	}
-	f.mu.Lock()
-	f.files, f.clock, f.ignore, f.hashCache = next, clock, append([]string(nil), patterns...), hashCache
-	if changed > 0 {
-		f.notify()
-	}
-	f.lastScan = time.Now()
-	f.mu.Unlock()
 	if changed > 0 && f.log != nil {
 		f.log.Printf("скан: локальных изменений: %d", changed)
 	}
