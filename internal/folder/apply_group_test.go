@@ -14,10 +14,19 @@ import (
 	"time"
 )
 
-type groupProgress struct{ done func() }
+type groupProgress struct {
+	done       func()
+	recordDone func(FileInfo)
+}
 
-func (*groupProgress) Plan(int, int64)               {}
-func (p *groupProgress) Done(FileInfo, Event, int64) { p.done() }
+func (*groupProgress) Plan(int, int64) {}
+func (p *groupProgress) Done(fi FileInfo, _ Event, _ int64) {
+	if p.recordDone != nil {
+		p.recordDone(fi)
+	} else {
+		p.done()
+	}
+}
 
 func TestApplyGroup64IncomingDurableFrames(t *testing.T) {
 	n := newNode(t, "A")
@@ -45,13 +54,19 @@ func TestApplyGroup64IncomingDurableFrames(t *testing.T) {
 		}
 	}})
 	var done atomic.Int32
-	progress := &groupProgress{done: func() {
+	progress := &groupProgress{recordDone: func(reported FileInfo) {
 		// Scheduling under -race may split the ready arrivals into several groups.
 		// Every reported success must already be in the durable index; exact ready
 		// queue group sizing is exercised by TestPerfReadyQueueGroupSize.
 		files, _, _ := n.f.DurableState()
-		if len(files) == 0 {
-			t.Error("Done before durable publication")
+		found := false
+		for _, fi := range files {
+			if fi.Name == reported.Name && fi.Hash == reported.Hash && fi.Version.Compare(reported.Version) == 0 {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("Done before durable publication of", reported.Name)
 		}
 		done.Add(1)
 	}}
