@@ -65,8 +65,8 @@
 | 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | done | `task_4f16c7b18aaf` | `ctx_7f65458f1bbd` |
 | 04-16 | миграция helpers | L3 | sol | 04-15 | done | `task_b65eaf5cc387` | `ctx_56c75a23509c` |
 | 04-17 | подключить store Open/save | L3 | sol | 04-16 | done | `task_07548a50ab81` | `ctx_9b7c2630b534` |
-| 04-18 | control persistence (объединена с 04-17) | L3 | sol | 04-17 | merged | `task_579c31020cbe` |  |
-| 04-19 | commit группы | L3 | sol | 04-18 | todo | `task_8b9cce11d4db` |  |
+| 04-18 | control persistence (объединена с 04-17) | L3 | sol | 04-17 | done | `task_579c31020cbe` |  |
+| 04-19 | commit группы | L3 | sol | 04-18 | in_progress | `task_8b9cce11d4db` | `ctx_28b45367fe67` |
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_2bf0b88271c6` |  |
 | 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_708e0596d8b3` |  |
 | 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_f0f4420dc2f4` |  |
@@ -77,7 +77,7 @@
 | 04-27 | compression helper | L2 | luna | 04-26 | done | `task_44a2a5233339` | `ctx_ffb31e07df28` |
 | 04-28 | /files server | L3 | sol | 04-27 | done | `task_e088338343e8` | `ctx_5c31d9265c50` |
 | 04-29 | /files client | L2 | luna | 04-28 | done | `task_1162babf6097` | `ctx_8ab5f08608b4` |
-| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_e5daddeebcf4` |  |
+| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | in_progress | `task_e5daddeebcf4` | `ctx_4e1939fda48c` |
 | 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_6468fb67b8d5` |  |
 | 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_52c45bada091` |  |
 | 04-50 | bounded log writer | L2 | luna | — | done | `task_9fc335af3492` | `ctx_e1f44b9ab3f9` |
