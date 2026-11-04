@@ -309,10 +309,11 @@ func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, s
 		if err != nil {
 			return st, err
 		}
-		mode := os.FileMode(0644)
-		if r.Exec {
-			mode = 0755
+		var localMode os.FileMode
+		if info != nil {
+			localMode = info.Mode().Perm()
 		}
+		mode := incomingMode(localMode, local != nil, r.Exec)
 		if err = incoming.Chmod(mode); err != nil {
 			return st, err
 		}
