@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"sharedir/internal/config"
+	"sharedir/internal/folder"
 )
 
 // ErrNotRunning — демон не запущен (сокет недоступен).
@@ -115,6 +116,23 @@ func (d *Daemon) controlHandler() http.Handler {
 	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, d.SetPaused(false))
 	})
+	mux.HandleFunc("POST /folder/confirm", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Token  string `json:"token"`
+			Action string `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			reply(w, err)
+			return
+		}
+		if err := d.ConfirmFolder(req.Token, req.Action); err != nil {
+			if errors.Is(err, folder.ErrStaleToken) {
+				http.Error(w, err.Error(), http.StatusConflict)
+			} else {
+				reply(w, err)
+			}
+		}
+	})
 	return mux
 }
 
@@ -194,4 +212,8 @@ func PairOffline(home, id, name, addr string) error {
 		return err
 	}
 	return cfg.Save(home)
+}
+
+func (c *Ctl) ConfirmFolder(token, action string) error {
+	return c.do("POST", "/folder/confirm", map[string]string{"token": token, "action": action}, nil)
 }

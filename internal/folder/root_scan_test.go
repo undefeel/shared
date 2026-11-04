@@ -275,3 +275,31 @@ func TestConfirmRejectsMissingRoot(t *testing.T) {
 		t.Fatal("consumed token")
 	}
 }
+
+func TestScanErrorClearsAfterSuccess(t *testing.T) {
+	f := rootScanFixture(t)
+	// Change stat to force a read rather than a cache hit.
+	if err := os.WriteFile(filepath.Join(f.Root, "item"), []byte("changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ops := f.rootScanIO()
+	read := ops.openRead
+	ops.openRead = func(r *rootFS, name string) (*os.File, error) {
+		if name == ignoreFile {
+			return read(r, name)
+		}
+		return nil, os.ErrPermission
+	}
+	if err := f.scanWith(ops); err == nil {
+		t.Fatal("expected read error")
+	}
+	if e := f.LastScanError(); e == nil || e.Path != "item" || e.Time.IsZero() {
+		t.Fatal(e)
+	}
+	if err := f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if e := f.LastScanError(); e != nil {
+		t.Fatal(e)
+	}
+}

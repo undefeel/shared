@@ -194,6 +194,9 @@ func (f *Folder) SetConfiguredRoot(configuredPath string) error {
 		return nil
 	}
 	f.Root = p
+	f.mu.Lock()
+	f.blocked = nil
+	f.mu.Unlock()
 	return f.blockRoot("root_changed", "configured path changed")
 }
 
