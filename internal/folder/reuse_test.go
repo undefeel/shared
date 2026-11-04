@@ -174,3 +174,26 @@ func TestReuseDurableVectorAndRestartIndex(t *testing.T) {
 		t.Fatal("restart index unavailable")
 	}
 }
+
+func TestReuseDeleteUpdatesIndex(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	n.write(t, "donor", "body", time.Unix(100, 0))
+	n.write(t, "keep", "other", time.Unix(100, 0))
+	if e := n.f.Scan(); e != nil {
+		t.Fatal(e)
+	}
+	r := incoming("body", Vector{"B": 1}, 200e9)
+	if !n.f.hasReusableContent(r) {
+		t.Fatal("missing donor")
+	}
+	if e := os.Remove(filepath.Join(n.f.Root, "donor")); e != nil {
+		t.Fatal(e)
+	}
+	if e := n.f.Scan(); e != nil {
+		t.Fatal(e)
+	}
+	if candidates := n.f.reuseCandidates(r); len(candidates) != 0 {
+		t.Fatalf("deleted donor indexed: %+v", candidates)
+	}
+}

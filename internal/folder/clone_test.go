@@ -86,3 +86,17 @@ func TestCloneFallbackAndIOErrors(t *testing.T) {
 		dst.Close()
 	}
 }
+
+func TestCloneCopyRejectsLengthMismatch(t *testing.T) {
+	for _, size := range []int64{4, 6} {
+		src, _ := os.CreateTemp(t.TempDir(), "src")
+		src.WriteString("hello")
+		dst, _ := os.CreateTemp(t.TempDir(), "dst")
+		e := cloneIntoWith(src, dst, size, func(*os.File, *os.File) error { return unix.EXDEV })
+		src.Close()
+		dst.Close()
+		if e == nil {
+			t.Fatalf("accepted length %d", size)
+		}
+	}
+}

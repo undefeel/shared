@@ -346,6 +346,7 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 	client.LocalHello = func() transport.Hello { return folderPeerState{dest.folder}.Hello() }
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	setupBytes, setupGroups := measure.Snapshot()
 	before := dest.folder.PersistenceStats()
 	start := time.Now()
 	addr := strings.TrimPrefix(srv.URL, "https://")
@@ -407,6 +408,10 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 		t.Fatal("durable cursor unsettled")
 	}
 	bytes, groups := measure.Snapshot()
+	groups -= setupGroups
+	for kind, n := range setupBytes {
+		bytes[kind] -= n
+	}
 	after := dest.folder.PersistenceStats()
 	result := perfResult{elapsed: elapsed, groups: groups, flush: folder.PersistenceCounters{Bytes: after.Bytes - before.Bytes, Fsync: after.Fsync - before.Fsync, Fullfsync: after.Fullfsync - before.Fullfsync, Barrierfsync: after.Barrierfsync - before.Barrierfsync}}
 	for kind, b := range bytes {
@@ -417,7 +422,10 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 		}
 	}
 	fmt.Printf("Perf n=%d time=%s files/s=%.1f index=%d intent=%d fsync=%d FULLFSYNC=%d BARRIERFSYNC=%d G=%d mean=%.2f\n", n, elapsed, float64(n)/elapsed.Seconds(), result.index, result.intent, result.flush.Fsync, result.flush.Fullfsync, result.flush.Barrierfsync, groups, float64(n)/float64(groups))
-	if groups == 0 {
+	if result.index+result.intent != result.flush.Bytes {
+		t.Fatal("probe byte accounting mismatch")
+	}
+	if groups == 0 || float64(n)/float64(groups) < 32 {
 		t.Errorf("pipeline mean group size below 32: files=%d groups=%d", n, groups)
 	}
 	if result.intent > 4<<20 {
