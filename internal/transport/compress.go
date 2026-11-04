@@ -80,8 +80,15 @@ func EncodeBody(dst io.Writer, src io.Reader, name string, relay bool, maxPlain 
 	}
 	if plainCount == maxPlain {
 		var extra [1]byte
-		if extraN, extraErr := plain.Read(extra[:]); extraN != 0 || (extraErr != nil && !errors.Is(extraErr, io.EOF)) {
+		extraN, extraErr := plain.Read(extra[:])
+		if extraN != 0 {
 			return "", plainCount, counted.n, hash, errors.New("plain body exceeds size limit")
+		}
+		if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+			return "", plainCount, counted.n, hash, extraErr
+		}
+		if extraErr == nil {
+			return "", plainCount, counted.n, hash, io.ErrNoProgress
 		}
 	}
 	if plainCount > maxPlain {
@@ -124,8 +131,15 @@ func DecodeBody(dst io.Writer, src io.Reader, encoding string, maxPlain int64) (
 	}
 	if n == maxPlain {
 		var extra [1]byte
-		if extraN, extraErr := body.Read(extra[:]); extraN != 0 || (extraErr != nil && !errors.Is(extraErr, io.EOF)) {
+		extraN, extraErr := body.Read(extra[:])
+		if extraN != 0 {
 			return n, hash, errors.New("decoded body exceeds size limit")
+		}
+		if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+			return n, hash, extraErr
+		}
+		if extraErr == nil {
+			return n, hash, io.ErrNoProgress
 		}
 	}
 	if br != nil {

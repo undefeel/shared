@@ -87,10 +87,33 @@ func TestDecodeRejectsCorruptGzipAndUnsupportedEncoding(t *testing.T) {
 	_ = zw.Close()
 	corrupt := append([]byte(nil), compressed.Bytes()...)
 	corrupt[len(corrupt)-1] ^= 0xff
-	if _, _, err := DecodeBody(io.Discard, bytes.NewReader(corrupt), "gzip", 100); err == nil {
-		t.Fatal("expected corrupt gzip checksum error")
+	if _, _, err := DecodeBody(io.Discard, bytes.NewReader(corrupt), "gzip", 4); !errors.Is(err, gzip.ErrChecksum) {
+		t.Fatalf("expected corrupt gzip checksum error at size boundary, got %v", err)
 	}
 	if _, _, err := DecodeBody(io.Discard, strings.NewReader("body"), "br", 100); err == nil || errors.Is(err, io.EOF) {
 		t.Fatalf("unexpected unsupported encoding error: %v", err)
 	}
+}
+
+func TestEncodePropagatesReadErrorAtSizeBoundary(t *testing.T) {
+	want := errors.New("source read failed")
+	source := &errorAfterBytesReader{data: bytes.Repeat([]byte("x"), 64<<10), err: want}
+	_, _, _, _, err := EncodeBody(io.Discard, source, "body.txt", true, 64<<10)
+	if !errors.Is(err, want) {
+		t.Fatalf("expected source error, got %v", err)
+	}
+}
+
+type errorAfterBytesReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errorAfterBytesReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
 }
