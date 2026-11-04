@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -66,21 +65,23 @@ type Candidate struct {
 }
 
 type Status struct {
-	Running    bool          `json:"running"`
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	Folder     string        `json:"folder"`
-	Files      int           `json:"files"`
-	Bytes      int64         `json:"bytes"`
-	LastScan   time.Time     `json:"last_scan,omitzero"`
-	Paused     bool          `json:"paused"`
-	Syncing    bool          `json:"syncing"`
-	Relay      *RelayStatus  `json:"relay,omitempty"`
-	Peers      []PeerStatus  `json:"peers"`
-	Candidates []Candidate   `json:"candidates"`
-	Kinds      []folder.Kind `json:"kinds"`
-	Days       []Day         `json:"days"`   // последние 7 дней, старые первыми
-	Recent     []Event       `json:"recent"` // новые первыми
+	ScanError   *folder.ScanError `json:"scan_error,omitempty"`
+	FolderError *folder.RootError `json:"folder_error,omitempty"`
+	Running     bool              `json:"running"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Folder      string            `json:"folder"`
+	Files       int               `json:"files"`
+	Bytes       int64             `json:"bytes"`
+	LastScan    time.Time         `json:"last_scan,omitzero"`
+	Paused      bool              `json:"paused"`
+	Syncing     bool              `json:"syncing"`
+	Relay       *RelayStatus      `json:"relay,omitempty"`
+	Peers       []PeerStatus      `json:"peers"`
+	Candidates  []Candidate       `json:"candidates"`
+	Kinds       []folder.Kind     `json:"kinds"`
+	Days        []Day             `json:"days"`   // последние 7 дней, старые первыми
+	Recent      []Event           `json:"recent"` // новые первыми
 }
 
 type peerRunner struct {
@@ -112,6 +113,10 @@ type Daemon struct {
 	disc   *discovery.Discovery
 	act    *activity
 
+	lifecycle    sync.Mutex
+	workers      sync.WaitGroup
+	watchCancel  context.CancelFunc
+	watchDone    chan struct{}
 	mu           sync.Mutex
 	cfg          *config.Config
 	peers        map[string]*peerRunner
@@ -164,10 +169,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer func() { d.lifecycle.Lock(); defer d.lifecycle.Unlock(); d.stopFolder(); _ = d.folder.Close() }()
 	d.Log.Printf("устройство %q, ID %s", cfg.Name, identity.Pretty(d.ID.ID))
 	d.Log.Printf("папка %s", cfg.Folder)
 	if err := d.folder.Scan(); err != nil {
-		return fmt.Errorf("скан папки: %w", err)
+		d.Log.Printf("скан папки: %v", err)
 	}
 
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.Port))
@@ -202,7 +208,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 
-	go d.watchLoop(ctx)
+	d.startWatch()
 	go (&http.Server{Handler: d.controlHandler()}).Serve(ctl)
 
 	d.syncPeers()
@@ -213,6 +219,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 // watchLoop пересканирует папку по событиям ФС (с задержкой, чтобы пачка
 // изменений дала один скан) и раз в минуту на всякий случай.
 func (d *Daemon) watchLoop(ctx context.Context) {
+	generation := d.folder.ConfirmedGeneration()
 	trigger := make(chan struct{}, 1)
 	if err := d.folder.Watch(ctx, func() {
 		select {
@@ -242,8 +249,19 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 			}
 		case <-tick.C:
 		}
-		if err := d.folder.Scan(); err != nil {
-			d.Log.Printf("скан: %v", err)
+		if ctx.Err() != nil {
+			return
+		}
+		if err := d.folder.ScanGeneration(ctx, generation); err != nil {
+			if d.folder.Blocked() != nil {
+				d.mu.Lock()
+				for _, p := range d.peers {
+					if p.cancel != nil {
+						p.cancel()
+					}
+				}
+				d.mu.Unlock()
+			}
 		}
 		d.changed()
 	}
@@ -279,6 +297,8 @@ func (d *Daemon) Paused() bool {
 // мы не тянем изменения и не отдаём их пирам; локальный скан продолжается,
 // так что после возобновления всё накопленное уйдёт.
 func (d *Daemon) SetPaused(paused bool) error {
+	d.lifecycle.Lock()
+	defer d.lifecycle.Unlock()
 	d.mu.Lock()
 	d.cfg.Paused = paused
 	err := d.cfg.Save(d.Home)
@@ -287,12 +307,14 @@ func (d *Daemon) SetPaused(paused bool) error {
 		return err
 	}
 	if paused {
+		d.stopFolder()
+		d.startWatch()
 		d.folder.Kick() // висящие long-poll пиров сразу получат «пауза»
 		d.Log.Printf("синхронизация на паузе")
 	} else {
 		d.Log.Printf("синхронизация возобновлена")
 	}
-	d.syncPeers()
+	d.syncPeersLocked()
 	d.changed()
 	return nil
 }
@@ -325,7 +347,14 @@ func (d *Daemon) rejected(id string) {
 
 // syncPeers приводит набор запущенных клиентов в соответствие с конфигом.
 func (d *Daemon) syncPeers() {
+	d.lifecycle.Lock()
+	defer d.lifecycle.Unlock()
+	d.syncPeersLocked()
+}
+
+func (d *Daemon) syncPeersLocked() {
 	d.connections.Revoke(d.isPeer)
+	blocked := d.folder.Blocked() != nil
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	want := map[string]config.Peer{}
@@ -349,17 +378,18 @@ func (d *Daemon) syncPeers() {
 		}
 		pr.set(func(s *PeerStatus) { s.Name = p.Name })
 		switch {
-		case d.cfg.Paused && pr.cancel != nil:
+		case (d.cfg.Paused || blocked) && pr.cancel != nil:
 			pr.cancel()
 			pr.cancel = nil
 			pr.set(func(s *PeerStatus) { s.Connected, s.Syncing, s.Progress, s.State = false, false, nil, StatePaused })
-		case d.cfg.Paused:
+		case d.cfg.Paused || blocked:
 			pr.set(func(s *PeerStatus) { s.State = StatePaused })
 		case pr.cancel == nil:
 			ctx, cancel := context.WithCancel(d.ctx)
 			pr.cancel = cancel
 			pr.set(func(s *PeerStatus) { s.State = StateSearching })
-			go d.runPeer(ctx, pr)
+			d.workers.Add(1)
+			go func() { defer d.workers.Done(); d.runPeer(ctx, pr) }()
 		}
 	}
 }
@@ -499,7 +529,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			pr.st.Connected, pr.st.State = false, StateOffline
 			pr.mu.Unlock()
 			if wasConnected {
-				d.Log.Printf("%s: соединение потеряно: %v", pr.st.Name, err)
+				d.Log.Printf("%s: соединение потеряно: %v", pr.name(), err)
 			}
 			d.changed()
 			addr, since = "", 0
@@ -555,6 +585,8 @@ func (d *Daemon) Status() Status {
 	if d.folder != nil {
 		fs := d.folder.Stats()
 		st.Files, st.Bytes, st.LastScan = fs.Files, fs.Bytes, fs.LastScan
+		st.FolderError = d.folder.Blocked()
+		st.ScanError = d.folder.LastScanError()
 		if fs.Kinds != nil {
 			st.Kinds = fs.Kinds
 		}
@@ -656,11 +688,22 @@ func (d *Daemon) Unpair(id string) error {
 	return nil
 }
 
-// Reload перечитывает список пиров из конфига (папка и порт — только рестартом).
+// Reload перечитывает конфиг; смена папки требует явного подтверждения.
 func (d *Daemon) Reload() error {
 	cfg, err := config.Load(d.Home)
 	if err != nil {
 		return err
+	}
+	d.lifecycle.Lock()
+	defer d.lifecycle.Unlock()
+	if cfg.Folder != d.Config().Folder {
+		d.stopFolder()
+		if err := d.folder.SetConfiguredRoot(cfg.Folder); err != nil && d.folder.Blocked() == nil {
+			return err
+		}
+		d.mu.Lock()
+		d.cfg.Folder = cfg.Folder
+		d.mu.Unlock()
 	}
 	d.mu.Lock()
 	d.cfg.Peers = cfg.Peers
@@ -673,7 +716,7 @@ func (d *Daemon) Reload() error {
 		default:
 		}
 	}
-	d.syncPeers()
+	d.syncPeersLocked()
 	d.changed()
 	return nil
 }
@@ -728,4 +771,38 @@ func (d *Daemon) pruneIncoming(now time.Time) {
 			delete(d.incomingSeen, id)
 		}
 	}
+}
+
+// stopFolder is called with lifecycle held, without mu while draining runners.
+func (d *Daemon) stopFolder() {
+	d.mu.Lock()
+	for _, p := range d.peers {
+		if p.cancel != nil {
+			p.cancel()
+			p.cancel = nil
+		}
+	}
+	d.mu.Unlock()
+	d.workers.Wait()
+	if d.watchCancel != nil {
+		d.watchCancel()
+		<-d.watchDone
+		d.watchCancel = nil
+	}
+}
+func (d *Daemon) startWatch() {
+	ctx, cancel := context.WithCancel(d.ctx)
+	d.watchCancel = cancel
+	d.watchDone = make(chan struct{})
+	go func() { defer close(d.watchDone); d.watchLoop(ctx) }()
+}
+func (d *Daemon) ConfirmFolder(token, action string) error {
+	d.lifecycle.Lock()
+	defer d.lifecycle.Unlock()
+	d.stopFolder()
+	err := d.folder.Confirm(token, action, d.Config().Folder)
+	d.startWatch()
+	d.syncPeersLocked()
+	d.changed()
+	return err
 }

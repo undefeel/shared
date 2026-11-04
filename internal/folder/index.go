@@ -130,6 +130,9 @@ func kindOf(name string) string {
 }
 
 type Folder struct {
+	scanError   *ScanError // mu
+	scanLogTime time.Time  // mu
+
 	root                *rootFS
 	binding             rootBinding // mu
 	blocked             *RootError  // mu

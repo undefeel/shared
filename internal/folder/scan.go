@@ -2,6 +2,7 @@ package folder
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -168,12 +169,56 @@ func stableHash(file *os.File) (string, os.FileInfo, scanStat, error) {
 	return hex.EncodeToString(h.Sum(nil)), after, meta, nil
 }
 
+// ScanError is transient and clears after a successful full scan.
+type ScanError struct {
+	Message string    `json:"message"`
+	Path    string    `json:"path"`
+	Time    time.Time `json:"time"`
+}
+
+func (f *Folder) LastScanError() *ScanError {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.scanError == nil {
+		return nil
+	}
+	copy := *f.scanError
+	return &copy
+}
+
 func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
 
 // scanWith builds a complete candidate before touching published files or clocks.
 func (f *Folder) scanWith(ioops scanIO) error {
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
+	return f.scanLocked(ioops, false)
+}
+
+func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
+	scanPath := f.Root
+	defer func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if result == nil {
+			f.scanError = nil
+			return
+		}
+		var root *RootError
+		if errors.As(result, &root) {
+			return
+		}
+		now := time.Now()
+		previous := f.scanError
+		if previous == nil || previous.Message != result.Error() || now.Sub(f.scanLogTime) >= 5*time.Minute {
+			if f.log != nil {
+				f.log.Printf("скан %s: %v", scanPath, result)
+			}
+			f.scanLogTime = now
+		}
+		f.scanError = &ScanError{Message: result.Error(), Path: scanPath, Time: now}
+	}()
+
 	// The persistent latch is checked before opening or walking the root. A
 	// returning mount or a successful later scan cannot implicitly confirm it.
 	if err := f.guardRoot(); err != nil {
@@ -182,6 +227,7 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	// Walk from the root descriptor pinned during Open. Reopening the configured
 	// pathname here could silently switch the candidate to a replacement root.
 	r := f.root
+	scanPath = ignoreFile
 	patterns, err := readIgnore(ioops, r)
 	if err != nil {
 		return err
@@ -203,6 +249,7 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	canonicalDisk := make(map[string]string)
 	var walk func(string) error
 	walk = func(dir string) error {
+		scanPath = dir
 		d, err := ioops.openDir(r, dir)
 		if err != nil {
 			if dir == "." {
@@ -224,6 +271,7 @@ func (f *Folder) scanWith(ioops scanIO) error {
 			if dir != "." {
 				disk = dir + "/" + nameOnDisk
 			}
+			scanPath = disk
 			name := norm.NFC.String(disk)
 			if !validName(name) {
 				return errors.New("scan: invalid canonical name: " + disk)
@@ -293,10 +341,10 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	if ioops.beforeCommit != nil {
 		ioops.beforeCommit()
 	}
-	return f.commitScan(candidate, patterns, newCache)
+	return f.commitScan(candidate, patterns, newCache, allowEmpty)
 }
 
-func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache) error {
+func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache, allowEmpty bool) error {
 	// Keep the final binding check in the commit path: a root replaced after
 	// the walk must not publish a candidate collected from another directory.
 	// scanMu is held by Scan; guardRoot persists any resulting latch itself.
@@ -313,7 +361,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	}
 	// Decide against the same current files snapshot used to build next. Release
 	// both locks before blockRoot persists the latch through saveMu.
-	if len(found) == 0 && len(f.files) != 0 {
+	if !allowEmpty && len(found) == 0 && len(f.files) != 0 {
 		f.mu.Unlock()
 		f.saveMu.Unlock()
 		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
@@ -389,4 +437,17 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		f.log.Printf("скан: локальных изменений: %d", changed)
 	}
 	return nil
+}
+
+// ScanGeneration rejects events queued by a canceled watcher generation.
+func (f *Folder) ScanGeneration(ctx context.Context, generation uint64) error {
+	f.scanMu.Lock()
+	defer f.scanMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if generation != f.ConfirmedGeneration() {
+		return errors.New("stale watcher generation")
+	}
+	return f.scanLocked(f.rootScanIO(), false)
 }
