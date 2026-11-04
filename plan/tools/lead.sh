@@ -5,6 +5,9 @@
 #   plan/tools/lead.sh <ID> implement            luna implements plan/specs/<ID>.plan.md
 #   plan/tools/lead.sh <ID> fix <N> <notes.md>   luna fixes round N (N = 1 or 2) from your review notes
 #   plan/tools/lead.sh --wait <dispatch>         keep waiting for an already started implementer
+#   plan/tools/lead.sh <ID> part <name> <part.md> start a PARALLEL implementer for one plan part (no wait);
+#                                                 parts must own disjoint files; the implementer does not commit
+#   plan/tools/lead.sh --wait-all <d1> <d2> ...   wait until all parallel implementers reported
 #
 # Exit codes: 0 = implementer report printed; 3 = still running / asked a question
 # (re-run with --wait <dispatch>, answer questions with orca orchestration reply); 2 = usage; other = error.
@@ -12,6 +15,7 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
 CHUNK_MS=480000   # stay below common 10-minute shell limits
 MAX_FIX=2
+MAX_PARTS=3      # parallel implementers per lead
 
 wait_for() {
   local ds="$1" deadline=$(( $(date +%s) + CHUNK_MS / 1000 ))
@@ -41,10 +45,35 @@ wait_for() {
 
 [[ "${1:-}" == "--wait" ]] && wait_for "${2:?dispatch id}"
 
+if [[ "${1:-}" == "--wait-all" ]]; then
+  shift; pending=("$@"); (( ${#pending[@]} > 0 )) || { echo "usage: --wait-all <d1> ..." >&2; exit 2; }
+  deadline=$(( $(date +%s) + CHUNK_MS / 1000 ))
+  while (( ${#pending[@]} > 0 )); do
+    left=$(( (deadline - $(date +%s)) * 1000 ))
+    if (( left <= 0 )); then echo "lead: still running: ${pending[*]}; re-run: plan/tools/lead.sh --wait-all ${pending[*]}"; exit 3; fi
+    out="$(orca orchestration check --wait --types "worker_done,escalation,question" --timeout-ms "$left" --json 2>/dev/null)" || { echo "$out"; exit 1; }
+    jq -r '.result.messages[]? | "── [\(.type)] id=\(.id) from=\(.payload.dispatchId // "?") \(.subject // "")\n\(.body // "")"' <<<"$out"
+    if jq -e '[.result.messages[]? | select(.type != "worker_done" and .type != "heartbeat")] | length > 0' <<<"$out" >/dev/null; then
+      echo "lead: a question/escalation above needs an answer (orca orchestration reply --id <id> --body ...); then re-run --wait-all with the remaining dispatches"
+    fi
+    next=()
+    for ds in "${pending[@]}"; do
+      if jq -e --arg ds "$ds" 'any(.result.messages[]?; .type == "worker_done" and (.payload.dispatchId // "") == $ds)' <<<"$out" >/dev/null; then
+        orca orchestration worker-release --dispatch "$ds" --json >/dev/null 2>&1 || true
+      else next+=("$ds"); fi
+    done
+    pending=("${next[@]+"${next[@]}"}")
+  done
+  echo "lead: all parallel implementers reported; now run the full acceptance yourself and commit"
+  exit 0
+fi
+
 ID="${1:?usage: lead.sh <ID> implement | fix <N> <notes.md>}"; MODE="${2:?mode}"
 SPEC="plan/specs/$ID.md"; PLAN="plan/specs/$ID.plan.md"
 [[ -f "$SPEC" && -f "$PLAN" ]] || { echo "need $SPEC and a committed $PLAN" >&2; exit 2; }
-git diff --quiet && git diff --cached --quiet || { echo "commit first (working tree is dirty)" >&2; exit 2; }
+if [[ "$MODE" != part ]]; then
+  git diff --quiet && git diff --cached --quiet || { echo "commit first (working tree is dirty)" >&2; exit 2; }
+fi
 S="$(git rev-parse --git-dir)/lead-$ID-$MODE${3:+-$3}.md"
 
 section() { awk -v h="## $1" '$0==h{p=1;next} /^## /{p=0} p' "$SPEC"; }
@@ -65,6 +94,21 @@ $(cat "$PLAN")" ;;
 
 === REVIEW NOTES (round $N of at most $MAX_FIX) ===
 $(cat "$NOTES")" ;;
+  part)
+    PART="${3:?part name}"; PFILE="${4:?part plan file}"
+    [[ -f "$PFILE" ]] || { echo "no part file $PFILE" >&2; exit 2; }
+    running="$(orca orchestration worker-list --json 2>/dev/null | jq --arg wt "$ROOT" '[.result.workers[]? | select((.workspace // "") | endswith($wt)) | select(.terminalState == "active")] | length')"
+    (( ${running:-0} <= MAX_PARTS )) || { echo "too many active workers in this worktree (max $MAX_PARTS parallel parts)" >&2; exit 2; }
+    TITLE="Implement $ID part $PART"
+    TASK="Implement ONLY this part of the plan. Other implementers work in the same worktree at the same time on other parts:
+- edit ONLY the files listed in this part; never touch, format or revert any other file;
+- do NOT commit, do NOT run git commands that change state (add/commit/stash/checkout/reset);
+- run only the tests of your own packages; failures clearly caused by unfinished files of other parts are not yours — report them;
+- if the part needs a change outside its files, ask (orchestration ask) and end your turn.
+Full plan for context: $PLAN.
+
+=== PART $PART ===
+$(cat "$PFILE")" ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 
@@ -86,8 +130,7 @@ $(section Constraints)
 $(section Ownership)
 
 ## Observable acceptance
-$(section "Observable acceptance")
-Run all of it, commit, then send worker_done with: commits, files changed, acceptance results, and anything you could not do.
+$(if [[ "$MODE" == part ]]; then echo "Run go vet and the tests of your own packages only. Do not commit. Send worker_done with: files changed, test results, anything you could not do."; else section "Observable acceptance"; echo "Run all of it, commit, then send worker_done with: commits, files changed, acceptance results, and anything you could not do."; fi)
 SPEC
 
 out="$(orca orchestration worker-start --spec-file "$S" --task-title "$TITLE" \
@@ -95,4 +138,5 @@ out="$(orca orchestration worker-start --spec-file "$S" --task-title "$TITLE" \
 ds="$(jq -r '.result.dispatchId // .result.dispatch.id // .dispatchId // empty' <<<"$out")"
 [[ -n "$ds" ]] || { echo "$out"; exit 1; }
 echo "lead: started implementer $ds ($TITLE)"
+if [[ "$MODE" == part ]]; then echo "lead: not waiting (parallel part); later: plan/tools/lead.sh --wait-all <all part dispatches>"; exit 0; fi
 wait_for "$ds"
