@@ -27,7 +27,7 @@
 
 | ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
-| 02-10 | примитивы безопасного дерева | L3 | sol | — | todo | `task_9f2c03fa18ae` | |
+| 02-10 | примитивы безопасного дерева | L3 | sol | — | in_progress | `task_9f2c03fa18ae` | `ctx_dbb7c8f0ac91` |
 | 02-11 | no-replace и flush платформ | L3 | sol | 02-10 | todo | `task_97de5a4673c1` | |
 | 02-12 | глубокий снимок и save | L3 | sol | 02-11 | todo | `task_8df04ac4b7c6` | |
 | 02-13 | staging полного Scan | L2 | luna | 02-10, 02-12 | todo | `task_4572aa79fc95` | |
