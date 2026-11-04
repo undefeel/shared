@@ -363,6 +363,7 @@ type Connections struct {
 	mu         sync.Mutex
 	conns      map[net.Conn]struct{}
 	count      int
+	relayCount int
 	ips        map[string]int
 	Max, PerIP int
 }
@@ -400,7 +401,8 @@ func (g *Connections) Revoke(allowed func(string) bool) {
 
 type limitedListener struct {
 	net.Listener
-	g *Connections
+	g        *Connections
+	relayMax int
 }
 type limitedConn struct {
 	net.Conn
@@ -409,7 +411,16 @@ type limitedConn struct {
 }
 
 func (c *limitedConn) Close() error                      { err := c.Conn.Close(); c.once.Do(c.release); return err }
-func (g *Connections) Limit(l net.Listener) net.Listener { return &limitedListener{l, g} }
+func (g *Connections) Limit(l net.Listener) net.Listener { return &limitedListener{Listener: l, g: g} }
+
+// LimitRelay shares the global connection limit, with a separate relay-channel limit.
+func (g *Connections) LimitRelay(l net.Listener, max int) net.Listener {
+	if max <= 0 {
+		max = 64
+	}
+	return &limitedListener{Listener: l, g: g, relayMax: max}
+}
+
 func (l *limitedListener) Accept() (net.Conn, error) {
 	for {
 		c, err := l.Listener.Accept()
@@ -432,20 +443,25 @@ func (l *limitedListener) Accept() (net.Conn, error) {
 		if g.ips == nil {
 			g.ips = make(map[string]int)
 		}
-		if g.count >= total || (ip != "" && g.ips[ip] >= per) {
+		if g.count >= total || (l.relayMax > 0 && g.relayCount >= l.relayMax) ||
+			(l.relayMax == 0 && ip != "" && g.ips[ip] >= per) {
 			g.mu.Unlock()
 			c.Close()
 			continue
 		}
 		g.count++
-		if ip != "" {
+		if l.relayMax > 0 {
+			g.relayCount++
+		} else if ip != "" {
 			g.ips[ip]++
 		}
 		g.mu.Unlock()
 		return &limitedConn{Conn: c, release: func() {
 			g.mu.Lock()
 			g.count--
-			if ip != "" {
+			if l.relayMax > 0 {
+				g.relayCount--
+			} else if ip != "" {
 				g.ips[ip]--
 				if g.ips[ip] == 0 {
 					delete(g.ips, ip)

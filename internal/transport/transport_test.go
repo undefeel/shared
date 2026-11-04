@@ -134,6 +134,127 @@ func TestHandshakeTimeoutAndLimit(t *testing.T) {
 		t.Fatal("handshake not timed out")
 	}
 }
+
+type testAddr string
+
+func (a testAddr) Network() string { return "tcp" }
+func (a testAddr) String() string  { return string(a) }
+
+type testAddrConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c testAddrConn) RemoteAddr() net.Addr { return c.remote }
+
+type testListener struct{ conns []net.Conn }
+
+func (l *testListener) Accept() (net.Conn, error) {
+	if len(l.conns) == 0 {
+		return nil, io.EOF
+	}
+	c := l.conns[0]
+	l.conns = l.conns[1:]
+	return c, nil
+}
+func (*testListener) Close() error   { return nil }
+func (*testListener) Addr() net.Addr { return testAddr("listener") }
+
+func queuedConns(n int, addr net.Addr) (*testListener, []net.Conn) {
+	l := &testListener{}
+	peers := make([]net.Conn, 0, n)
+	for range n {
+		c, peer := net.Pipe()
+		l.conns = append(l.conns, testAddrConn{Conn: c, remote: addr})
+		peers = append(peers, peer)
+	}
+	return l, peers
+}
+
+func closeConns(cs []net.Conn) {
+	for _, c := range cs {
+		c.Close()
+	}
+}
+
+func TestRelayConnectionLimits(t *testing.T) {
+	g := &Connections{}
+	addr := testAddr("192.0.2.1:1234")
+	l, peers := queuedConns(21, addr)
+	defer closeConns(peers)
+	ln := g.LimitRelay(l, 20)
+	accepted := make([]net.Conn, 0, 20)
+	for range 20 {
+		c, err := ln.Accept()
+		if err != nil {
+			t.Fatalf("relay accept: %v", err)
+		}
+		accepted = append(accepted, c)
+	}
+	if _, err := ln.Accept(); err == nil {
+		t.Fatal("relay limit not enforced")
+	}
+	accepted[0].Close()
+	replacement, peer := net.Pipe()
+	defer peer.Close()
+	l.conns = append(l.conns, testAddrConn{Conn: replacement, remote: addr})
+	reused, err := ln.Accept()
+	if err != nil {
+		t.Fatalf("closed relay slot was not reused: %v", err)
+	}
+	reused.Close()
+	for _, c := range accepted {
+		c.Close()
+	}
+	if g.count != 0 || g.relayCount != 0 {
+		t.Fatalf("relay slots not released: total=%d relay=%d", g.count, g.relayCount)
+	}
+}
+
+func TestDirectPerIPAndSharedConnectionLimit(t *testing.T) {
+	g := &Connections{Max: 18}
+	addr := testAddr("192.0.2.2:1234")
+	direct, directPeers := queuedConns(17, addr)
+	defer closeConns(directPeers)
+	directLn := g.Limit(direct)
+	acceptedDirect := make([]net.Conn, 0, 16)
+	for range 16 {
+		c, err := directLn.Accept()
+		if err != nil {
+			t.Fatalf("direct accept: %v", err)
+		}
+		acceptedDirect = append(acceptedDirect, c)
+	}
+	if _, err := directLn.Accept(); err == nil {
+		t.Fatal("direct per-IP limit not enforced")
+	}
+	// Existing direct connections leave two global slots for relay channels;
+	// the next relay channel is rejected even though its own cap is free.
+	relay, relayPeers := queuedConns(3, addr)
+	defer closeConns(relayPeers)
+	relayLn := g.LimitRelay(relay, 64)
+	acceptedRelay := make([]net.Conn, 0, 2)
+	for range 2 {
+		c, err := relayLn.Accept()
+		if err != nil {
+			t.Fatalf("relay accept under shared limit: %v", err)
+		}
+		acceptedRelay = append(acceptedRelay, c)
+	}
+	if _, err := relayLn.Accept(); err == nil {
+		t.Fatal("shared total limit not enforced")
+	}
+	if g.count != 18 {
+		t.Fatalf("total count=%d, want 18", g.count)
+	}
+	for _, c := range acceptedDirect {
+		c.Close()
+	}
+	for _, c := range acceptedRelay {
+		c.Close()
+	}
+}
+
 func TestRevokeTransfer(t *testing.T) {
 	var allowed atomic.Bool
 	allowed.Store(true)
