@@ -205,3 +205,26 @@ func TestPeerQueueEpochChangeClearsOldCursor(t *testing.T) {
 		t.Fatal("stale cursor remained visible before the new epoch was applied")
 	}
 }
+
+func TestPeerQueueEpochResetUnblocksOtherPeer(t *testing.T) {
+	q := newPeerQueue()
+	full := make([]folder.FileInfo, peerPendingLimit)
+	for i := range full {
+		full[i] = queueInfo(fmt.Sprintf("a%05d", i), 1)
+	}
+	if !q.accept("a", "epoch-1", 1, false, full) {
+		t.Fatal("full peer index not accepted")
+	}
+	if q.accept("b", "epoch", 1, false, []folder.FileInfo{queueInfo("b", 1)}) {
+		t.Fatal("peer b should be blocked by peer a's full queue")
+	}
+	if q.canPoll("b") {
+		t.Fatal("peer b unexpectedly pollable while the queue is full")
+	}
+	if !q.accept("a", "epoch-2", 2, false, nil) {
+		t.Fatal("empty new-epoch index not accepted")
+	}
+	if !q.canPoll("b") {
+		t.Fatal("peer b remained blocked after epoch reset drained the queue")
+	}
+}

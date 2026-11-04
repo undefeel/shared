@@ -79,6 +79,9 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		delete(q.blocked, peer)
 		delete(q.indexes, peer)
 		delete(q.cursors, peer)
+		if len(q.pending) < peerPendingLimit {
+			clear(q.blocked)
+		}
 		haveIndex = false
 	}
 	// A reset bit can accompany a retry. Only a changed epoch or cursor starts
@@ -124,6 +127,7 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		q.blocked[peer] = true
 		return false
 	}
+	delete(q.blocked, peer)
 	for _, record := range index.records {
 		if !record.done {
 			return true
