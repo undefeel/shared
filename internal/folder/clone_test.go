@@ -100,3 +100,47 @@ func TestCloneCopyRejectsLengthMismatch(t *testing.T) {
 		}
 	}
 }
+
+func TestPlatformCloneWhenSupported(t *testing.T) {
+	dir := t.TempDir()
+	r, e := openRootFS(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer r.Close()
+	if e = os.WriteFile(filepath.Join(dir, "source"), []byte("hello"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	src, e := r.openRead("source")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer src.Close()
+	parent, leaf, e := r.parent("clone", false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer parent.Close()
+	created, e := platformCloneAt(src, parent, leaf)
+	if !created {
+		if !cloneUnsupported(e) {
+			t.Fatal(e)
+		}
+		dst, e := openRegularAt(parent, leaf, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL, 0600)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer dst.Close()
+		if e = platformClone(src, dst); cloneUnsupported(e) {
+			t.Skip("filesystem lacks native CoW cloning")
+		} else if e != nil {
+			t.Fatal(e)
+		}
+	} else if e != nil {
+		t.Fatal(e)
+	}
+	body, e := os.ReadFile(filepath.Join(dir, "clone"))
+	if e != nil || string(body) != "hello" {
+		t.Fatalf("native clone=%q err=%v", body, e)
+	}
+}
