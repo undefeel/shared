@@ -101,7 +101,8 @@ func (f *Folder) NeedsRemoteContent(peer string, fi FileInfo) bool {
 	if act == skip && !(local != nil && fi.Deleted && !local.Deleted && fi.Version.Compare(local.Version) == Concurrent) {
 		return false
 	}
-	return step{l: local, r: fi, act: act}.needsDownload()
+	st := step{l: local, r: fi, act: act}
+	return st.needsDownload() && !f.hasReusableContent(fi)
 }
 
 // ApplyRemote сверяет индекс пира с локальным и подтягивает изменения.
