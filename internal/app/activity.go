@@ -106,20 +106,40 @@ func (a *activity) flush() {
 		return
 	}
 	cutoff := time.Now().AddDate(0, 0, -keepDays).Format(time.DateOnly)
-	f := activityFile{Recent: a.recent}
+	f := activityFile{
+		Recent: append([]Event(nil), a.recent...),
+	}
 	for date, d := range a.days {
 		if date < cutoff {
 			delete(a.days, date)
 			continue
 		}
-		f.Days = append(f.Days, d)
+		dayCopy := *d
+		f.Days = append(f.Days, &dayCopy)
 	}
 	a.dirty = false
 	a.mu.Unlock()
-	if data, err := json.Marshal(f); err == nil {
-		tmp := a.path + ".tmp"
-		if os.WriteFile(tmp, data, 0o600) == nil {
-			os.Rename(tmp, a.path)
-		}
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		a.mu.Lock()
+		a.dirty = true
+		a.mu.Unlock()
+		return
+	}
+
+	tmp := a.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		a.mu.Lock()
+		a.dirty = true
+		a.mu.Unlock()
+		return
+	}
+
+	if err := os.Rename(tmp, a.path); err != nil {
+		a.mu.Lock()
+		a.dirty = true
+		a.mu.Unlock()
+		return
 	}
 }
