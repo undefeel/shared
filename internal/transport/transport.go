@@ -96,6 +96,7 @@ const RelayHost = "relay"
 
 // ErrPeerPaused — пир поставил синхронизацию на паузу.
 var ErrPeerPaused = errors.New("пир на паузе")
+var ErrVersionChanged = errors.New("peer file version changed")
 
 type Server struct {
 	State            StateProvider
@@ -235,10 +236,17 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 			f.Close()
 		}
 		status := http.StatusConflict
+		message := "file unavailable"
+		if err != nil {
+			known, _, exists := s.Folder.Lookup(q.Get("name"))
+			if exists && !known.Deleted && known.Hash != q.Get("hash") {
+				message = "version_changed"
+			}
+		}
 		if s.Folder.Blocked() != nil || s.Folder.CheckRead(generation) != nil {
 			status = http.StatusServiceUnavailable
 		}
-		http.Error(w, "file unavailable", status)
+		http.Error(w, message, status)
 		return
 	}
 	defer f.Close()
@@ -416,6 +424,14 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		resp.Body.Close()
 		return nil, ErrPeerPaused
+	}
+	if resp.StatusCode == http.StatusConflict {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		if strings.TrimSpace(string(body)) == "version_changed" {
+			return nil, ErrVersionChanged
+		}
+		return nil, fmt.Errorf("%s: %s", resp.Status, body)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

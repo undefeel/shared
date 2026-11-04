@@ -121,6 +121,133 @@ func TestDownloadPoolStagingReservationAndOversizedExclusive(t *testing.T) {
 	drain()
 }
 
+func TestDownloadPoolIndependentFIFOAndOversizedStream(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	stage, err := n.f.reserveStaging(context.Background(), maxStagedBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage()
+	blocked := make(chan error, 1)
+	go func() {
+		release, err := n.f.reserveStaging(context.Background(), 1)
+		if release != nil {
+			release()
+		}
+		blocked <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		p := n.f.pool()
+		p.mu.Lock()
+		queued := len(p.stageWaiters)
+		p.mu.Unlock()
+		if queued == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("staging waiter did not queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	stream, err := n.f.acquireDownload(ctx)
+	if err != nil {
+		t.Fatalf("stream blocked behind staging reservation: %v", err)
+	}
+	stream()
+	stage()
+	select {
+	case err := <-blocked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("staging waiter did not resume")
+	}
+	// Oversized work is exclusive among staging reservations while streams stay
+	// independently available.
+	large, err := n.f.reserveStaging(context.Background(), maxStagedBytes+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	s, err := n.f.acquireDownload(ctx2)
+	if err != nil {
+		t.Fatalf("oversized staging blocked stream: %v", err)
+	}
+	s()
+	large()
+}
+
+func TestDownloadPoolBoundsProducersWhileCommitBlocked(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	n.f.scanMu.Lock()
+	records := func(peer string, start, count int) []FileInfo {
+		out := make([]FileInfo, count)
+		hash := sha256.Sum256([]byte("body"))
+		for i := range out {
+			out[i] = FileInfo{Name: fmt.Sprintf("file-%d", start+i), Hash: hex.EncodeToString(hash[:]), Size: 4, Version: Vector{peer: 1}}
+		}
+		return out
+	}
+	var fetched atomic.Int32
+	fetch := func(_ context.Context, fi FileInfo, w io.Writer) error {
+		fetched.Add(1)
+		_, err := io.WriteString(w, "body")
+		return err
+	}
+	results := make(chan [2]int, 3)
+	for _, batch := range []struct {
+		peer     string
+		start, n int
+	}{{"B", 0, 64}, {"C", 64, 64}, {"D", 128, 1}} {
+		b := batch
+		go func() {
+			a, f := n.f.ApplyRemote(context.Background(), b.peer, records(b.peer, b.start, b.n), fetch, nil)
+			results <- [2]int{a, f}
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		p := n.f.pool()
+		p.mu.Lock()
+		ops := p.operations
+		p.mu.Unlock()
+		if ops == maxStagedOperations {
+			break
+		}
+		if time.Now().After(deadline) {
+			n.f.scanMu.Unlock()
+			t.Fatalf("staged operations=%d, want %d", ops, maxStagedOperations)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(25 * time.Millisecond)
+	if got := fetched.Load(); got != maxStagedOperations {
+		n.f.scanMu.Unlock()
+		t.Fatalf("fetches past blocked commit=%d, want %d", got, maxStagedOperations)
+	}
+	n.f.scanMu.Unlock()
+	for range 3 {
+		select {
+		case r := <-results:
+			if r[1] != 0 {
+				t.Fatalf("apply failures=%d", r[1])
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("producer did not drain")
+		}
+	}
+	if got := fetched.Load(); got != maxStagedOperations+1 {
+		t.Fatalf("total fetches=%d", got)
+	}
+}
+
 func TestDownloadCancellationReleasesPoolAndTemporaryFile(t *testing.T) {
 	n := newNode(t, "A")
 	defer n.f.Close()

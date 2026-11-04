@@ -255,6 +255,32 @@ func TestUnpairWaitsForRunnerDrainWithoutDaemonLock(t *testing.T) {
 	}
 }
 
+func TestUnpairPausedPeerWithoutRunnerDoesNotWait(t *testing.T) {
+	d := folderDaemon(t)
+	id := d.ID.ID
+	d.mu.Lock()
+	d.cfg.Paused = true
+	d.cfg.Peers = append(d.cfg.Peers, config.Peer{ID: id, Name: "paused"})
+	d.mu.Unlock()
+	d.syncPeers()
+	d.mu.Lock()
+	pr := d.peers[id]
+	d.mu.Unlock()
+	if pr == nil || pr.done != nil {
+		t.Fatalf("paused peer has runner completion channel: %#v", pr)
+	}
+	done := make(chan error, 1)
+	go func() { done <- d.Unpair(id) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unpair waited for a runner that was never started")
+	}
+}
+
 type handlerTransport struct{ h http.Handler }
 
 func (h handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {

@@ -394,7 +394,7 @@ func (d *Daemon) syncPeersLocked() {
 	for id, p := range want {
 		pr, ok := d.peers[id]
 		if !ok {
-			pr = &peerRunner{lan: make(chan struct{}, 1), done: make(chan struct{}), st: PeerStatus{ID: id, Name: p.Name, State: StateSearching}}
+			pr = &peerRunner{lan: make(chan struct{}, 1), st: PeerStatus{ID: id, Name: p.Name, State: StateSearching}}
 			d.peers[id] = pr
 			delete(d.incoming, id)
 		}
@@ -617,6 +617,10 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			if failed > 0 {
 				pr.set(func(s *PeerStatus) { s.State, s.Failed = StateRetry, failed })
 				d.changed()
+				// A failed body may have come from a dead candidate while the
+				// index endpoint still responds. Rotate addresses without dropping
+				// the queue's accepted work or durable cursor.
+				addr = ""
 				sleepCtx(ctx, peerRetryMin)
 				continue
 			}

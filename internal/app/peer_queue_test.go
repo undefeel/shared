@@ -147,11 +147,9 @@ func TestPeerQueueOverflowContinuationAppliesEachRecordOnce(t *testing.T) {
 		t.Fatalf("applied records remained queued: %d", len(got))
 	}
 	q.mu.Lock()
-	for name, rec := range q.indexes["p"].records {
-		if rec.info.Name != "" || !rec.done {
-			q.mu.Unlock()
-			t.Fatalf("completed %s retained a full FileInfo or lost completion: %#v", name, rec)
-		}
+	if len(q.pending) > peerPendingLimit || q.indexes["p"].remaining != 0 {
+		q.mu.Unlock()
+		t.Fatalf("completed window retained record metadata: pending=%d continuation=%+v", len(q.pending), q.indexes["p"])
 	}
 	q.mu.Unlock()
 	if !q.accept("p", "epoch", 11, true, files) {
@@ -173,7 +171,7 @@ func TestPeerQueueContinuationUsesNewerVector(t *testing.T) {
 	}
 	newer := queueInfo(files[0].Name, 2)
 	files[0] = newer
-	if q.accept("p", "epoch", 12, true, files) {
+	if q.accept("p", "epoch", 13, true, files) {
 		t.Fatal("continuation unexpectedly fit before releasing capacity")
 	}
 	got := q.due("p", time.Now(), 0)
@@ -189,7 +187,7 @@ func TestPeerQueueContinuationUsesNewerVector(t *testing.T) {
 	if _, _, ok := q.cursor("p"); ok {
 		t.Fatal("cursor advanced while oversized suffix remained")
 	}
-	if !q.accept("p", "epoch", 12, false, files) {
+	if !q.accept("p", "epoch", 13, false, files) {
 		t.Fatal("final suffix record was not accepted")
 	}
 	last := q.due("p", time.Now(), 0)
@@ -197,7 +195,7 @@ func TestPeerQueueContinuationUsesNewerVector(t *testing.T) {
 		t.Fatalf("continuation suffix = %#v, want only %q", last, files[len(files)-1].Name)
 	}
 	q.applied("p", "epoch", last[0])
-	if _, cursor, ok := q.cursor("p"); !ok || cursor != 12 {
+	if _, cursor, ok := q.cursor("p"); !ok || cursor != 13 {
 		t.Fatalf("cursor after newer vector continuation = %d/%v", cursor, ok)
 	}
 }

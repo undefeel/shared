@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -55,25 +56,38 @@ func (d *Daemon) applyPeerDue(ctx context.Context, client *transport.Client, add
 		applied += a
 		failed += f
 		for _, old := range changed {
-			refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			idx, err := client.IndexSince(refreshCtx, addr, epoch, cursor, old.Name)
-			cancel()
-			if err == nil && len(idx.Files) > 0 {
-				queue.replaceName(peerID, epoch, cursor, idx.Files[0])
-			}
+			refreshPeerName(ctx, client, addr, peerID, epoch, cursor, old, queue)
 		}
 	}
 	if len(singles) > 0 {
+		var changed []folder.FileInfo
 		a, f := d.folder.ApplyRemoteResults(ctx, short, singles, client.Fetcher(addr), progress, func(fi folder.FileInfo, err error) {
 			qe := queue.activeEpoch(peerID)
 			if err != nil {
 				queue.failed(peerID, qe, fi, time.Now())
+				if errors.Is(err, transport.ErrVersionChanged) {
+					changed = append(changed, fi)
+				}
 			} else {
 				queue.applied(peerID, qe, fi)
 			}
 		})
 		applied += a
 		failed += f
+		for _, old := range changed {
+			refreshPeerName(ctx, client, addr, peerID, epoch, cursor, old, queue)
+		}
 	}
 	return applied, failed
+}
+
+func refreshPeerName(ctx context.Context, client *transport.Client, addr, peerID, epoch string, cursor uint64, old folder.FileInfo, queue *peerQueue) {
+	refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	idx, err := client.IndexSince(refreshCtx, addr, epoch, cursor, old.Name)
+	cancel()
+	if err == nil && idx != nil && len(idx.Files) > 0 {
+		// Keep the accepted whole-index cursor intact if the named snapshot
+		// observed later commits. The next ordinary poll will fetch that delta.
+		queue.replaceName(peerID, idx.StoreEpoch, cursor, idx.Files[0])
+	}
 }

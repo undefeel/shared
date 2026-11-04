@@ -25,7 +25,8 @@ type downloadPool struct {
 	operations           int
 	bytes                int64
 	oversized            bool
-	waiters              []*poolWaiter
+	streamWaiters        []*poolWaiter
+	stageWaiters         []*poolWaiter
 }
 
 // ApplyRemoteBatch reserves the batch's staging footprint before invoking
@@ -91,7 +92,7 @@ func (f *Folder) SetDownloadConcurrency(n int) {
 		f.downloadPool = &downloadPool{streamLimit: n}
 	} else {
 		f.downloadPool.mu.Lock()
-		if f.downloadPool.streams == 0 && len(f.downloadPool.waiters) == 0 {
+		if f.downloadPool.streams == 0 && len(f.downloadPool.streamWaiters) == 0 {
 			f.downloadPool.streamLimit = n
 		}
 		f.downloadPool.mu.Unlock()
@@ -100,25 +101,24 @@ func (f *Folder) SetDownloadConcurrency(n int) {
 }
 
 func (p *downloadPool) signal() {
-	for len(p.waiters) > 0 {
-		w := p.waiters[0]
-		if w.stream {
-			if p.streams >= p.streamLimit {
-				return
-			}
-			p.streams++
-		} else {
-			if p.operations+w.ops > maxStagedOperations || p.oversized || (w.bytes > maxStagedBytes && (w.ops != 1 || p.operations != 0 || p.bytes != 0)) || (w.bytes <= maxStagedBytes && p.bytes+w.bytes > maxStagedBytes) {
-				return
-			}
-			p.operations += w.ops
-			if w.bytes > maxStagedBytes {
-				p.oversized = true
-			} else {
-				p.bytes += w.bytes
-			}
+	for len(p.streamWaiters) > 0 && p.streams < p.streamLimit {
+		w := p.streamWaiters[0]
+		p.streams++
+		p.streamWaiters = p.streamWaiters[1:]
+		close(w.ready)
+	}
+	for len(p.stageWaiters) > 0 {
+		w := p.stageWaiters[0]
+		if p.operations+w.ops > maxStagedOperations || p.oversized || (w.bytes > maxStagedBytes && (w.ops != 1 || p.operations != 0 || p.bytes != 0)) || (w.bytes <= maxStagedBytes && p.bytes+w.bytes > maxStagedBytes) {
+			return
 		}
-		p.waiters = p.waiters[1:]
+		p.operations += w.ops
+		if w.bytes > maxStagedBytes {
+			p.oversized = true
+		} else {
+			p.bytes += w.bytes
+		}
+		p.stageWaiters = p.stageWaiters[1:]
 		close(w.ready)
 	}
 }
@@ -129,7 +129,11 @@ func (p *downloadPool) acquire(ctx context.Context, stream bool, bytes int64, op
 	}
 	p.mu.Lock()
 	w := &poolWaiter{ready: make(chan struct{}), stream: stream, bytes: bytes, ops: ops}
-	p.waiters = append(p.waiters, w)
+	if stream {
+		p.streamWaiters = append(p.streamWaiters, w)
+	} else {
+		p.stageWaiters = append(p.stageWaiters, w)
+	}
 	p.signal()
 	p.mu.Unlock()
 	select {
@@ -153,9 +157,13 @@ func (p *downloadPool) acquire(ctx context.Context, stream bool, bytes int64, op
 	case <-ctx.Done():
 		p.mu.Lock()
 		waiting := false
-		for i, pending := range p.waiters {
+		waiters := &p.stageWaiters
+		if stream {
+			waiters = &p.streamWaiters
+		}
+		for i, pending := range *waiters {
 			if pending == w {
-				p.waiters = append(p.waiters[:i], p.waiters[i+1:]...)
+				*waiters = append((*waiters)[:i], (*waiters)[i+1:]...)
 				waiting = true
 				break
 			}
