@@ -56,7 +56,7 @@ func TestCommitFlushOrder(t *testing.T) {
 	f.persistHooks.syncDir = func(d *os.File) error {
 		dirs++
 		trace = append(trace, "dir")
-		if dirs == 5 { // Cleanup parent: both recovery objects must already be gone.
+		if dirs == 4 { // Cleanup parent: both recovery objects must already be gone.
 			for _, name := range []string{f.intentPath(), f.Root + "/" + tree.capture.Recovery} {
 				if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("cleanup %s: %v", name, err)
@@ -76,7 +76,7 @@ func TestCommitFlushOrder(t *testing.T) {
 	if err := runCommit(f, tree, p, func() { trace = append(trace, "publish") }); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"data", "intent", "dir", "dir", "dir", "index", "dir", "publish", "discard", "remove-intent", "dir", "dir"}
+	want := []string{"data", "intent", "dir", "dir", "dir", "index", "publish", "discard", "remove-intent", "dir", "dir"}
 	if !reflect.DeepEqual(trace, want) {
 		t.Fatalf("trace %v", trace)
 	}
@@ -100,7 +100,7 @@ func commitSyncFailure(t *testing.T, fail int) {
 	f.persistHooks.syncFile = hook
 	f.persistHooks.syncDir = hook
 	err := runCommit(f, tree, p, func() { published = true; f.notify() })
-	if fail > 7 {
+	if fail > 6 {
 		if err != nil || !published || f.Blocked() != nil {
 			t.Fatalf("cleanup failure: %v, published=%v blocked=%v", err, published, f.Blocked())
 		}
@@ -128,9 +128,8 @@ func TestCommitIntentDirSyncFailure(t *testing.T)     { commitSyncFailure(t, 3) 
 func TestCommitCaptureDirSyncFailure(t *testing.T)    { commitSyncFailure(t, 4) }
 func TestCommitInstallDirSyncFailure(t *testing.T)    { commitSyncFailure(t, 5) }
 func TestCommitIndexSyncFailure(t *testing.T)         { commitSyncFailure(t, 6) }
-func TestCommitIndexDirSyncFailure(t *testing.T)      { commitSyncFailure(t, 7) }
-func TestCommitCleanupParentSyncFailure(t *testing.T) { commitSyncFailure(t, 8) }
-func TestCommitCleanupStateSyncFailure(t *testing.T)  { commitSyncFailure(t, 9) }
+func TestCommitCleanupParentSyncFailure(t *testing.T) { commitSyncFailure(t, 7) }
+func TestCommitCleanupStateSyncFailure(t *testing.T)  { commitSyncFailure(t, 8) }
 
 func TestCommitOpenRecoversBeforeScan(t *testing.T) {
 	f, j := journalFixture(t, 1)
@@ -161,17 +160,17 @@ func TestScanPublishesAfterDurableIndex(t *testing.T) {
 	before, seq := f.Snapshot()
 	ch := f.changed
 	flushed := false
-	f.persistHooks.syncDir = func(d *os.File) error {
+	f.persistHooks.syncFile = func(d *os.File) error {
 		current, s := f.Snapshot()
 		if !reflect.DeepEqual(before, current) || s != seq {
-			t.Fatal("published before directory sync")
+			t.Fatal("published before log sync")
 		}
 		select {
 		case <-ch:
 			t.Fatal("early notify")
 		default:
 		}
-		if err := syncDir(d); err != nil {
+		if err := syncFile(d); err != nil {
 			return err
 		}
 		flushed = true

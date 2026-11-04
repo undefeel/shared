@@ -21,7 +21,7 @@ func migrateIndexStore(path string, prepareLegacy func() error) (*indexStore, er
 	return migrateStore(path, prepareLegacy, syncFile, syncDir)
 }
 
-func migrateStore(path string, prepare func() error, flush, syncDirectory func(*os.File) error) (*indexStore, error) {
+func migrateStore(path string, prepare func() error, flush, syncDirectory func(*os.File) error, hooks ...*persistHooks) (*indexStore, error) {
 	dir := filepath.Dir(path)
 	snapshotPath, logPath := filepath.Join(dir, "index.snapshot"), filepath.Join(dir, "index.log")
 	data, err := os.ReadFile(snapshotPath)
@@ -30,7 +30,7 @@ func migrateStore(path string, prepare func() error, flush, syncDirectory func(*
 		if e != nil {
 			return nil, e
 		}
-		return finishMigration(logPath, snapshot, flush, syncDirectory)
+		return finishMigration(logPath, snapshot, flush, syncDirectory, hooks...)
 	}
 	if !os.IsNotExist(err) {
 		return nil, err
@@ -71,17 +71,17 @@ func migrateStore(path string, prepare func() error, flush, syncDirectory func(*
 		return nil, err
 	}
 	// Keep archives even on failure, for diagnosis/manual rollback.
-	err = writeMigrationFile(archive, data, flush)
+	err = writeMigrationFile(archive, data, flush, hooks...)
 	if err != nil {
 		return nil, err
 	}
 	if err = migrationSyncDir(dir, syncDirectory); err != nil {
 		return nil, err
 	}
-	if err = migrationReplace(snapshotPath, encoded, flush, syncDirectory); err != nil {
+	if err = migrationReplace(snapshotPath, encoded, flush, syncDirectory, hooks...); err != nil {
 		return nil, err
 	}
-	return finishMigration(logPath, snapshot, flush, syncDirectory)
+	return finishMigration(logPath, snapshot, flush, syncDirectory, hooks...)
 }
 
 func legacySnapshot(data []byte, now time.Time) (storeSnapshot, error) {
@@ -120,9 +120,9 @@ func legacySnapshot(data []byte, now time.Time) (storeSnapshot, error) {
 	return s, s.validate()
 }
 
-func finishMigration(path string, snapshot storeSnapshot, flush, syncDirectory func(*os.File) error) (*indexStore, error) {
+func finishMigration(path string, snapshot storeSnapshot, flush, syncDirectory func(*os.File) error, hooks ...*persistHooks) (*indexStore, error) {
 	if _, err := os.Lstat(path); os.IsNotExist(err) && snapshot.Control.Migration {
-		if err = migrationReplace(path, encodeLogHeader(storeLogHeader{StoreID: snapshot.StoreID, BaseGeneration: snapshot.Generation}), flush, syncDirectory); err != nil {
+		if err = migrationReplace(path, encodeLogHeader(storeLogHeader{StoreID: snapshot.StoreID, BaseGeneration: snapshot.Generation}), flush, syncDirectory, hooks...); err != nil {
 			return nil, err
 		}
 	} else if err != nil {
@@ -138,6 +138,9 @@ func finishMigration(path string, snapshot storeSnapshot, flush, syncDirectory f
 		frame := storeFrame{Generation: s.state.Generation + 1, PreviousGeneration: s.state.Generation, Kind: "Control", Clock: s.state.Clock, Control: &c}
 		if _, err = rand.Read(frame.TxID[:]); err == nil {
 			s.flush = flush
+			if len(hooks) != 0 {
+				s.write = func(b []byte) (int, error) { return hooks[0].write("log", path, s.log, b) }
+			}
 			err = s.append(frame)
 		}
 		if err != nil {
@@ -156,8 +159,14 @@ func migrationSyncDir(path string, flush func(*os.File) error) error {
 	defer d.Close()
 	return flush(d)
 }
-func writeMigrationFile(f *os.File, data []byte, flush func(*os.File) error) error {
-	n, err := f.Write(data)
+func writeMigrationFile(f *os.File, data []byte, flush func(*os.File) error, hooks ...*persistHooks) error {
+	var n int
+	var err error
+	if len(hooks) != 0 {
+		n, err = hooks[0].write("store", f.Name(), f, data)
+	} else {
+		n, err = f.Write(data)
+	}
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
 	}
@@ -170,13 +179,13 @@ func writeMigrationFile(f *os.File, data []byte, flush func(*os.File) error) err
 	}
 	return err
 }
-func migrationReplace(path string, data []byte, flush, syncDirectory func(*os.File) error) error {
+func migrationReplace(path string, data []byte, flush, syncDirectory func(*os.File) error, hooks ...*persistHooks) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if err = writeMigrationFile(f, data, flush); err != nil {
+	if err = writeMigrationFile(f, data, flush, hooks...); err != nil {
 		return err
 	}
 	if err = os.Rename(f.Name(), path); err != nil {

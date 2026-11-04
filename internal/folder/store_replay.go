@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
 )
 
+// storeDigest hashes the JSON encoding of the fixed storeFile struct. Version
+// pairs are validated in peer order; nil and empty vectors have one encoding.
+// Unlike gob type IDs, these bytes do not depend on process encoding history.
 func storeDigest(f storeFile) [32]byte {
-	var b bytes.Buffer
-	_ = gob.NewEncoder(&b).Encode(f)
-	return sha256.Sum256(b.Bytes())
+	if len(f.Version) == 0 {
+		f.Version = nil
+	}
+	b, _ := json.Marshal(f)
+	return sha256.Sum256(b)
 }
 func applyStoreFrame(s storeSnapshot, f storeFrame) (storeSnapshot, error) {
 	if err := f.validate(); err != nil {

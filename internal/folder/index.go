@@ -6,6 +6,7 @@
 package folder
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -151,8 +153,9 @@ type Folder struct {
 	scanMu sync.Mutex
 	// Lock order: scanMu → saveMu → mu. I/O never holds mu.
 	saveMu            sync.Mutex
-	generation        uint64       // saveMu; attempts, including failed saves
-	durableGeneration uint64       // saveMu; advances only after directory flush
+	generation        uint64 // saveMu; attempts, including failed saves
+	durableGeneration uint64 // saveMu; advances only after directory flush
+	store             *indexStore
 	persistHooks      persistHooks // set before concurrent use, for fault injection
 	waitEntered       func()       // Test barrier, set before concurrent use; nil in production.
 
@@ -186,6 +189,85 @@ type persisted struct {
 }
 
 func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
+	f := &Folder{statePath: statePath}
+	if err := f.completeReset(); err != nil {
+		return nil, err
+	}
+	var legacy *Folder
+	if _, err := os.Stat(filepath.Join(filepath.Dir(statePath), "index.snapshot")); os.IsNotExist(err) {
+		// Bootstrap still uses the legacy root policy, but never bypass validation.
+		if _, e := os.Stat(statePath); os.IsNotExist(e) {
+			legacy, e = openLegacy(root, statePath, me, logger)
+			if e != nil {
+				return nil, e
+			}
+		}
+	}
+	store, err := migrateStore(statePath, func() error {
+		if legacy != nil {
+			return nil
+		}
+		var e error
+		legacy, e = openLegacy(root, statePath, me, logger)
+		return e
+	}, func(file *os.File) error { return f.persistHooks.durableFile(file, "migration") },
+		func(dir *os.File) error { return f.persistHooks.fsyncOnly(dir, "migration") }, &f.persistHooks)
+	if legacy != nil {
+		legacy.Close()
+	}
+	if err != nil {
+		return nil, err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		store.close()
+		return nil, err
+	}
+	f.Root, f.me, f.log, f.store = root, me, logger, store
+	f.files, f.hashCache = map[string]*FileInfo{}, map[string]scanHashCache{}
+	f.seq, f.changed = uint64(time.Now().UnixNano()), make(chan struct{})
+	p := storePersisted(store.state)
+	f.binding, f.blocked, f.confirmedGeneration = p.Binding, p.Blocked, p.ConfirmedGeneration
+	f.clock, f.generation, f.durableGeneration = p.Clock, p.Generation, p.Generation
+	for _, fi := range p.Files {
+		f.files[fi.Name] = fi
+	}
+	f.wireStore()
+	data, _ := json.Marshal(p)
+	if err = f.initRoot(data); err == nil {
+		err = f.recoverIntent()
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func storePersisted(s storeSnapshot) persisted {
+	p := persisted{Schema: 2, Generation: s.Generation, Clock: s.Clock, Binding: s.Control.Binding,
+		Blocked: s.Control.Blocked, ConfirmedGeneration: s.Control.ConfirmedGeneration}
+	for _, v := range s.Files {
+		fi := &FileInfo{Name: v.Name, Disk: v.Disk, Hash: v.Hash, Size: v.Size, ModTime: v.ModTime, Exec: v.Exec, Deleted: v.Deleted, Version: Vector{}}
+		for _, pair := range v.Version {
+			fi.Version[pair.Peer] = pair.Counter
+		}
+		p.Files = append(p.Files, fi)
+	}
+	return p
+}
+
+func (f *Folder) wireStore() {
+	f.store.write = func(b []byte) (int, error) { return f.persistHooks.write("log", f.store.log.Name(), f.store.log, b) }
+	f.store.flush = func(file *os.File) error {
+		if f.persistHooks.syncFile != nil {
+			return f.persistHooks.syncFile(file)
+		}
+		return f.persistHooks.durableFile(file, "G4")
+	}
+}
+
+func openLegacy(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -232,9 +314,7 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 	if err := f.initRoot(data); err != nil {
 		return nil, err
 	}
-	f.scanMu.Lock()
 	err = f.recoverIntent()
-	f.scanMu.Unlock()
 	if err != nil {
 		f.Close()
 		return nil, err
@@ -275,7 +355,7 @@ func (f *Folder) save() error {
 	return f.persistLocked(p)
 }
 
-// persistLocked writes one immutable snapshot; the caller holds saveMu.
+// persistLocked appends one durable delta (JSON only while migrating); caller holds saveMu.
 func (f *Folder) persistLocked(p persisted) error {
 	f.mu.Lock()
 	p.Schema, p.Binding, p.ConfirmedGeneration = 2, f.binding, f.confirmedGeneration
@@ -284,6 +364,9 @@ func (f *Folder) persistLocked(p persisted) error {
 		p.Blocked = &c
 	}
 	f.mu.Unlock()
+	if f.store != nil {
+		return f.persistStore(p)
+	}
 	sort.Slice(p.Files, func(i, j int) bool { return p.Files[i].Name < p.Files[j].Name })
 	marshal := f.persistHooks.marshal
 	if marshal == nil {
@@ -334,6 +417,62 @@ func (f *Folder) persistLocked(p persisted) error {
 		return err
 	}
 	f.durableGeneration = p.Generation
+	return nil
+}
+
+// persistStore preserves local store-only metadata and unrelated control history.
+func (f *Folder) persistStore(p persisted) error {
+	s := f.store
+	if f.persistHooks.marshal != nil {
+		if _, err := f.persistHooks.marshal(p); err != nil {
+			return err
+		}
+	}
+	c := s.state.Control
+	c.Binding, c.Blocked, c.ConfirmedGeneration = p.Binding, p.Blocked, p.ConfirmedGeneration
+	frame := storeFrame{Kind: "Control", PreviousGeneration: s.state.Generation, Generation: s.state.Generation + 1, Clock: p.Clock, Control: &c}
+	old := make(map[string]storeFile, len(s.state.Files))
+	for _, v := range s.state.Files {
+		old[v.Name] = v
+	}
+	for _, fi := range p.Files {
+		v := *recoveryFile(fi)
+		before, exists := old[v.Name]
+		if exists {
+			v.DeletedAt = before.DeletedAt
+		}
+		if !v.Deleted {
+			v.DeletedAt = 0
+		} else if v.DeletedAt == 0 {
+			v.DeletedAt = f.persistHooks.clockNow().UnixNano()
+		}
+		if !exists || !reflect.DeepEqual(v, before) {
+			op := storeOperation{Name: v.Name, After: &v}
+			if exists {
+				op.Before = storeDigest(before)
+			}
+			frame.Operations = append(frame.Operations, op)
+		}
+		delete(old, v.Name)
+	}
+	for name, v := range old {
+		frame.Operations = append(frame.Operations, storeOperation{Name: name, Before: storeDigest(v), DeleteRecord: true})
+	}
+	if len(frame.Operations) == 0 && frame.Clock == s.state.Clock && reflect.DeepEqual(c, s.state.Control) {
+		f.generation = s.state.Generation
+		return nil
+	}
+	sort.Slice(frame.Operations, func(i, j int) bool { return frame.Operations[i].Name < frame.Operations[j].Name })
+	if len(frame.Operations) != 0 {
+		frame.Kind = "Commit"
+	}
+	if _, err := rand.Read(frame.TxID[:]); err != nil {
+		return err
+	}
+	if err := s.append(frame); err != nil {
+		return err
+	}
+	f.generation, f.durableGeneration = frame.Generation, frame.Generation
 	return nil
 }
 
