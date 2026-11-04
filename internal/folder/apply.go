@@ -6,12 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"io"
-	"io/fs"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
+	"path"
 )
 
 // Fetcher скачивает содержимое файла fi у пира в w.
@@ -43,7 +41,7 @@ func (f *Folder) decide(l *FileInfo, r *FileInfo, peer string) action {
 	switch {
 	case l.Deleted && r.Deleted:
 		return mergeOnly
-	case !l.Deleted && !r.Deleted && l.Hash == r.Hash:
+	case !l.Deleted && !r.Deleted && l.Hash == r.Hash && l.Exec == r.Exec:
 		return mergeOnly
 	case l.Deleted:
 		return take // правка важнее удаления
@@ -85,13 +83,7 @@ func (s step) needsDownload() bool {
 // ApplyRemote сверяет индекс пира с локальным и подтягивает изменения.
 // Возвращает число применённых записей и число неудач (их стоит повторить).
 func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo, fetch Fetcher, progress Progress) (applied, failed int) {
-	defer func() {
-		if applied > 0 {
-			if err := f.save(); err != nil {
-				f.log.Printf("сохранение индекса: %v", err)
-			}
-		}
-	}()
+	generation := f.ConfirmedGeneration()
 
 	var steps []step
 	var files int
@@ -111,11 +103,12 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		var l *FileInfo
 		if cur, ok := f.files[r.Name]; ok {
 			c := *cur
+			c.Version = cur.Version.Copy()
 			l = &c
 		}
 		f.mu.Unlock()
 		act := f.decide(l, &r, peer)
-		if act == skip {
+		if act == skip && !(l != nil && r.Deleted && !l.Deleted && r.Version.Compare(l.Version) == Concurrent) {
 			continue
 		}
 		st := step{l, r, act}
@@ -135,11 +128,16 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		if ctx.Err() != nil {
 			return applied, failed + 1
 		}
-		if err := f.applyOne(ctx, st, fetch); err != nil {
+		final, err := f.applyOne(ctx, peer, generation, st, fetch)
+		if err != nil {
 			f.log.Printf("%s: %s: %v", peer, st.r.Name, err)
 			failed++
 			continue
 		}
+		if final.act == skip {
+			continue
+		}
+		st = final
 		applied++
 		if progress != nil && st.act != mergeOnly {
 			ev, n := EventReceived, int64(0)
@@ -160,117 +158,320 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 
 var errLocalChanged = errors.New("файл изменён локально, повторим после сканирования")
 
-func (f *Folder) applyOne(ctx context.Context, st step, fetch Fetcher) error {
-	l, r, act := st.l, st.r, st.act
-	if act == mergeOnly {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		cur := f.files[r.Name]
-		if cur == nil || cur.Version.Compare(l.Version) != Equal {
-			return errLocalChanged
-		}
-		cur.Version = cur.Version.Merge(r.Version)
-		f.notify()
-		return nil
+// applyOne treats step as a forecast only. Network I/O never holds scanMu.
+func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, st step, fetch Fetcher) (step, error) {
+	r := st.r
+	if e := f.Blocked(); e != nil {
+		return st, e
 	}
-
 	var tmp string
-	if st.needsDownload() {
+	if st.act != mergeOnly && st.needsDownload() {
 		var err error
-		if tmp, err = f.download(ctx, r, fetch); err != nil {
-			return err
+		tmp, err = f.download(ctx, r, fetch)
+		if err != nil {
+			return st, err
 		}
-		defer os.Remove(tmp) // после успешного rename файла уже не будет
 	}
-
+	downloaded := tmp
+	defer func() {
+		if downloaded != "" {
+			_ = f.root.unlink(downloaded, false)
+		}
+	}()
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
-
-	if l != nil && !validDisk(r.Name, l.Disk) {
-		return errors.New("invalid local disk path in index")
+	if err := ctx.Err(); err != nil {
+		return st, err
 	}
-	rel := filepath.FromSlash(r.Name)
-	if l != nil {
-		rel = l.diskPath()
+	if generation != f.ConfirmedGeneration() {
+		return st, errLocalChanged
 	}
-	target := filepath.Join(f.Root, rel)
-	if !diskMatches(target, l) {
-		return errLocalChanged
+	if err := f.guardRoot(); err != nil {
+		return st, err
 	}
-
-	switch {
-	case act == takeWithConflict:
-		cp := conflictName(target, f.me, time.Unix(0, l.ModTime))
-		if err := os.Rename(target, cp); err != nil {
-			return err
-		}
-		f.log.Printf("конфликт: локальная версия сохранена как %s", filepath.Base(cp))
-	case r.Deleted:
-		if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		f.removeEmptyParents(filepath.Dir(target))
-	}
-
-	if tmp != "" {
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		mode := os.FileMode(0o644)
-		if r.Exec {
-			mode = 0o755
-		}
-		if err := os.Chmod(tmp, mode); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp, target); err != nil {
-			return err
-		}
-	}
-
-	if !r.Deleted {
-		mt := time.Unix(0, r.ModTime)
-		if err := os.Chtimes(target, mt, mt); err != nil {
-			return err
-		}
-		// Запоминаем то, что реально легло на диск, иначе следующий скан
-		// примет разницу в точности mtime за локальное изменение.
-		st, err := os.Stat(target)
-		if err != nil {
-			return err
-		}
-		r.Size = st.Size()
-		r.ModTime = st.ModTime().UnixNano()
-		if l != nil {
-			r.Disk = l.Disk
-		}
-	}
-
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
 	f.mu.Lock()
-	f.files[r.Name] = &r
-	for _, n := range r.Version {
-		f.clock = max(f.clock, n)
+	next := make(map[string]*FileInfo, len(f.files)+1)
+	for k, v := range f.files {
+		c := *v
+		c.Version = v.Version.Copy()
+		next[k] = &c
 	}
-	f.notify()
+	clock := f.clock
 	f.mu.Unlock()
-	return nil
+	l := next[r.Name]
+	disk := r.Name
+	if l != nil {
+		disk = l.diskPath()
+	}
+	if !validDisk(r.Name, disk) {
+		return st, errLocalChanged
+	}
+	// Register an external edit before deciding against the incoming vector.
+	var local *os.File
+	var info os.FileInfo
+	if l != nil && !l.Deleted {
+		var err error
+		local, err = f.root.openRead(disk)
+		if err != nil {
+			return st, err
+		}
+		defer local.Close()
+		hash, actual, _, err := stableHash(local)
+		if err != nil {
+			return st, err
+		}
+		info = actual
+		if hash != l.Hash || (actual.Mode().Perm()&0100 != 0) != l.Exec {
+			c := *l
+			c.Hash = hash
+			c.Size = actual.Size()
+			c.ModTime = actual.ModTime().UnixNano()
+			c.Exec = actual.Mode().Perm()&0100 != 0
+			clock++
+			c.Version = l.Version.Copy()
+			c.Version[f.me] = clock
+			l = &c
+			next[r.Name] = l
+			if err := f.commitApply(next, clock, nil); err != nil {
+				return st, err
+			}
+			// The first commit published next: detach before staging another.
+			detached := make(map[string]*FileInfo, len(next))
+			for k, v := range next {
+				c := *v
+				c.Version = v.Version.Copy()
+				detached[k] = &c
+			}
+			next = detached
+			l = next[r.Name]
+		}
+	}
+	act := f.decide(l, &r, peer)
+	st = step{l, r, act}
+	if act == skip {
+		// Concurrent edit/delete converges by remembering both vectors.
+		if l != nil && r.Deleted && !l.Deleted && r.Version.Compare(l.Version) == Concurrent {
+			c := *l
+			c.Version = l.Version.Merge(r.Version)
+			next[r.Name] = &c
+			return st, f.commitApply(next, clock, nil)
+		}
+		return st, nil
+	}
+	if act == mergeOnly {
+		c := *l
+		c.Version = l.Version.Merge(r.Version)
+		next[r.Name] = &c
+		return st, f.commitApply(next, clock, nil)
+	}
+	if st.needsDownload() && tmp == "" {
+		return st, errLocalChanged
+	}
+	parent, leaf, err := f.root.parent(disk, true)
+	if err != nil {
+		return st, err
+	}
+	defer parent.Close()
+	r.Disk = ""
+	if disk != r.Name {
+		r.Disk = disk
+	}
+	var incoming *os.File
+	if !r.Deleted {
+		// Stage in the target parent so intent/recovery names remain siblings.
+		staged := path.Join(path.Dir(disk), tmpPrefix+captureToken())
+		incoming, err = f.root.create(staged)
+		if err != nil {
+			return st, err
+		}
+		defer incoming.Close()
+		defer func() {
+			if f.Blocked() == nil {
+				_ = f.root.unlink(staged, false)
+			}
+		}()
+		var source *os.File
+		if tmp != "" {
+			source, err = f.root.openRead(tmp)
+		} else {
+			source = local
+			_, err = source.Seek(0, 0)
+		}
+		if err != nil {
+			return st, err
+		}
+		_, err = io.Copy(incoming, source)
+		if tmp != "" {
+			source.Close()
+		}
+		if err != nil {
+			return st, err
+		}
+		mode := os.FileMode(0644)
+		if r.Exec {
+			mode = 0755
+		}
+		if err = incoming.Chmod(mode); err != nil {
+			return st, err
+		}
+		times := []unix.Timespec{unix.NsecToTimespec(r.ModTime), unix.NsecToTimespec(r.ModTime)}
+		if err = unix.Futimes(int(incoming.Fd()), []unix.Timeval{unix.NsecToTimeval(times[0].Nano()), unix.NsecToTimeval(times[1].Nano())}); err != nil {
+			return st, err
+		}
+		actual, e := incoming.Stat()
+		if e != nil {
+			return st, e
+		}
+		r.ModTime = actual.ModTime().UnixNano()
+		r.Size = actual.Size()
+		tmp = staged
+	}
+	tree := &commitTree{incoming: incoming, dirs: []*os.File{parent}, intent: journalIntent{TxID: captureToken(), Target: disk, Tmp: tmp, Binding: f.binding, Before: l, After: &r}}
+	for dir := path.Dir(disk); dir != "."; dir = path.Dir(dir) {
+		ancestor, e := f.root.openDir(path.Dir(dir), false)
+		if e != nil {
+			return st, e
+		}
+		defer ancestor.Close()
+		tree.dirs = append(tree.dirs, ancestor)
+	}
+	if r.Deleted {
+		tree.intent.Tmp = ""
+	}
+	if local != nil {
+		c, e := f.root.prepareCapture(disk)
+		if e != nil {
+			return st, e
+		}
+		defer c.Close()
+		tree.capture = c
+		tree.intent.Capture = c.Recovery
+		meta := scanStatFromInfo(info)
+		tree.intent.Identity = captureIdentity{meta.dev, meta.ino}
+	}
+	tree.mutate = func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if tree.capture != nil {
+			captured, e := openRegularAt(parent, path.Base(tree.capture.Recovery), unix.O_RDONLY, 0)
+			if e != nil {
+				return e
+			}
+			hash, actual, _, e := stableHash(captured)
+			captured.Close()
+			if e != nil {
+				return e
+			}
+			if !os.SameFile(info, actual) || hash != l.Hash || (actual.Mode().Perm()&0100 != 0) != l.Exec {
+				c := *l
+				c.Version = l.Version.Copy()
+				c.Version[f.me] = clock
+				c.Hash, c.Size, c.ModTime, c.Exec = hash, actual.Size(), actual.ModTime().UnixNano(), actual.Mode().Perm()&0100 != 0
+				act = f.decide(&c, &r, peer)
+				if act == skip || r.Deleted {
+					restored, restoreErr := tree.capture.restore(f.me, hash)
+					if restoreErr != nil {
+						return restoreErr
+					}
+					if restored != disk {
+						return errLocalChanged
+					}
+					c.Version = c.Version.Merge(r.Version)
+					*next[r.Name] = c
+					st = step{&c, c, skip}
+					tree.discard = func() error { return nil }
+					return nil
+				}
+				l = &c
+				r.Version = r.Version.Merge(c.Version)
+				st = step{l, r, act}
+			}
+			if act == takeWithConflict {
+				if _, e = tree.capture.promote(f.me, l.Hash); e != nil {
+					return e
+				}
+				tree.discard = func() error { return nil }
+			}
+		}
+		// Recheck the root and parent after capture, before installation.
+		root, e := openRootFS(f.Root)
+		if e != nil {
+			return e
+		}
+		binding, e := bindingOf(root, f.Root)
+		root.Close()
+		if e != nil {
+			return e
+		}
+		if binding != f.binding {
+			return errLocalChanged
+		}
+		// Verify pinned parent still belongs to the current rooted path.
+		current, _, e := f.root.parent(disk, false)
+		if e != nil {
+			return e
+		}
+		defer current.Close()
+		a, e := current.Stat()
+		if e != nil {
+			return e
+		}
+		b, e := parent.Stat()
+		if e != nil {
+			return e
+		}
+		if !os.SameFile(a, b) {
+			return errLocalChanged
+		}
+		if r.Deleted {
+			return nil
+		}
+		return renameNoReplace(parent, path.Base(tmp), parent, leaf)
+	}
+	if act == takeWithConflict || (l != nil && l.Deleted && !r.Deleted) {
+		r.Version = r.Version.Merge(l.Version)
+	}
+	next[r.Name] = &r
+	for _, n := range r.Version {
+		clock = max(clock, n)
+	}
+	clock++ // Reserve a local tick for an edit discovered after capture.
+	st.r = r
+	err = f.commitApply(next, clock, tree)
+	if err == nil && r.Deleted {
+		for dir := path.Dir(disk); dir != "."; dir = path.Dir(dir) {
+			if e := f.root.unlink(dir, true); e != nil {
+				break
+			}
+			p, _, e := f.root.parent(dir, false)
+			if e != nil {
+				return st, e
+			}
+			e = syncDir(p)
+			p.Close()
+			if e != nil {
+				return st, e
+			}
+		}
+	}
+	return st, err
 }
 
-// diskMatches проверяет, что файл на диске всё ещё соответствует записи
-// индекса l, т.е. его не изменили после последнего скана.
-func diskMatches(target string, l *FileInfo) bool {
-	st, err := os.Stat(target)
-	if l == nil || l.Deleted {
-		return errors.Is(err, fs.ErrNotExist)
+// commitApply requires scanMu and saveMu; published records are immutable.
+func (f *Folder) commitApply(next map[string]*FileInfo, clock uint64, tree *commitTree) error {
+	p := persisted{Generation: f.generation + 1, Clock: clock}
+	for _, fi := range next {
+		p.Files = append(p.Files, fi) // next is private until durable publication
 	}
-	if err != nil {
-		return false
-	}
-	return st.Size() == l.Size && st.ModTime().UnixNano() == l.ModTime
+	return f.commitLocked(p, tree, func() { f.files = next; f.clock = clock; f.notify() })
 }
 
 func (f *Folder) download(ctx context.Context, r FileInfo, fetch Fetcher) (string, error) {
-	tmp, err := os.CreateTemp(f.Root, tmpPrefix+"*")
+	name := tmpPrefix + captureToken()
+	tmp, err := f.root.create(name)
 	if err != nil {
 		return "", err
 	}
@@ -283,38 +484,8 @@ func (f *Folder) download(ctx context.Context, r FileInfo, fetch Fetcher) (strin
 		err = fmt.Errorf("хеш не совпал (файл менялся во время передачи)")
 	}
 	if err != nil {
-		os.Remove(tmp.Name())
+		_ = f.root.unlink(name, false)
 		return "", err
 	}
-	return tmp.Name(), nil
-}
-
-// conflictName: notes.txt -> notes.sync-conflict-20261103-114500-ABCDEFG.txt
-func conflictName(p, dev string, t time.Time) string {
-	ext := filepath.Ext(p)
-	base := strings.TrimSuffix(p, ext)
-	return fmt.Sprintf("%s.sync-conflict-%s-%s%s", base, t.Format("20060102-150405"), dev, ext)
-}
-
-// removeEmptyParents удаляет опустевшие после удаления файла каталоги,
-// считая пустыми и те, где остался только мусор вроде .DS_Store.
-func (f *Folder) removeEmptyParents(dir string) {
-	for dir != f.Root && strings.HasPrefix(dir, f.Root) {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
-		for _, e := range entries {
-			if e.IsDir() || !matchIgnore(builtinIgnore, e.Name()) {
-				return
-			}
-		}
-		for _, e := range entries {
-			os.Remove(filepath.Join(dir, e.Name()))
-		}
-		if os.Remove(dir) != nil {
-			return
-		}
-		dir = filepath.Dir(dir)
-	}
+	return name, nil
 }
