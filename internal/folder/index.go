@@ -130,6 +130,11 @@ func kindOf(name string) string {
 }
 
 type Folder struct {
+	root                *rootFS
+	binding             rootBinding // mu
+	blocked             *RootError  // mu
+	confirmedGeneration uint64      // mu; invalidates work across explicit confirmation
+
 	Root      string
 	statePath string
 	me        string // короткий ID этого устройства
@@ -162,13 +167,18 @@ type persistHooks struct {
 }
 
 type persisted struct {
-	Generation uint64      `json:"generation,omitempty"`
-	Clock      uint64      `json:"clock"`
-	Files      []*FileInfo `json:"files"`
+	Schema              int         `json:"schema"`
+	Binding             rootBinding `json:"binding"`
+	Blocked             *RootError  `json:"blocked,omitempty"`
+	ConfirmedGeneration uint64      `json:"confirmed_generation,omitempty"`
+	Generation          uint64      `json:"generation,omitempty"`
+	Clock               uint64      `json:"clock"`
+	Files               []*FileInfo `json:"files"`
 }
 
 func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	root, err := filepath.Abs(root)
+	if err != nil {
 		return nil, err
 	}
 	f := &Folder{
@@ -192,6 +202,10 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 		if err := json.Unmarshal(data, &p); err != nil {
 			return nil, err
 		}
+		if p.Schema != 0 && p.Schema != 2 {
+			return nil, errors.New("unsupported index schema")
+		}
+		f.binding, f.blocked, f.confirmedGeneration = p.Binding, p.Blocked, p.ConfirmedGeneration
 		f.clock = p.Clock
 		f.generation, f.durableGeneration = p.Generation, p.Generation
 		seen := make(map[string]bool, len(p.Files))
@@ -205,6 +219,9 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 			seen[fi.Name] = true
 			f.files[fi.Name] = fi
 		}
+	}
+	if err := f.initRoot(data); err != nil {
+		return nil, err
 	}
 	return f, nil
 }
@@ -244,6 +261,13 @@ func (f *Folder) save() error {
 
 // persistLocked writes one immutable snapshot; the caller holds saveMu.
 func (f *Folder) persistLocked(p persisted) error {
+	f.mu.Lock()
+	p.Schema, p.Binding, p.ConfirmedGeneration = 2, f.binding, f.confirmedGeneration
+	if f.blocked != nil {
+		c := *f.blocked
+		p.Blocked = &c
+	}
+	f.mu.Unlock()
 	sort.Slice(p.Files, func(i, j int) bool { return p.Files[i].Name < p.Files[j].Name })
 	marshal := f.persistHooks.marshal
 	if marshal == nil {
