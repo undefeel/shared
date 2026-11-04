@@ -18,6 +18,11 @@ linux:
 test:
 	go test -race ./...
 
+test-macos:
+	mkdir -p bin
+	swiftc -parse-as-library -swift-version 5 -target "$$(uname -m)-apple-macos14.0" macos/SharedirBar/ControlClient.swift macos/SharedirBar/MenuContent.swift macos/SharedirBar/Snapshot.swift macos/SharedirBar/Store.swift macos/tests/StatusTests.swift -o bin/sharedir-status-tests
+	bin/sharedir-status-tests
+
 clean:
 	rm -rf bin
 

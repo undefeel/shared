@@ -18,6 +18,20 @@ struct DaemonStatus: Decodable, Equatable {
     var kinds: [Kind] = []
     var days: [Day] = []
     var recent: [Event] = []
+    var folderError: FolderError?
+    var scanError: ScanError?
+
+    struct FolderError: Decodable, Equatable {
+        var code: String
+        var message: String
+        var token: String
+    }
+
+    struct ScanError: Decodable, Equatable {
+        var message: String
+        var path: String?
+        var time: Date?
+    }
 
     struct Peer: Decodable, Equatable, Identifiable {
         var id: String
@@ -75,6 +89,7 @@ struct DaemonStatus: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case running, id, name, folder, files, bytes, paused, syncing, peers, candidates, kinds, days, recent
+        case folderError, scanError
     }
 
     init(running: Bool) { self.running = running }
@@ -94,6 +109,8 @@ struct DaemonStatus: Decodable, Equatable {
         kinds = try c.decodeIfPresent([Kind].self, forKey: .kinds) ?? []
         days = try c.decodeIfPresent([Day].self, forKey: .days) ?? []
         recent = try c.decodeIfPresent([Event].self, forKey: .recent) ?? []
+        folderError = try c.decodeIfPresent(FolderError.self, forKey: .folderError)
+        scanError = try c.decodeIfPresent(ScanError.self, forKey: .scanError)
     }
 }
 
@@ -144,6 +161,37 @@ enum StatusDecoder {
     }()
 }
 
+/// UI-independent rules shared by the menu and the standalone status tests.
+enum StatusLogic {
+    static func decode(_ data: Data) throws -> DaemonStatus {
+        try StatusDecoder.shared.decode(DaemonStatus.self, from: data)
+    }
+
+    static func phase(for status: DaemonStatus, hasConfig: Bool, daemonStarting: Bool) -> Phase {
+        if status.folderError != nil { return .notRunning }
+        guard hasConfig else { return .setup }
+        guard status.running else { return daemonStarting ? .starting : .notRunning }
+        if status.paused { return .paused }
+        if status.peers.isEmpty { return .noPeers }
+        if status.syncing { return .syncing }
+        if status.peers.contains(where: \.connected) { return .synced }
+        return .offline
+    }
+
+    static func headlineKey(for status: DaemonStatus) -> String? {
+        status.folderError == nil ? nil : "Folder sync stopped"
+    }
+
+    static func confirmation(action: FolderAction, status: DaemonStatus) -> FolderConfirmation? {
+        guard let error = status.folderError else { return nil }
+        return FolderConfirmation(action: action, token: error.token, code: error.code)
+    }
+
+    static func confirmationErrorKey(statusCode: Int) -> String? {
+        statusCode == 409 ? "Folder state changed. Review the latest status and confirm again." : nil
+    }
+}
+
 
 @MainActor
 final class Store: ObservableObject {
@@ -151,6 +199,7 @@ final class Store: ObservableObject {
     @Published private(set) var phase: Phase = .starting
     @Published var lastError: String?
     @Published var pairing: String? // кандидат, для которого открыта сверка ID
+    @Published var folderConfirmation: FolderConfirmation?
     @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published var tab: MenuTab = MenuTab(rawValue: UserDefaults.standard.string(forKey: "tab") ?? "") ?? .devices {
         didSet { UserDefaults.standard.set(tab.rawValue, forKey: "tab") }
@@ -190,7 +239,7 @@ final class Store: ObservableObject {
         let result: Result<DaemonStatus, Error> = await Task.detached {
             do {
                 let data = try client.get("/status")
-                return .success(try StatusDecoder.shared.decode(DaemonStatus.self, from: data))
+                return .success(try StatusLogic.decode(data))
             } catch {
                 return .failure(error)
             }
@@ -260,13 +309,7 @@ final class Store: ObservableObject {
     }
 
     private func computePhase() -> Phase {
-        guard configExists else { return .setup }
-        guard status.running else { return child?.isRunning == true ? .starting : .notRunning }
-        if status.paused { return .paused }
-        if status.peers.isEmpty { return .noPeers }
-        if status.syncing { return .syncing }
-        if status.peers.contains(where: \.connected) { return .synced }
-        return .offline
+        StatusLogic.phase(for: status, hasConfig: configExists, daemonStarting: child?.isRunning == true)
     }
 
     // MARK: Демон
@@ -318,11 +361,12 @@ final class Store: ObservableObject {
 
     // MARK: Действия
 
-    private func perform(_ action: @escaping @Sendable (ControlClient) throws -> Void) {
+    private func perform(_ action: @escaping @Sendable (ControlClient) throws -> Void, staleTokenAware: Bool = false) {
         let client = self.client
         Task {
             let error: String? = await Task.detached {
-                do { try action(client); return nil } catch ControlClient.Failure.http(_, let msg) {
+                do { try action(client); return nil } catch ControlClient.Failure.http(let code, let msg) {
+                    if staleTokenAware, let key = StatusLogic.confirmationErrorKey(statusCode: code) { return L(key) }
                     return L(msg) // ошибки демона приходят по-английски — это ключи перевода
                 } catch {
                     return L("The daemon is not responding")
@@ -335,6 +379,18 @@ final class Store: ObservableObject {
 
     func setPaused(_ paused: Bool) {
         perform { try $0.post(paused ? "/pause" : "/resume") }
+    }
+
+    func requestFolderConfirmation(_ action: FolderAction) {
+        folderConfirmation = StatusLogic.confirmation(action: action, status: status)
+    }
+
+    func confirmFolder() {
+        guard let confirmation = folderConfirmation else { return }
+        folderConfirmation = nil
+        let action = confirmation.action.rawValue
+        let token = confirmation.token
+        perform({ try $0.post("/folder/confirm", json: ["token": token, "action": action]) }, staleTokenAware: true)
     }
 
     func pair(_ id: String) {
@@ -398,6 +454,16 @@ final class Store: ObservableObject {
         }
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
+}
+
+enum FolderAction: String {
+    case reset, rebind
+}
+
+struct FolderConfirmation: Equatable {
+    let action: FolderAction
+    let token: String
+    let code: String
 }
 
 // MARK: - Локализация и форматирование

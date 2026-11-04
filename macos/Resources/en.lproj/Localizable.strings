@@ -1,1 +1,17 @@
 /* sharedir — English is the base language: keys are used as-is. */
+"Folder sync stopped" = "Folder sync stopped";
+"The folder is empty, but it had files before. Sync is stopped until you choose what to do." = "The folder is empty, but it had files before. Sync is stopped until you choose what to do.";
+"The folder is unavailable. Reconnect its drive or choose an action below." = "The folder is unavailable. Reconnect its drive or choose an action below.";
+"The folder at this path has changed. Choose how to continue." = "The folder at this path has changed. Choose how to continue.";
+"Changes could not be safely saved. Sync is stopped until you choose what to do." = "Changes could not be safely saved. Sync is stopped until you choose what to do.";
+"Sync is stopped until you choose what to do." = "Sync is stopped until you choose what to do.";
+"Folder state changed. Review the latest status and confirm again." = "Folder state changed. Review the latest status and confirm again.";
+"Start over…" = "Start over…";
+"Keep this folder…" = "Keep this folder…";
+"Start over with this folder?" = "Start over with this folder?";
+"Use this folder as the same one?" = "Use this folder as the same one?";
+"Start over" = "Start over";
+"Keep this folder" = "Keep this folder";
+"The old index will be archived. Files here and on other devices will stay. Their contents will sync as new and may create conflict copies." = "The old index will be archived. Files here and on other devices will stay. Their contents will sync as new and may create conflict copies.";
+"The index will be kept. Because this folder is empty, all its files will be deleted from other devices." = "The index will be kept. Because this folder is empty, all its files will be deleted from other devices.";
+"The index will be kept. Anything missing from this folder will be deleted from other devices." = "The index will be kept. Anything missing from this folder will be deleted from other devices.";

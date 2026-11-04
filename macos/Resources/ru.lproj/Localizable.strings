@@ -13,6 +13,22 @@
 "Syncing…" = "Синхронизация…";
 "Up to date · %@" = "Синхронизировано · %@";
 "Up to date" = "Синхронизировано";
+"Folder sync stopped" = "Синхронизация папки остановлена";
+"The folder is empty, but it had files before. Sync is stopped until you choose what to do." = "Папка пуста, хотя раньше в ней были файлы. Синхронизация остановлена — выберите, что делать дальше.";
+"The folder is unavailable. Reconnect its drive or choose an action below." = "Папка недоступна. Подключите диск или выберите действие ниже.";
+"The folder at this path has changed. Choose how to continue." = "По этому пути теперь другая папка. Выберите, как продолжить.";
+"Changes could not be safely saved. Sync is stopped until you choose what to do." = "Не удалось надёжно сохранить изменения. Синхронизация остановлена — выберите, что делать дальше.";
+"Sync is stopped until you choose what to do." = "Синхронизация остановлена — выберите, что делать дальше.";
+"Folder state changed. Review the latest status and confirm again." = "Состояние папки изменилось. Проверьте сообщение и подтвердите действие ещё раз.";
+"Start over…" = "Начать заново…";
+"Keep this folder…" = "Оставить эту папку…";
+"Start over with this folder?" = "Начать заново с этой папкой?";
+"Use this folder as the same one?" = "Считать эту папку прежней?";
+"Start over" = "Начать заново";
+"Keep this folder" = "Оставить папку";
+"The old index will be archived. Files here and on other devices will stay. Their contents will sync as new and may create conflict copies." = "Старый индекс будет сохранён в архиве. Файлы здесь и на других устройствах останутся. Они начнут синхронизироваться заново; могут появиться копии при конфликте.";
+"The index will be kept. Because this folder is empty, all its files will be deleted from other devices." = "Индекс будет сохранён. Папка пуста, поэтому все её файлы будут удалены на других устройствах.";
+"The index will be kept. Anything missing from this folder will be deleted from other devices." = "Индекс будет сохранён. Всё, чего нет в этой папке, будет удалено на других устройствах.";
 "just now" = "только что";
 
 /* Папка и устройства */
