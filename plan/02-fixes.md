@@ -10,12 +10,12 @@
 ## Волна 1 — параллельно
 | ID | Задача | Находки | Уровень | Исполнитель | Файлы | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|---|---|
-| 02-01 | Проект исправлений folder + разбиение на задачи | 01-02-01…11 | L3 | sol | `plan/design/folder.md` | — | todo | | |
-| 02-02 | Relay: лимиты после авторизации, гонка accept, systemd | 01-01-06, -07 | L2 | luna | `internal/relay/server.go`, тесты, `deploy/sharedir-relay.service` | — | todo | | |
-| 02-03 | Discovery: лимит таблицы и частоты | 01-01-03 (UDP) | L2 | luna | `internal/discovery/*` | — | todo | | |
-| 02-04 | Transport + сервер демона: отзыв доступа, таймауты, лимиты индекса и загрузки | 01-01-01, -02, -03 (incoming), -04, -05 | L3 | sol | `internal/transport/*`, `internal/app/daemon.go` (сеть), `internal/app/relay.go` | — | todo | | |
-| 02-05 | Приватный каталог control-сокета, проверка владельца | 01-03-01 | L2 | luna | `internal/config/*`, `internal/app/control*.go`, `macos/SharedirBar/ControlClient.swift` | — | todo | | |
-| 02-06 | Экранирование plist/unit, гонка activity | 01-03-02, 01-02-12 | L1 | antigravity | `internal/app/service*.go`, `internal/app/activity*.go` | — (в очереди: слот после первого освободившегося) | todo | | |
+| 02-01 | Проект исправлений folder + разбиение на задачи | 01-02-01…11 | L3 | sol | `plan/design/folder.md` | — | in_progress | `task_3e3493b9eff1` | `ctx_50ea3a04e925` |
+| 02-02 | Relay: лимиты после авторизации, гонка accept, systemd | 01-01-06, -07 | L2 | luna | `internal/relay/server.go`, тесты, `deploy/sharedir-relay.service` | — | in_progress | `task_a9dd43701411` | `ctx_aca933a7f1fa` |
+| 02-03 | Discovery: лимит таблицы и частоты | 01-01-03 (UDP) | L2 | luna | `internal/discovery/*` | — | in_progress | `task_a5e353dcfa14` | `ctx_2fa06cb0b7c8` |
+| 02-04 | Transport + сервер демона: отзыв доступа, таймауты, лимиты индекса и загрузки | 01-01-01, -02, -03 (incoming), -04, -05 | L3 | sol | `internal/transport/*`, `internal/app/daemon.go` (сеть), `internal/app/relay.go` | — | in_progress | `task_ca25c330076e` | `ctx_3f0f2affa738` |
+| 02-05 | Приватный каталог control-сокета, проверка владельца | 01-03-01 | L2 | luna | `internal/config/*`, `internal/app/control*.go`, `macos/SharedirBar/ControlClient.swift` | — | in_progress | `task_2a3f085b8dd9` | `ctx_63df2dd8b8c7` |
+| 02-06 | Экранирование plist/unit, гонка activity | 01-03-02, 01-02-12 | L1 | antigravity | `internal/app/service*.go`, `internal/app/activity*.go` | — (в очереди: слот после первого освободившегося) | todo | `task_a66d31b76476` | |
 
 02-04 дробить не стал: отзыв доступа, таймауты и лимиты — это одна обёртка listener и один набор callback'ов в `transport.go` и `daemon.go`. Если разделить, две задачи будут править одни и те же строки.
 
