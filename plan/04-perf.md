@@ -79,7 +79,7 @@
 | 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_34a2529b4f5c` |  |
 | 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_5d95a7441831` |  |
 | 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_5a026455e3e9` |  |
-| 04-50 | bounded log writer | L2 | luna | — | in_progress | `task_9fc335af3492` | `ctx_436d0ee8157e` |
+| 04-50 | bounded log writer | L2 | luna | — | in_progress | `task_9fc335af3492` | `ctx_e1f44b9ab3f9` |
 | 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_d5d764e0f251` |  |
 | 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_6061edeb90cb` |  |
 | 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | `task_186a3c318ad0` |  |
@@ -92,3 +92,4 @@
 - 04-10: бюджет codec расширен до ~550 строк с тестами (ответ на вопрос воркера), log frame encode/decode остаётся в 04-10.
 - Язык воркеров — английский (правило в CLAUDE.md, 2026-11-04). Неначатые задачи волны A пересозданы с английскими spec, старые task_id помечены failed «superseded».
 - 04-50: ревью gemini-medium нашло 4 major + 3 minor, плюс координатор — stderr после ротации; доработка по addendum (ctx_436d0ee8157e). Повтор completed-задачи: task-update --status ready, затем start.sh в том же worktree.
+- 04-50: первый круг доработки выполнил только п.4 addendum — второй круг (ctx_e1f44b9ab3f9); если снова мимо — провал №2, эскалация на sol.

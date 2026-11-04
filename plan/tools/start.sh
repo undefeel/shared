@@ -60,7 +60,7 @@ dispatch="$(jq -r '.result.dispatchId // .result.dispatch.id // .result.dispatch
 
 # --comment воркер не читает, поэтому addendum доставляется ещё и сообщением.
 if [[ -f "$addendum" ]]; then
-  orca orchestration send --to "dispatch:$dispatch" --subject "Addendum к $ID" \
+  orca orchestration send --to "dispatch:$dispatch" --subject "Addendum for $ID (mandatory, read before starting)" \
        --body "$(cat "$addendum")" --json >/dev/null
 fi
 
