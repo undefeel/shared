@@ -134,3 +134,32 @@ func TestApplyGroupCancelAfterG1BeforeIntent(t *testing.T) {
 		t.Fatalf("cancel published or blocked: %v %v", files, n.f.Blocked())
 	}
 }
+
+func TestApplyGroupRootReplacementBeforeIntent(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	moved := false
+	n.f.SetPersistenceProbe(PersistenceProbe{Fault: func(_, phase string, _, _ uint64) error {
+		if phase == "G1" && !moved {
+			moved = true
+			return os.Rename(n.f.Root, n.f.Root+"-old")
+		}
+		return nil
+	}})
+	done := make(chan [2]int, 1)
+	go func() {
+		a, b := n.f.ApplyRemote(context.Background(), "B", []FileInfo{incoming("body", Vector{"B": 1}, 200e9)}, bodyFetch("body"), nil)
+		done <- [2]int{a, b}
+	}()
+	select {
+	case result := <-done:
+		if result != [2]int{0, 1} || n.f.Blocked() == nil {
+			t.Fatalf("result %v blocked %v", result, n.f.Blocked())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("root latch deadlocked under saveMu")
+	}
+	if _, err := os.Stat(n.f.intentPath()); !os.IsNotExist(err) {
+		t.Fatalf("stale root wrote intent: %v", err)
+	}
+}

@@ -42,7 +42,7 @@ func (f *Folder) submitApply(ctx context.Context, peer string, generation uint64
 	c := f.applyCoordinator
 	f.applyMu.Unlock()
 	size := int64(0)
-	if st.needsDownload() {
+	if st.act != mergeOnly && st.act != skip && !st.r.Deleted {
 		size = st.r.Size
 	}
 	err := c.submit(ctx, []string{st.r.Name}, generation, size, op)
@@ -152,7 +152,7 @@ func (f *Folder) applyGroup(requests []*groupRequest) error {
 				return errLocalChanged
 			}
 		}
-		return nil
+		return f.guardRootWithSaveLock(true)
 	}); err != nil {
 		return err
 	}

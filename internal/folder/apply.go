@@ -218,7 +218,7 @@ func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint6
 	if generation != f.ConfirmedGeneration() {
 		return st, errLocalChanged
 	}
-	if err := f.guardRoot(); err != nil {
+	if err := f.guardRootWithSaveLock(batch != nil); err != nil {
 		return st, err
 	}
 	if batch == nil {

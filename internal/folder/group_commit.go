@@ -29,7 +29,7 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 	if blocked != nil {
 		return blocked
 	}
-	if err = f.guardRoot(); err != nil {
+	if err = f.guardRootWithSaveLock(true); err != nil {
 		return err
 	}
 	// Never overwrite a previous group's cleanup marker. Only a commit verified

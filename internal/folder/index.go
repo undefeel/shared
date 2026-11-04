@@ -347,6 +347,11 @@ func (f *Folder) notify() {
 func (f *Folder) save() error {
 	f.saveMu.Lock()
 	defer f.saveMu.Unlock()
+	return f.saveLocked()
+}
+
+// saveLocked requires saveMu.
+func (f *Folder) saveLocked() error {
 	f.generation++
 	f.mu.Lock()
 	p := persisted{Generation: f.generation, Clock: f.clock, Files: make([]*FileInfo, 0, len(f.files))}

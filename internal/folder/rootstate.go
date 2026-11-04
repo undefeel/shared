@@ -48,6 +48,10 @@ func bindingOf(r *rootFS, path string) (rootBinding, error) {
 
 // blockRoot requires scanMu. A failed save keeps the in-memory latch closed.
 func (f *Folder) blockRoot(code, message string) error {
+	return f.blockRootWithSaveLock(code, message, false)
+}
+
+func (f *Folder) blockRootWithSaveLock(code, message string, saveHeld bool) error {
 	if e := f.Blocked(); e != nil {
 		return e
 	}
@@ -60,7 +64,11 @@ func (f *Folder) blockRoot(code, message string) error {
 	f.blocked = e
 	f.mu.Unlock()
 	f.Kick()
-	if err := f.save(); err != nil {
+	save := f.save
+	if saveHeld {
+		save = f.saveLocked
+	}
+	if err := save(); err != nil {
 		return err
 	}
 	return e
@@ -68,7 +76,9 @@ func (f *Folder) blockRoot(code, message string) error {
 
 // guardRoot requires scanMu; callers recheck after download/before publication.
 // Comparing both the configured pathname and the held fd detects replacement.
-func (f *Folder) guardRoot() error {
+func (f *Folder) guardRoot() error { return f.guardRootWithSaveLock(false) }
+
+func (f *Folder) guardRootWithSaveLock(saveHeld bool) error {
 	if e := f.Blocked(); e != nil {
 		return e
 	}
@@ -77,26 +87,26 @@ func (f *Folder) guardRoot() error {
 	f.mu.Unlock()
 	path, err := filepath.Abs(f.Root)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	if path != binding.Path {
-		return f.blockRoot("root_changed", "configured path changed")
+		return f.blockRootWithSaveLock("root_changed", "configured path changed", saveHeld)
 	}
 	current, err := openRootFS(path)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	defer current.Close()
 	now, err := bindingOf(current, path)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	held, err := bindingOf(f.root, path)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	if now != binding || held != binding {
-		return f.blockRoot("root_changed", "root identity changed")
+		return f.blockRootWithSaveLock("root_changed", "root identity changed", saveHeld)
 	}
 	return nil
 }
