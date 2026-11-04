@@ -80,7 +80,7 @@
 | 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_6468fb67b8d5` |  |
 | 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_52c45bada091` |  |
 | 04-50 | bounded log writer | L2 | luna | — | in_progress | `task_9fc335af3492` | `ctx_e1f44b9ab3f9` |
-| 04-50b | доработка 04-50 по ревью (полный spec вместо addendum) | L2 | luna | — | in_progress | `task_32ef0f050af4` | `ctx_4867d3ffc33e` |
+| 04-50b | доработка 04-50 по ревью (полный spec вместо addendum) | L2 | luna | — | done | `task_32ef0f050af4` | `ctx_4867d3ffc33e` |
 | 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_fce47cc1494c` |  |
 | 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_2de5a1abd8c5` |  |
 | 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | `task_6d7100767724` |  |
@@ -97,3 +97,4 @@
 
 - 04-50: addendum дважды проигнорирован (сообщение не меняет spec задачи) — это ошибка доставки spec, не провал luna. Создана 04-50b с полным spec в том же worktree. Впредь доработки — новой задачей с полным spec, а не addendum.
 - С 04-15/04-27 и далее: саморевью воркером через Gemini (раздел Self-review в spec), неначатые задачи пересозданы. 04-14, 04-26, 04-50b — ревью прежним порядком.
+- 04-50: два лишних luna-воркера «New messages» — follow-up задачи Orca, порождённые send addendum завершённым воркерам; остановлены, их коммит a28e2d6 (тесты) оставлен. Больше addendum через send не отправлять.
