@@ -56,6 +56,20 @@ func NewBoundedLogWriter(path string) (*BoundedLogWriter, error) {
 	return w, nil
 }
 
+// NewRunLogOutput keeps service output on stderr except on macOS, where the
+// launch agent has no journal and diagnostics go to a bounded log file.
+// The returned close function is always safe to call.
+func NewRunLogOutput(goos, path string, stderr io.Writer) (io.Writer, func() error, error) {
+	if goos != "darwin" {
+		return stderr, func() error { return nil }, nil
+	}
+	w, err := NewBoundedLogWriter(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return w, w.Close, nil
+}
+
 func (w *BoundedLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

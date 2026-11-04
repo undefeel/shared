@@ -65,6 +65,49 @@ func TestWriteAllRejectsZeroProgress(t *testing.T) {
 	}
 }
 
+func TestRunLogOutputKeepsLinuxOnJournaldStderr(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	var stderr bytes.Buffer
+	writer, closeOutput, err := NewRunLogOutput("linux", path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("journal only")); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeOutput(); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.String() != "journal only" {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("log file exists or stat failed: %v", err)
+	}
+}
+
+func TestRunLogOutputUsesBoundedFileOnDarwin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	var stderr bytes.Buffer
+	writer, closeOutput, err := NewRunLogOutput("darwin", path, &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("file only")); err != nil {
+		t.Fatal(err)
+	}
+	if err := closeOutput(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "file only" || stderr.Len() != 0 {
+		t.Fatalf("file = %q, stderr = %q", got, stderr.String())
+	}
+}
+
 type shortWriter struct {
 	limit int
 	buf   bytes.Buffer
