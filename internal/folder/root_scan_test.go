@@ -1,6 +1,7 @@
 package folder
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -75,6 +76,46 @@ func TestScanUnmountSimulationBlocksBeforePublishing(t *testing.T) {
 	after, gotClock, gotSeq := scanState(f)
 	if !reflect.DeepEqual(before, after) || gotClock != clock || gotSeq != seq {
 		t.Fatal("unavailable root changed published index")
+	}
+}
+
+func TestScanReplacementRootBlocksWithoutPublishingTombstones(t *testing.T) {
+	f := rootScanFixture(t)
+	indexBefore, err := os.ReadFile(f.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before persisted
+	if err := json.Unmarshal(indexBefore, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(f.Root, f.Root+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(f.Root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Scan(); err == nil {
+		t.Fatal("Scan succeeded with a replacement root")
+	}
+	if e := f.Blocked(); e == nil || e.Code != "root_changed" {
+		t.Fatalf("blocked=%+v, want root_changed", e)
+	}
+	indexAfter, err := os.ReadFile(f.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after persisted
+	if err := json.Unmarshal(indexAfter, &after); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before.Files, after.Files) || before.Clock != after.Clock {
+		t.Fatalf("replacement scan published index changes: before=%+v after=%+v", before, after)
+	}
+	for _, fi := range after.Files {
+		if fi.Deleted {
+			t.Fatalf("replacement scan wrote tombstone: %+v", fi)
+		}
 	}
 }
 

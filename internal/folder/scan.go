@@ -285,21 +285,22 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	if err := walk("."); err != nil {
 		return err
 	}
-	// Recheck after the complete walk so a root replacement during scanning
-	// cannot publish a candidate collected from a stale directory descriptor.
+	return f.commitScan(candidate, patterns, newCache)
+}
+
+func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache) error {
+	// Keep the final binding check in the commit path: a root replaced after
+	// the walk must not publish a candidate collected from another directory.
+	// scanMu is held by Scan; guardRoot persists any resulting latch itself.
 	if err := f.guardRoot(); err != nil {
 		return err
 	}
 	f.mu.Lock()
 	hasIndexedEntries := len(f.files) != 0 // tombstones also require confirmation
 	f.mu.Unlock()
-	if len(candidate) == 0 && hasIndexedEntries {
+	if len(found) == 0 && hasIndexedEntries {
 		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
 	}
-	return f.commitScan(candidate, patterns, newCache)
-}
-
-func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache) error {
 	f.saveMu.Lock()
 	defer f.saveMu.Unlock()
 	f.mu.Lock()
