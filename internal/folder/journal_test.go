@@ -193,3 +193,51 @@ func TestJournalReplacedCaptureBecomesConflict(t *testing.T) {
 		t.Fatal("replacement lost")
 	}
 }
+
+func newFileRecovery(t *testing.T, content string, exists, wantCommit bool) {
+	t.Helper()
+	f := newNode(t, "local").f
+	defer f.Close()
+	if err := f.save(); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256([]byte("incoming"))
+	after := &FileInfo{Name: "new", Size: 8, Hash: hex.EncodeToString(h[:]), Version: Vector{"peer": 7}}
+	j := journalIntent{TxID: "new", Target: "new", Generation: f.durableGeneration + 1, Binding: f.binding, After: after}
+	if err := f.writeIntent(j); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		if err := os.WriteFile(filepath.Join(f.Root, "new"), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recoverJournal(t, f)
+	data, err := os.ReadFile(f.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p persisted
+	if err = json.Unmarshal(data, &p); err != nil {
+		t.Fatal(err)
+	}
+	if wantCommit {
+		if len(p.Files) != 1 || p.Files[0].Version.Compare(after.Version) != Equal || p.Files[0].Hash != after.Hash || p.Generation != j.Generation {
+			t.Fatalf("incoming transaction not preserved: %+v", p)
+		}
+		if f.files["new"] == nil || f.files["new"].Version.Compare(after.Version) != Equal {
+			t.Fatal("recovered index not published")
+		}
+	} else if len(p.Files) != 0 || len(f.files) != 0 {
+		t.Fatal("local/absent file committed")
+	}
+	if exists {
+		journalBytes(t, f, "new", content)
+	} else if _, err = os.Stat(filepath.Join(f.Root, "new")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent target changed: %v", err)
+	}
+	recoverJournal(t, f)
+}
+func TestJournalNewFileCrashMatchingTarget(t *testing.T) { newFileRecovery(t, "incoming", true, true) }
+func TestJournalNewFileCrashMissingTarget(t *testing.T)  { newFileRecovery(t, "", false, false) }
+func TestJournalNewFileCrashChangedTarget(t *testing.T)  { newFileRecovery(t, "external", true, false) }

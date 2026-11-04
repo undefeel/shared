@@ -89,6 +89,8 @@ func (c *capture) restore(peer, hash string) (string, error) {
 
 // discard is called only after the index is durably committed. The coordinator
 // must flush the parent afterwards, then remove and flush the transaction intent.
+// POSIX has no atomic unlink-if-inode: an external replacement between the
+// identity check and unlink remains an owner-accepted residual risk.
 func (c *capture) discard() error {
 	if c.identity == nil && c.savedIdentity == nil {
 		return fmt.Errorf("capture identity unavailable")

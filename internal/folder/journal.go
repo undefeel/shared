@@ -148,6 +148,36 @@ func (f *Folder) recoverIntent() error {
 			return f.blockRoot("recovery_ambiguous", "committed target hash differs")
 		}
 	}
+	if !committed && j.Before == nil && j.Capture == "" && j.After != nil && !j.After.Deleted {
+		file, e := f.root.openRead(j.Target)
+		if e != nil && !errors.Is(e, os.ErrNotExist) {
+			return e
+		}
+		if e == nil {
+			hash, info, _, he := stableHash(file)
+			if he == nil && hash == j.After.Hash && info.Size() == j.After.Size {
+				he = syncFile(file)
+			}
+			file.Close()
+			if he != nil {
+				return he
+			}
+			if hash == j.After.Hash && info.Size() == j.After.Size {
+				parent, _, e := f.root.parent(j.Target, false)
+				if e != nil {
+					return e
+				}
+				e = syncDir(parent)
+				parent.Close()
+				if e != nil {
+					return e
+				}
+				if e = f.finishNewIntent(j, p); e != nil {
+					return e
+				}
+			}
+		}
+	}
 	if j.Capture != "" {
 		c, e := f.root.openCapture(j.Target, j.Capture, j.Identity)
 		if e != nil {
@@ -205,4 +235,26 @@ func recordName(j journalIntent) string {
 		return j.After.Name
 	}
 	return j.Before.Name
+}
+
+// finishNewIntent requires scanMu; publish only after the recovered index is durable.
+func (f *Folder) finishNewIntent(j journalIntent, p persisted) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	p.Generation = j.Generation
+	entry := *j.After
+	entry.Version = entry.Version.Copy()
+	p.Files = append(p.Files, &entry)
+	if f.generation < j.Generation {
+		f.generation = j.Generation
+	}
+	if err := f.persistLocked(p); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.files[entry.Name] = &entry
+	f.clock = p.Clock
+	f.notify()
+	f.mu.Unlock()
+	return nil
 }
