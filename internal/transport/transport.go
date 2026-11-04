@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"sharedir/internal/folder"
@@ -27,7 +28,10 @@ import (
 )
 
 const (
-	pollTimeout = 50 * time.Second
+	// MaxIndexBytes allows one million ordinary file records (512 bytes each).
+	MaxIndexBytes   int64 = 512 << 20
+	BodyIdleTimeout       = 30 * time.Second
+	pollTimeout           = 50 * time.Second
 	// portHeader сообщает серверу, на каком порту слушает клиент: так
 	// сторона, к которой подключились, узнаёт обратный адрес пира и адрес
 	// достаточно прописать вручную только на одной машине.
@@ -76,8 +80,11 @@ const RelayHost = "relay"
 var ErrPeerPaused = errors.New("пир на паузе")
 
 type Server struct {
-	Folder *folder.Folder
-	Log    *log.Logger
+	Allowed          func(string) bool
+	WriteIdleTimeout time.Duration
+	PollTimeout      time.Duration
+	Folder           *folder.Folder
+	Log              *log.Logger
 	// OnPeer вызывается на каждый запрос с ID пира и его обратным адресом.
 	OnPeer func(id, addr string)
 	// Paused — пока true, пиру отвечаем 503 и ничего не отдаём.
@@ -91,6 +98,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /index", s.index)
 	mux.HandleFunc("GET /file", s.file)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorize(w, r) {
+			return
+		}
 		if s.Paused != nil && s.Paused() {
 			http.Error(w, "paused", http.StatusServiceUnavailable)
 			return
@@ -105,9 +115,28 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if s.Allowed == nil {
+		return true
+	}
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && s.Allowed(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw)) {
+		return true
+	}
+	w.Header().Set("Connection", "close")
+	http.Error(w, "access revoked", http.StatusForbidden)
+	return false
+}
+
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
-	s.Folder.Wait(since, pollTimeout)
+	timeout := s.PollTimeout
+	if timeout <= 0 {
+		timeout = pollTimeout
+	}
+	s.Folder.Wait(since, timeout)
+	if !s.authorize(w, r) {
+		return
+	}
 	if s.Paused != nil && s.Paused() {
 		http.Error(w, "paused", http.StatusServiceUnavailable)
 		return
@@ -130,16 +159,19 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	defer http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size, 10))
-	if _, err := io.Copy(w, f); err == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+	if _, err := io.Copy(&progressWriter{w: w, idle: s.writeIdle()}, f); err == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		s.OnServed(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw), fi)
 	}
 }
 
 type Client struct {
-	http *http.Client
-	port int
+	http            *http.Client
+	port            int
+	BodyIdleTimeout time.Duration
+	IndexLimit      int64
 }
 
 // NewClient создаёт клиента, который доверяет только серверу с ID peer.
@@ -162,11 +194,12 @@ func NewClient(id *identity.Identity, peer string, port int, relayDial func(cont
 		},
 	}
 	return &Client{port: port, http: &http.Client{Transport: &http.Transport{
-		TLSClientConfig:     tlsCfg,
-		DialContext:         dialer(relayDial),
-		TLSHandshakeTimeout: 5 * time.Second,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
+		TLSClientConfig:       tlsCfg,
+		ResponseHeaderTimeout: pollTimeout + 10*time.Second,
+		DialContext:           dialer(relayDial),
+		TLSHandshakeTimeout:   5 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
 	}}}
 }
 
@@ -215,9 +248,26 @@ func (c *Client) Index(ctx context.Context, addr string, since uint64) (*IndexRe
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var out IndexResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	limit := c.IndexLimit
+	if limit <= 0 {
+		limit = MaxIndexBytes
+	}
+	body := c.progressBody(resp.Body, cancel)
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, errors.New("index exceeds size limit")
+	}
+	var out IndexResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	for _, fi := range out.Files {
+		if len(fi.Name) > 4096 || len(fi.Version) > 64 {
+			return nil, fmt.Errorf("invalid index record %q: name or version exceeds limit", fi.Name[:min(len(fi.Name), 80)])
+		}
 	}
 	return &out, nil
 }
@@ -225,14 +275,162 @@ func (c *Client) Index(ctx context.Context, addr string, since uint64) (*IndexRe
 // Fetcher возвращает загрузчик файлов с пира по адресу addr.
 func (c *Client) Fetcher(addr string) folder.Fetcher {
 	return func(ctx context.Context, fi folder.FileInfo, w io.Writer) error {
+		if fi.Size < 0 || fi.Size == int64(^uint64(0)>>1) {
+			return errors.New("invalid file size")
+		}
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 		resp, err := c.get(ctx, addr, "/file", url.Values{"name": {fi.Name}, "hash": {fi.Hash}})
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
-		_, err = io.Copy(w, resp.Body)
-		return err
+		n, err := io.Copy(w, io.LimitReader(c.progressBody(resp.Body, cancel), fi.Size+1))
+		if err != nil {
+			return err
+		}
+		if n != fi.Size {
+			return fmt.Errorf("file size mismatch: got %d, expected %d", n, fi.Size)
+		}
+		return nil
 	}
 }
 
 func (c *Client) Close() { c.http.CloseIdleConnections() }
+
+// Deadlines are refreshed per write; no total transfer duration limit.
+type progressWriter struct {
+	w    http.ResponseWriter
+	idle time.Duration
+}
+
+func (s *Server) writeIdle() time.Duration {
+	if s.WriteIdleTimeout > 0 {
+		return s.WriteIdleTimeout
+	}
+	return BodyIdleTimeout
+}
+func (w *progressWriter) Write(p []byte) (int, error) {
+	if err := http.NewResponseController(w.w).SetWriteDeadline(time.Now().Add(w.idle)); err != nil {
+		return 0, err
+	}
+	return w.w.Write(p)
+}
+
+type progressReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+	idle   time.Duration
+}
+
+func (c *Client) progressBody(r io.Reader, cancel context.CancelFunc) io.Reader {
+	idle := c.BodyIdleTimeout
+	if idle <= 0 {
+		idle = BodyIdleTimeout
+	}
+	return &progressReader{r, cancel, idle}
+}
+func (r *progressReader) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(r.idle, r.cancel)
+	defer timer.Stop()
+	return r.r.Read(p)
+}
+
+// Connections is shared by direct TCP and relay listeners. Its mutex only
+// protects connection bookkeeping; callbacks and network closes run outside it.
+type Connections struct {
+	mu         sync.Mutex
+	conns      map[net.Conn]struct{}
+	count      int
+	ips        map[string]int
+	Max, PerIP int
+}
+
+func (g *Connections) State(c net.Conn, state http.ConnState) {
+	g.mu.Lock()
+	if g.conns == nil {
+		g.conns = make(map[net.Conn]struct{})
+	}
+	// Only completed handshakes are inspected: ConnectionState waits for an
+	// in-progress handshake. StateActive also closes the handshake/revocation race.
+	if state == http.StateClosed || state == http.StateHijacked {
+		delete(g.conns, c)
+	} else if state == http.StateActive || state == http.StateIdle {
+		g.conns[c] = struct{}{}
+	}
+	g.mu.Unlock()
+}
+func (g *Connections) Revoke(allowed func(string) bool) {
+	g.mu.Lock()
+	cs := make([]net.Conn, 0, len(g.conns))
+	for c := range g.conns {
+		cs = append(cs, c)
+	}
+	g.mu.Unlock()
+	for _, c := range cs {
+		if tc, ok := c.(*tls.Conn); ok {
+			st := tc.ConnectionState()
+			if len(st.PeerCertificates) > 0 && !allowed(identity.IDFromCert(st.PeerCertificates[0].Raw)) {
+				c.Close()
+			}
+		}
+	}
+}
+
+type limitedListener struct {
+	net.Listener
+	g *Connections
+}
+type limitedConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *limitedConn) Close() error                      { err := c.Conn.Close(); c.once.Do(c.release); return err }
+func (g *Connections) Limit(l net.Listener) net.Listener { return &limitedListener{l, g} }
+func (l *limitedListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		ip := ""
+		if c.RemoteAddr().Network() == "tcp" {
+			ip, _, _ = net.SplitHostPort(c.RemoteAddr().String())
+		}
+		g := l.g
+		g.mu.Lock()
+		total, per := g.Max, g.PerIP
+		if total <= 0 {
+			total = 128
+		}
+		if per <= 0 {
+			per = 16
+		}
+		if g.ips == nil {
+			g.ips = make(map[string]int)
+		}
+		if g.count >= total || (ip != "" && g.ips[ip] >= per) {
+			g.mu.Unlock()
+			c.Close()
+			continue
+		}
+		g.count++
+		if ip != "" {
+			g.ips[ip]++
+		}
+		g.mu.Unlock()
+		return &limitedConn{Conn: c, release: func() {
+			g.mu.Lock()
+			g.count--
+			if ip != "" {
+				g.ips[ip]--
+				if g.ips[ip] == 0 {
+					delete(g.ips, ip)
+				}
+			}
+			g.mu.Unlock()
+		}}, nil
+	}
+}
