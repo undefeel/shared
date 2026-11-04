@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,6 +69,92 @@ func TestIndexLimits(t *testing.T) {
 			t.Fatal("expected invalid index")
 		}
 		s.Close()
+	}
+}
+
+func indexClient(body string, limit int64) (*Client, string, func()) {
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+	c, addr := clientFor(s)
+	c.IndexLimit = limit
+	return c, addr, s.Close
+}
+
+func TestIndexStreamingRecords(t *testing.T) {
+	var body strings.Builder
+	body.WriteString(`{"seq":77,"files":[`)
+	for i := 0; i < 10000; i++ {
+		if i != 0 {
+			body.WriteByte(',')
+		}
+		fmt.Fprintf(&body, `{"name":"file-%d","size":%d,"version":{"peer":%d}}`, i, i, i)
+	}
+	body.WriteString(`]}`)
+	c, addr, closeServer := indexClient(body.String(), int64(body.Len()+1))
+	defer closeServer()
+	out, err := c.Index(context.Background(), addr, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Seq != 77 || len(out.Files) != 10000 || out.Files[9999].Name != "file-9999" || out.Files[9999].Size != 9999 || out.Files[9999].Version["peer"] != 9999 {
+		t.Fatalf("unexpected decoded index: seq=%d files=%d last=%+v", out.Seq, len(out.Files), out.Files[len(out.Files)-1])
+	}
+}
+
+func TestIndexStreamingRejectsLimitAndMalformedRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		limit      int64
+		want       string
+	}{
+		{"body limit", `{"seq":1,"files":[]}` + strings.Repeat(" ", 100), 20, "index exceeds size limit"},
+		{"long name", `{"seq":1,"files":[{"name":"ok"},{"name":"` + strings.Repeat("x", 4097) + `"},{"name":"unread"}]}`, 10000, "invalid index record"},
+		{"bad JSON", `{"seq":1,"files":[`, 100, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, addr, closeServer := indexClient(tc.body, tc.limit)
+			defer closeServer()
+			_, err := c.Index(context.Background(), addr, 0)
+			if err == nil || (tc.want != "" && !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("got %v, want error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestIndexDoesNotCopyRawBody(t *testing.T) {
+	const nameSize, count = 4096, 5120
+	name := strings.Repeat("n", nameSize)
+	var body strings.Builder
+	body.Grow(count * (nameSize + 30))
+	body.WriteString(`{"seq":1,"files":[`)
+	for i := 0; i < count; i++ {
+		if i != 0 {
+			body.WriteByte(',')
+		}
+		body.WriteString(`{"name":"`)
+		body.WriteString(name)
+		body.WriteString(`","version":{}}`)
+	}
+	body.WriteString(`]}`)
+	if body.Len() < 20<<20 {
+		t.Fatalf("test body is only %d bytes", body.Len())
+	}
+	c, addr, closeServer := indexClient(body.String(), int64(body.Len()+1))
+	defer closeServer()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	out, err := c.Index(context.Background(), addr, 0)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Files) != count {
+		t.Fatalf("got %d records", len(out.Files))
+	}
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > uint64(body.Len())*17/10 {
+		t.Fatalf("allocated %d bytes for %d-byte index; likely copied the raw body", allocated, body.Len())
 	}
 }
 func TestRequestRevocation(t *testing.T) {
