@@ -9,7 +9,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,17 +16,6 @@ import (
 
 // Fetcher скачивает содержимое файла fi у пира в w.
 type Fetcher func(ctx context.Context, fi FileInfo, w io.Writer) error
-
-// validName отсекает пути, которые могли бы выйти за пределы папки.
-func validName(name string) bool {
-	if name == "" || strings.HasPrefix(name, "/") || strings.ContainsAny(name, "\x00\\") {
-		return false
-	}
-	if path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") {
-		return false
-	}
-	return true
-}
 
 type action int
 
@@ -113,6 +101,7 @@ func (f *Folder) ApplyRemote(ctx context.Context, peer string, remote []FileInfo
 		r.Disk = ""
 		if !validName(r.Name) {
 			f.log.Printf("%s: пропущен недопустимый путь %q", peer, r.Name)
+			failed++
 			continue
 		}
 		if f.Ignored(r.Name) {
@@ -197,6 +186,9 @@ func (f *Folder) applyOne(ctx context.Context, st step, fetch Fetcher) error {
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 
+	if l != nil && !validDisk(r.Name, l.Disk) {
+		return errors.New("invalid local disk path in index")
+	}
 	rel := filepath.FromSlash(r.Name)
 	if l != nil {
 		rel = l.diskPath()

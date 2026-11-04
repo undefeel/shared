@@ -194,7 +194,15 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 		}
 		f.clock = p.Clock
 		f.generation, f.durableGeneration = p.Generation, p.Generation
+		seen := make(map[string]bool, len(p.Files))
 		for _, fi := range p.Files {
+			if fi == nil || !validDisk(fi.Name, fi.Disk) {
+				return nil, errors.New("invalid file name or disk path in index")
+			}
+			if seen[fi.Name] {
+				return nil, errors.New("duplicate file name in index: " + fi.Name)
+			}
+			seen[fi.Name] = true
 			f.files[fi.Name] = fi
 		}
 	}
