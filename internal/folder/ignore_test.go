@@ -9,7 +9,7 @@ func TestBuiltinsBeforeScan(t *testing.T) {
 			t.Errorf("%q must be excluded", name)
 		}
 	}
-	for _, name := range []string{".git/config", "distfile", "my_node_modules/a", "a/venv/b", "a.part.txt"} {
+	for _, name := range []string{".git/config", "distfile", "my_node_modules/a", "a/venv/b", "a.part.txt", "/unmatched", "/"} {
 		if f.Ignored(name) {
 			t.Errorf("%q must be included", name)
 		}

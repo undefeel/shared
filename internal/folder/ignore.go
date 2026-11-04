@@ -27,7 +27,7 @@ func (f *Folder) Ignored(name string) bool {
 }
 
 func matchIgnore(patterns []string, name string) bool {
-	for p := strings.TrimPrefix(path.Clean(name), "./"); p != "." && p != ""; p = path.Dir(p) {
+	for p := strings.TrimPrefix(path.Clean(name), "./"); p != "." && p != "" && p != "/"; p = path.Dir(p) {
 		base := path.Base(p)
 		for _, pat := range patterns {
 			// Component rules prevent substring exclusions (for example distfile).
