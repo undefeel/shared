@@ -111,6 +111,7 @@ struct MenuContent: View {
                 return L("Paused · %@ received", Format.percent(p.fraction))
             }
             return L("Syncing is paused")
+        case .incompatible: return L("Update the other machine to the same sharedir version")
         case .noPeers: return L("No paired devices")
         case .offline: return L("Offline — changes will sync later")
         case .syncing:
@@ -370,6 +371,7 @@ private struct PeerRow: View {
     }
 
     private func status(_ progress: DaemonStatus.Progress?) -> String {
+        if peer.isIncompatible { return L("Update the other machine to the same sharedir version") }
         if let p = peer.progress {
             var text = L("Receiving %d of %d · %@ left", p.doneFiles, p.files, Format.bytes(p.leftBytes))
             if let v = store.speeds[peer.id], v >= 1000 { text += " · " + Format.speed(v) }

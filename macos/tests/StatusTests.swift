@@ -11,7 +11,25 @@ enum StatusTests {
         try testStaleTokenMaps409ToReviewMessage()
         try testOtherFailureIsNotTreatedAsStaleToken()
         try testBlockedFolderNeverAppearsSynced()
-        print("8 macOS status tests passed")
+        try testIncompatible()
+        print("9 macOS status tests passed")
+    }
+
+
+    static func testIncompatible() throws {
+        var status = try decode(#"{"running":true,"syncing":true,"peers":[{"id":"v1","name":"Linux","connected":true,"syncing":false,"state":"incompatible","error_code":"protocol_incompatible","error_message":"expected 2","expected_protocol":2,"received_protocol":"1"}]}"#)
+        try expect(status.peers[0].expectedProtocol == 2, "expected protocol")
+        try expect(status.peers[0].receivedProtocol == "1", "v1 protocol")
+        try expect(status.peers[0].errorMessage == "expected 2", "message decoded")
+        try expect(StatusLogic.phase(for: status, hasConfig: true, daemonStarting: false) == .incompatible, "incompatible overrides syncing and connected")
+        status.paused = true
+        try expect(StatusLogic.phase(for: status, hasConfig: true, daemonStarting: false) == .paused, "pause wins")
+        status.folderError = .init(code: "root_changed", message: "root", token: "token")
+        try expect(StatusLogic.phase(for: status, hasConfig: true, daemonStarting: false) == .notRunning, "root wins")
+        for language in ["en", "ru"] {
+            let text = try String(contentsOfFile: "macos/Resources/\(language).lproj/Localizable.strings", encoding: .utf8)
+            try expect(text.contains("\"Update the other machine to the same sharedir version\" = "), "update translation")
+        }
     }
 
     static func testLegacyStatusDecodesWithoutOptionalErrors() throws {

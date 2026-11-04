@@ -57,6 +57,8 @@ var ru = {
   "online": "на связи",
   "offline": "не в сети",
   "searching": "поиск",
+  "Incompatible version": "Несовместимая версия",
+  "Update the other machine to the same sharedir version": "Обновите sharedir на другом компьютере до той же версии",
   "paused": "пауза",
   "peer paused": "пауза у пира",
   "retrying": "повтор",
@@ -151,6 +153,7 @@ function peerBadge(language, peer) {
   if (peer.progress && peer.progress.bytes > 0)
     return Math.round(100 * peer.progress.done_bytes / peer.progress.bytes) + "%"
   switch (peer.state) {
+  case "incompatible": return t(language, "Incompatible version")
   case "synced": return t(language, "online")
   case "syncing": return t(language, "Syncing").toLowerCase()
   case "searching": return t(language, "searching")
@@ -163,6 +166,7 @@ function peerBadge(language, peer) {
 
 // Подпись под прогресс-баром пира.
 function peerCaption(language, peer) {
+  if (peer.state === "incompatible" || peer.error_code === "protocol_incompatible") return t(language, "Update the other machine to the same sharedir version")
   var p = peer.progress
   if (p) return t(language, "Receiving %1 of %2 · %3 left", [p.done_files, p.files, bytes(p.bytes - p.done_bytes)])
   switch (peer.state) {

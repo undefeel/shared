@@ -63,3 +63,18 @@ function cliResult(status, operation, exitCode, stderr) {
     lastResult: result
   }
 }
+
+function incompatiblePeer(peer) {
+  return peer.state === "incompatible" || peer.error_code === "protocol_incompatible"
+}
+
+function phase(status, active) {
+  if (!status.running) return "down"
+  if (folderError(status)) return "blocked"
+  if (!active) return "paused"
+  var peers = status.peers || []
+  if (peers.some(incompatiblePeer)) return "incompatible"
+  if (peers.length === 0) return "nopeers"
+  if (status.syncing) return "syncing"
+  return peers.some(function(p) { return p.connected }) ? "synced" : "offline"
+}

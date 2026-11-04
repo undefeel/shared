@@ -4,7 +4,7 @@ import { test } from 'node:test'
 
 const source = readFileSync(new URL('../Logic.js', import.meta.url), 'utf8')
   .replace(/^\.pragma library\s*/, '')
-const logic = new Function(`${source}\nreturn { parseStatus, folderError, folderErrorText, scanErrorText, confirmArgv, cliResult }`)()
+const logic = new Function(`${source}\nreturn { phase, incompatiblePeer, parseStatus, folderError, folderErrorText, scanErrorText, confirmArgv, cliResult }`)()
 
 const oldFixture = '{"running":true,"paused":false,"peers":[]}'
 const blockedFixture = JSON.stringify({
@@ -97,4 +97,25 @@ test('resume CLI success does not clear the root block from current status', () 
   const result = logic.cliResult(status, 'resume', 0, '')
   assert.equal(result.status, status)
   assert.ok(logic.folderError(result.status))
+})
+
+const stringsSource = readFileSync(new URL('../Strings.js', import.meta.url), 'utf8').replace(/^\.pragma library\s*/, '')
+const strings = new Function(stringsSource + '\nreturn { t, peerCaption }')()
+
+test('v1 incompatible status cannot appear synced; root and pause win', () => {
+  const status = logic.parseStatus(JSON.stringify({
+    running: true, syncing: true, paused: false,
+    peers: [{id: 'v1', connected: true, syncing: false, state: 'incompatible',
+      error_code: 'protocol_incompatible', error_message: 'expected 2',
+      expected_protocol: 2, received_protocol: '1'}]
+  }))
+  assert.equal(logic.phase(status, true), 'incompatible')
+  assert.equal(logic.phase(status, false), 'paused')
+  status.folder_error = {code: 'root_changed', token: 't'}
+  assert.equal(logic.phase(status, false), 'blocked')
+  for (const language of ['en', 'ru']) {
+    const message = strings.peerCaption(language, status.peers[0])
+    assert.equal(message, strings.t(language, 'Update the other machine to the same sharedir version'))
+    assert.ok(!message.includes('Up to date'))
+  }
 })

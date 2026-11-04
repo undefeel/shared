@@ -40,6 +40,10 @@ struct DaemonStatus: Decodable, Equatable {
         var syncing: Bool
         var addr: String?
         var state: String
+        var errorCode: String?
+        var errorMessage: String?
+        var expectedProtocol: Int?
+        var receivedProtocol: String?
         var failed: Int?
         var lastSync: Date?
         var progress: Progress?
@@ -116,6 +120,7 @@ struct DaemonStatus: Decodable, Equatable {
 
 extension DaemonStatus.Peer {
     /// Коды состояний демона (app.State*).
+    var isIncompatible: Bool { state == "incompatible" || errorCode == "protocol_incompatible" }
     var isPaused: Bool { state == "paused" || state == "peer_paused" }
     var isSynced: Bool { state == "synced" }
 }
@@ -137,6 +142,7 @@ enum Phase: Equatable {
     case starting     // демон запускается
     case notRunning   // демон не отвечает
     case paused
+    case incompatible
     case syncing
     case synced
     case offline      // пиры есть, но никто не на связи
@@ -172,6 +178,7 @@ enum StatusLogic {
         guard hasConfig else { return .setup }
         guard status.running else { return daemonStarting ? .starting : .notRunning }
         if status.paused { return .paused }
+        if status.peers.contains(where: \.isIncompatible) { return .incompatible }
         if status.peers.isEmpty { return .noPeers }
         if status.syncing { return .syncing }
         if status.peers.contains(where: \.connected) { return .synced }
