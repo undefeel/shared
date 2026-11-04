@@ -15,6 +15,9 @@ struct DaemonStatus: Decodable, Equatable {
     var syncing: Bool = false
     var peers: [Peer] = []
     var candidates: [Candidate] = []
+    var kinds: [Kind] = []
+    var days: [Day] = []
+    var recent: [Event] = []
 
     struct Peer: Decodable, Equatable, Identifiable {
         var id: String
@@ -42,8 +45,36 @@ struct DaemonStatus: Decodable, Equatable {
         var source: String
     }
 
+    /// Объём папки по типу файлов; label — код (video, images, docs, audio, archive, code, other).
+    struct Kind: Decodable, Equatable, Identifiable {
+        var label: String
+        var bytes: Int64
+        var id: String { label }
+    }
+
+    /// Передано за день; date — «2006-01-02» по локальному времени демона.
+    struct Day: Decodable, Equatable, Identifiable {
+        var date: String
+        var received: Int64
+        var sent: Int64
+        var id: String { date }
+        var total: Int64 { received + sent }
+
+        enum CodingKeys: String, CodingKey { case date, received = "in", sent = "out" }
+    }
+
+    /// Событие ленты: kind — in, out, deleted, conflict.
+    struct Event: Decodable, Equatable, Identifiable {
+        var time: Date
+        var kind: String
+        var name: String
+        var peer: String
+        var size: Int64?
+        var id: String { "\(time.timeIntervalSince1970)|\(kind)|\(name)" }
+    }
+
     enum CodingKeys: String, CodingKey {
-        case running, id, name, folder, files, bytes, paused, syncing, peers, candidates
+        case running, id, name, folder, files, bytes, paused, syncing, peers, candidates, kinds, days, recent
     }
 
     init(running: Bool) { self.running = running }
@@ -60,6 +91,9 @@ struct DaemonStatus: Decodable, Equatable {
         syncing = try c.decodeIfPresent(Bool.self, forKey: .syncing) ?? false
         peers = try c.decodeIfPresent([Peer].self, forKey: .peers) ?? []
         candidates = try c.decodeIfPresent([Candidate].self, forKey: .candidates) ?? []
+        kinds = try c.decodeIfPresent([Kind].self, forKey: .kinds) ?? []
+        days = try c.decodeIfPresent([Day].self, forKey: .days) ?? []
+        recent = try c.decodeIfPresent([Event].self, forKey: .recent) ?? []
     }
 }
 
@@ -67,6 +101,17 @@ extension DaemonStatus.Peer {
     /// Коды состояний демона (app.State*).
     var isPaused: Bool { state == "paused" || state == "peer_paused" }
     var isSynced: Bool { state == "synced" }
+}
+
+extension DaemonStatus.Progress {
+    var fraction: Double { bytes > 0 ? min(1, Double(doneBytes) / Double(bytes)) : 0 }
+    var leftBytes: Int64 { max(0, bytes - doneBytes) }
+    var leftFiles: Int { max(0, files - doneFiles) }
+}
+
+/// Вкладки меню.
+enum MenuTab: String {
+    case devices, activity
 }
 
 /// Итоговое состояние для иконки и заголовка.
@@ -107,6 +152,16 @@ final class Store: ObservableObject {
     @Published var lastError: String?
     @Published var pairing: String? // кандидат, для которого открыта сверка ID
     @Published private(set) var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @Published var tab: MenuTab = MenuTab(rawValue: UserDefaults.standard.string(forKey: "tab") ?? "") ?? .devices {
+        didSet { UserDefaults.standard.set(tab.rawValue, forKey: "tab") }
+    }
+    /// Скорость приёма по пирам, байт/с (сглаженная).
+    @Published private(set) var speeds: [String: Double] = [:]
+    /// Последний известный прогресс пира: на паузе демон прогресс не отдаёт,
+    /// а полоска должна остаться там, где передача остановилась.
+    @Published private(set) var heldProgress: [String: DaemonStatus.Progress] = [:]
+
+    private var samples: [String: (bytes: Int64, at: Date)] = [:]
 
     private let client = ControlClient(socketPath: SharedirPaths.socket)
     private var child: Process?
@@ -143,6 +198,7 @@ final class Store: ObservableObject {
 
         switch result {
         case .success(let st):
+            track(st)
             if st != status { status = st }
         case .failure:
             status = DaemonStatus(running: false)
@@ -150,6 +206,57 @@ final class Store: ObservableObject {
         }
         let p = computePhase()
         if p != phase { phase = p }
+    }
+
+    /// Для отладочного рендера: статус из файла вместо демона.
+    func inject(_ st: DaemonStatus) {
+        pollTask?.cancel()
+        track(st)
+        status = st
+        phase = computePhase()
+    }
+
+    /// Скорость и удержанный прогресс по свежему статусу.
+    private func track(_ st: DaemonStatus) {
+        let now = Date()
+        var speeds = self.speeds, held = heldProgress
+        for peer in st.peers {
+            if let p = peer.progress {
+                held[peer.id] = p
+                if let prev = samples[peer.id], p.doneBytes >= prev.bytes {
+                    let dt = now.timeIntervalSince(prev.at)
+                    if dt > 0.2 {
+                        let v = Double(p.doneBytes - prev.bytes) / dt
+                        // Экспоненциальное сглаживание, чтобы цифра не прыгала.
+                        speeds[peer.id] = speeds[peer.id].map { $0 * 0.6 + v * 0.4 } ?? v
+                    }
+                }
+                samples[peer.id] = (p.doneBytes, now)
+            } else {
+                samples[peer.id] = nil
+                speeds[peer.id] = nil
+                if !peer.isPaused { held[peer.id] = nil }
+            }
+        }
+        let ids = Set(st.peers.map(\.id))
+        held = held.filter { ids.contains($0.key) }
+        if speeds != self.speeds { self.speeds = speeds }
+        if held != heldProgress { heldProgress = held }
+    }
+
+    /// Прогресс пира для полоски: текущий или удержанный на паузе.
+    func progress(for peer: DaemonStatus.Peer) -> DaemonStatus.Progress? {
+        peer.progress ?? (peer.isPaused ? heldProgress[peer.id] : nil)
+    }
+
+    /// Сумма прогресса по всем пирам — для общей полоски и иконки.
+    var totalProgress: DaemonStatus.Progress? {
+        let all = status.peers.compactMap { progress(for: $0) }
+        guard !all.isEmpty else { return nil }
+        return all.reduce(DaemonStatus.Progress(files: 0, doneFiles: 0, bytes: 0, doneBytes: 0)) {
+            .init(files: $0.files + $1.files, doneFiles: $0.doneFiles + $1.doneFiles,
+                  bytes: $0.bytes + $1.bytes, doneBytes: $0.doneBytes + $1.doneBytes)
+        }
     }
 
     private func computePhase() -> Phase {
@@ -240,6 +347,17 @@ final class Store: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: status.folder))
     }
 
+    /// Показать файл из ленты в Finder.
+    func reveal(_ name: String) {
+        guard !status.folder.isEmpty else { return }
+        let url = URL(fileURLWithPath: status.folder).appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            NSWorkspace.shared.open(url.deletingLastPathComponent())
+        }
+    }
+
     func openLog() {
         NSWorkspace.shared.open(SharedirPaths.log)
     }
@@ -323,6 +441,45 @@ enum Format {
         if mod10 == 1 && mod100 != 11 { return "\(num) файл" }
         if (2...4).contains(mod10) && !(12...14).contains(mod100) { return "\(num) файла" }
         return "\(num) файлов"
+    }
+
+    static func percent(_ f: Double) -> String {
+        f.formatted(.percent.precision(.fractionLength(0)).locale(locale))
+    }
+
+    static func speed(_ bytesPerSecond: Double) -> String {
+        L("%@/s", bytes(Int64(bytesPerSecond)))
+    }
+
+    /// «Пн» / «Mon» для даты дня из статуса.
+    static func weekday(_ day: String) -> String {
+        let p = DateFormatter()
+        p.locale = Locale(identifier: "en_US_POSIX")
+        p.dateFormat = "yyyy-MM-dd"
+        guard let d = p.date(from: day) else { return day }
+        let f = DateFormatter()
+        f.locale = locale
+        f.setLocalizedDateFormatFromTemplate("EEE")
+        return f.string(from: d).replacingOccurrences(of: ".", with: "").capitalized(with: locale)
+    }
+
+    static func kind(_ code: String) -> String {
+        switch code {
+        case "video": return L("Video")
+        case "images": return L("Images")
+        case "docs": return L("Documents")
+        case "audio": return L("Audio")
+        case "archive": return L("Archives")
+        case "code": return L("Code")
+        default: return L("Other")
+        }
+    }
+
+    /// Время события: сегодня — только часы, иначе ещё и дата.
+    static func eventTime(_ d: Date) -> String {
+        Calendar.current.isDateInToday(d)
+            ? time(d)
+            : d.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(locale))
     }
 
     static func ago(_ date: Date) -> String {

@@ -8,6 +8,19 @@ enum Snapshot {
         let store = Store()
         try? await Task.sleep(for: .seconds(2))
         await store.poll()
+        let env = ProcessInfo.processInfo.environment
+        // SHAREDIR_SNAPSHOT_STATUS=file.json — подставить статус (для вёрстки
+        // состояний, которые трудно поймать вживую), SHAREDIR_SNAPSHOT_TAB=activity.
+        if let path = env["SHAREDIR_SNAPSHOT_STATUS"] {
+            for file in path.split(separator: ",").map(String.init) {
+                if let data = FileManager.default.contents(atPath: file),
+                   let st = try? StatusDecoder.shared.decode(DaemonStatus.self, from: data) {
+                    store.inject(st)
+                }
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+        }
+        if let tab = env["SHAREDIR_SNAPSHOT_TAB"].flatMap(MenuTab.init(rawValue:)) { store.tab = tab }
         if ProcessInfo.processInfo.environment["SHAREDIR_SNAPSHOT_PAIR"] != nil {
             store.pairing = store.status.candidates.first?.id
         }

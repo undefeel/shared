@@ -10,7 +10,6 @@
 "Syncing is paused" = "Синхронизация на паузе";
 "No paired devices" = "Нет сопряжённых устройств";
 "Offline — changes will sync later" = "Нет связи — изменения отправятся позже";
-"Syncing · %@, %@" = "Синхронизация · %@, %@";
 "Syncing…" = "Синхронизация…";
 "Up to date · %@" = "Синхронизировано · %@";
 "Up to date" = "Синхронизировано";
@@ -62,3 +61,34 @@
 "invalid device ID" = "Некорректный ID устройства";
 "that is this device's own ID" = "Это ID этого же устройства";
 "no such paired device" = "Такого устройства нет среди сопряжённых";
+
+/* Прогресс */
+"Syncing · %@ · %@ left" = "Синхронизация · %@ · осталось %@";
+"Paused · %@ received" = "На паузе · получено %@";
+"Paused · %@, %@ left" = "На паузе · осталось %@, %@";
+"%@/s" = "%@/с";
+
+/* Вкладки и статистика */
+"View" = "Вид";
+"Activity" = "Активность";
+"Folder Contents" = "Состав папки";
+"Video" = "Видео";
+"Images" = "Изображения";
+"Documents" = "Документы";
+"Audio" = "Аудио";
+"Archives" = "Архивы";
+"Code" = "Код";
+"Other" = "Другое";
+"Transferred This Week" = "Передано за неделю";
+"today %@" = "сегодня %@";
+"Received" = "Получено";
+"Sent" = "Отправлено";
+"Received %@ · sent %@" = "Получено %@ · отправлено %@";
+"%@: received %@ · sent %@" = "%@: получено %@ · отправлено %@";
+"Nothing transferred this week" = "За неделю ничего не передавалось";
+"Recent Files" = "Недавние файлы";
+"No changes yet" = "Изменений пока нет";
+"from %@" = "от %@";
+"to %@" = "на %@";
+"conflict, both versions kept" = "конфликт, сохранены обе версии";
+"deleted" = "удалён";
