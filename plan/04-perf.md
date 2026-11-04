@@ -68,7 +68,7 @@
 | 04-18 | control persistence (объединена с 04-17) | L3 | sol | 04-17 | done | `task_579c31020cbe` |  |
 | 04-19 | commit группы | L3 | sol | 04-18 | done | `task_8b9cce11d4db` | `ctx_28b45367fe67` |
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | done | `task_2bf0b88271c6` | `ctx_88fbee192066` |
-| 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_708e0596d8b3` |  |
+| 04-21 | staging apply extraction | L3 | sol | 04-20 | in_progress | `task_708e0596d8b3` | `ctx_be4447ee6cbd` |
 | 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_f0f4420dc2f4` |  |
 | 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_79bf5dd1f327` |  |
