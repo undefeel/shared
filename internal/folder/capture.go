@@ -22,6 +22,7 @@ type capture struct {
 	parent             *os.File
 	Original, Recovery string // relative Disk paths; may be NFD
 	ops                platformFSOps
+	savedIdentity      *captureIdentity
 	identity           os.FileInfo // dev/ino from the descriptor opened by take
 }
 
@@ -38,7 +39,7 @@ func (r *rootFS) prepareCapture(original string) (*capture, error) {
 }
 
 // openCapture reopens an intent's names during recovery without following links.
-func (r *rootFS) openCapture(original, recovery string) (*capture, error) {
+func (r *rootFS) openCapture(original, recovery string, identity ...captureIdentity) (*capture, error) {
 	if !diskName(original) || !diskName(recovery) || path.Dir(original) != path.Dir(recovery) ||
 		!strings.HasPrefix(path.Base(recovery), tmpPrefix+"capture-") || original == recovery {
 		return nil, fmt.Errorf("invalid capture paths")
@@ -47,7 +48,11 @@ func (r *rootFS) openCapture(original, recovery string) (*capture, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &capture{parent: p, Original: original, Recovery: recovery, ops: platformOps()}, nil
+	c := &capture{parent: p, Original: original, Recovery: recovery, ops: platformOps()}
+	if len(identity) == 1 {
+		c.savedIdentity = &identity[0]
+	}
+	return c, nil
 }
 
 func (c *capture) Close() error { return c.parent.Close() }
@@ -85,7 +90,7 @@ func (c *capture) restore(peer, hash string) (string, error) {
 // discard is called only after the index is durably committed. The coordinator
 // must flush the parent afterwards, then remove and flush the transaction intent.
 func (c *capture) discard() error {
-	if c.identity == nil {
+	if c.identity == nil && c.savedIdentity == nil {
 		return fmt.Errorf("capture identity unavailable")
 	}
 	f, err := openRegularAt(c.parent, path.Base(c.Recovery), unix.O_RDONLY, 0)
@@ -98,7 +103,15 @@ func (c *capture) discard() error {
 		return err
 	}
 	// SameFile compares device and inode on the supported Unix platforms.
-	if !os.SameFile(c.identity, info) {
+	same := c.identity != nil && os.SameFile(c.identity, info)
+	if c.savedIdentity != nil {
+		var st unix.Stat_t
+		if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+			return err
+		}
+		same = *c.savedIdentity == (captureIdentity{uint64(st.Dev), uint64(st.Ino)})
+	}
+	if !same {
 		return fmt.Errorf("capture inode changed: %s", c.Recovery)
 	}
 	return unix.Unlinkat(int(c.parent.Fd()), path.Base(c.Recovery), 0)
