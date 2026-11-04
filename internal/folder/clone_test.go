@@ -24,6 +24,9 @@ func TestCloneIndependentRooted(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer src.Close()
+	if e = os.Chmod(filepath.Join(dir, "source"), 0400); e != nil {
+		t.Fatal(e)
+	}
 	dst, e := r.cloneFile(src, "copy", 5)
 	if e != nil {
 		t.Fatal(e)
