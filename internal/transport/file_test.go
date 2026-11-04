@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"log"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -45,7 +44,7 @@ func TestBlockedFile(t *testing.T) {
 	f, fi := fileFixture(t)
 	blockFileFixture(t, f)
 	w := httptest.NewRecorder()
-	(&Server{Folder: f}).Handler().ServeHTTP(w, httptest.NewRequest("GET", "/file?name=a&hash="+fi.Hash, nil))
+	readyHandler(&Server{Folder: f, State: testState{f}}).ServeHTTP(w, v2Request("GET", "/file?name=a&hash="+fi.Hash, nil))
 	if w.Code != 503 {
 		t.Fatalf("status %d", w.Code)
 	}
@@ -55,9 +54,9 @@ func TestBlockedIndexAfterLongPoll(t *testing.T) {
 	_, seq := f.Snapshot()
 	w := httptest.NewRecorder()
 	done := make(chan struct{})
-	s := &Server{Folder: f, PollTimeout: time.Second}
+	s := &Server{Folder: f, State: testState{f}, PollTimeout: time.Second}
 	go func() {
-		s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/index?since="+strconv.FormatUint(seq, 10), nil))
+		readyHandler(s).ServeHTTP(w, v2Request("GET", "/index?since="+strconv.FormatUint(seq, 10), nil))
 		close(done)
 	}()
 	blockFileFixture(t, f)
@@ -70,11 +69,11 @@ func TestBlockedIndexAfterLongPoll(t *testing.T) {
 		t.Fatalf("status %d", w.Code)
 	}
 }
-func TestLegacyFileAndIndexWireFormat(t *testing.T) {
+func TestV2FileAndIndexWireFormat(t *testing.T) {
 	f, fi := fileFixture(t)
-	server := httptest.NewServer((&Server{Folder: f}).Handler())
+	server := httptest.NewServer(readyHandler(&Server{Folder: f, State: testState{f}}))
 	defer server.Close()
-	resp, err := http.Get(server.URL + "/file?name=a&hash=" + fi.Hash)
+	resp, err := v2Get(server.URL + "/file?name=a&hash=" + fi.Hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +82,7 @@ func TestLegacyFileAndIndexWireFormat(t *testing.T) {
 	if err != nil || resp.StatusCode != 200 || string(data) != "abc" || resp.ContentLength != 3 {
 		t.Fatalf("response %v %q %v", resp.Status, string(data), err)
 	}
-	resp, err = http.Get(server.URL + "/index")
+	resp, err = v2Get(server.URL + "/index")
 	if err != nil {
 		t.Fatal(err)
 	}
