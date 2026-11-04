@@ -223,6 +223,13 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 	if err := f.initRoot(data); err != nil {
 		return nil, err
 	}
+	f.scanMu.Lock()
+	err = f.recoverIntent()
+	f.scanMu.Unlock()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
 	return f, nil
 }
 
