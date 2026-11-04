@@ -19,6 +19,7 @@ type peerQueue struct {
 	mu      sync.Mutex
 	pending map[peerItemKey]peerPending
 	cursors map[string]peerCursor
+	indexes map[string]peerIndex
 	blocked map[string]bool
 }
 
@@ -33,8 +34,22 @@ type peerPending struct {
 	next     time.Time
 }
 
+// peerIndex retains the work represented by a cursor until every record has
+// been applied. Replaying the same index can fill available slots without
+// re-enqueuing records that have already completed.
+type peerIndex struct {
+	epoch   string
+	cursor  uint64
+	records map[string]peerIndexRecord
+}
+
+type peerIndexRecord struct {
+	info folder.FileInfo
+	done bool
+}
+
 func newPeerQueue() *peerQueue {
-	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), blocked: make(map[string]bool)}
+	return &peerQueue{pending: make(map[peerItemKey]peerPending), cursors: make(map[string]peerCursor), indexes: make(map[string]peerIndex), blocked: make(map[string]bool)}
 }
 
 // accept queues candidates; false may queue a prefix, but never advances cursor.
@@ -47,64 +62,79 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 	if q.cursors == nil {
 		q.cursors = make(map[string]peerCursor)
 	}
+	if q.indexes == nil {
+		q.indexes = make(map[string]peerIndex)
+	}
 	if q.blocked == nil {
 		q.blocked = make(map[string]bool)
 	}
-	old, known := q.cursors[peer]
-	newEpoch := reset || (known && old.epoch != epoch)
+	index, haveIndex := q.indexes[peer]
+	newEpoch := haveIndex && index.epoch != epoch
 	if newEpoch {
 		for key := range q.pending {
-			if key.peer == peer && (reset || key.epoch != epoch) {
+			if key.peer == peer {
 				delete(q.pending, key)
 			}
 		}
 		delete(q.blocked, peer)
+		delete(q.indexes, peer)
+		haveIndex = false
 	}
-	if q.blocked[peer] && !newEpoch {
-		return false
+	// A reset bit can accompany a retry. Only a changed epoch or cursor starts
+	// a new index continuation.
+	newIndex := !haveIndex || index.epoch != epoch || index.cursor != cursor
+	if newIndex {
+		records := make(map[string]peerIndexRecord)
+		if haveIndex {
+			for name, record := range index.records {
+				if !record.done {
+					records[name] = record
+				}
+			}
+		}
+		index = peerIndex{epoch: epoch, cursor: cursor, records: records}
 	}
-	adds := make(map[peerItemKey]peerPending, len(files))
-	left := 0
-	added := 0
+	left := false
 	for _, fi := range files {
 		fi.Disk = ""
 		fi.Version = fi.Version.Copy()
-		key := peerItemKey{peer, epoch, fi.Name}
-		if previous, duplicate := adds[key]; duplicate {
-			if !samePeerVersion(previous.info, fi) && previous.info.Version.Compare(fi.Version) != folder.Greater {
-				adds[key] = peerPending{info: fi}
+		record, exists := index.records[fi.Name]
+		if exists {
+			cmp := record.info.Version.Compare(fi.Version)
+			if cmp == folder.Greater {
+				fi = record.info
+			} else if !samePeerVersion(record.info, fi) {
+				record.info = fi
+				record.done = false
 			}
-			continue
 		}
-		previous, exists := q.pending[key]
 		if !exists {
-			if len(q.pending)+added >= peerPendingLimit {
-				left++
-				continue
-			}
-			adds[key] = peerPending{info: fi}
-			added++
+			record.info = fi
+		}
+		index.records[fi.Name] = record
+		key := peerItemKey{peer, epoch, fi.Name}
+		pending, queued := q.pending[key]
+		if queued && samePeerVersion(pending.info, fi) {
 			continue
 		}
-		if samePeerVersion(previous.info, fi) {
-			adds[key] = previous
+		if record.done && samePeerVersion(record.info, fi) {
 			continue
 		}
-		if previous.info.Version.Compare(fi.Version) == folder.Greater {
-			adds[key] = previous
-		} else {
-			adds[key] = peerPending{info: fi}
+		if !queued && len(q.pending) >= peerPendingLimit {
+			left = true
+			continue
 		}
+		q.pending[key] = peerPending{info: fi}
 	}
-	if left > 0 {
-		for key, item := range adds {
-			q.pending[key] = item
-		}
+	q.indexes[peer] = index
+	if left {
 		q.blocked[peer] = true
 		return false
 	}
-	for key, item := range adds {
-		q.pending[key] = item
+	for _, record := range index.records {
+		if !record.done {
+			return true
+		}
 	}
 	q.cursors[peer] = peerCursor{epoch: epoch, cursor: cursor}
 	delete(q.blocked, peer)
@@ -178,6 +208,23 @@ func (q *peerQueue) applied(peer, epoch string, info folder.FileInfo) {
 	key := peerItemKey{peer, epoch, info.Name}
 	if item, ok := q.pending[key]; ok && samePeerVersion(item.info, info) {
 		delete(q.pending, key)
+		if index, exists := q.indexes[peer]; exists && index.epoch == epoch {
+			if record, exists := index.records[info.Name]; exists && samePeerVersion(record.info, info) {
+				record.done = true
+				index.records[info.Name] = record
+				q.indexes[peer] = index
+				complete := true
+				for _, current := range index.records {
+					if !current.done {
+						complete = false
+						break
+					}
+				}
+				if complete {
+					q.cursors[peer] = peerCursor{epoch: index.epoch, cursor: index.cursor}
+				}
+			}
+		}
 		if len(q.pending) < peerPendingLimit {
 			clear(q.blocked)
 		}

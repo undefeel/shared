@@ -24,8 +24,8 @@ func TestPeerQueueFailureDoesNotRepeatAcceptedIndex(t *testing.T) {
 	}
 	failed := files[17]
 	q.failed("p", "epoch", failed, now)
-	if epoch, cursor, ok := q.cursor("p"); !ok || epoch != "epoch" || cursor != 64 {
-		t.Fatalf("accepted cursor = %q/%d/%v", epoch, cursor, ok)
+	if _, _, ok := q.cursor("p"); ok {
+		t.Fatal("cursor advanced before queued records were applied")
 	}
 	if got := q.due("p", now, 0); len(got) != 63 {
 		t.Fatalf("immediately due = %d, want 63", len(got))
@@ -36,6 +36,12 @@ func TestPeerQueueFailureDoesNotRepeatAcceptedIndex(t *testing.T) {
 	}
 	if got := q.due("p", now.Add(300*time.Millisecond), 0); len(got) != 64 {
 		t.Fatalf("due after backoff = %d, want 64", len(got))
+	}
+	for _, fi := range files {
+		q.applied("p", "epoch", fi)
+	}
+	if epoch, cursor, ok := q.cursor("p"); !ok || epoch != "epoch" || cursor != 64 {
+		t.Fatalf("applied cursor = %q/%d/%v", epoch, cursor, ok)
 	}
 	for attempt := uint(1); attempt < 16; attempt++ {
 		d := peerRetryDelay(attempt)
@@ -71,7 +77,7 @@ func TestPeerQueueNewerVersionReplacesPending(t *testing.T) {
 	}
 }
 
-func TestPeerQueueOverflowDoesNotAdvanceCursorOrLoseWork(t *testing.T) {
+func TestPeerQueueOverflowContinuationAppliesEachRecordOnce(t *testing.T) {
 	q := newPeerQueue()
 	files := make([]folder.FileInfo, 2*peerPendingLimit+1)
 	for i := range files {
@@ -89,16 +95,89 @@ func TestPeerQueueOverflowDoesNotAdvanceCursorOrLoseWork(t *testing.T) {
 	if got := len(q.due("p", time.Now(), 0)); got != peerPendingLimit {
 		t.Fatalf("pending = %d, want %d", got, peerPendingLimit)
 	}
-	for _, fi := range files[:peerPendingLimit] {
+	seen := make(map[string]int, len(files))
+	cycle := 0
+	for len(seen) < len(files) {
+		cycle++
+		batch := q.due("p", time.Now(), 0)
+		if len(batch) == 0 {
+			t.Fatalf("cycle %d: no queued work before all %d records applied", cycle, len(files))
+		}
+		for _, fi := range batch {
+			seen[fi.Name]++
+			if seen[fi.Name] != 1 {
+				t.Fatalf("%s queued/applied %d times", fi.Name, seen[fi.Name])
+			}
+			q.applied("p", "epoch", fi)
+		}
+		if len(seen) < len(files) {
+			if q.canPoll("p") == false {
+				t.Fatal("poll remained blocked after capacity was released")
+			}
+			reset := cycle == 1
+			accepted := q.accept("p", "epoch", 11, reset, files)
+			wantAccepted := len(files)-len(seen) <= peerPendingLimit
+			if accepted != wantAccepted {
+				t.Fatalf("continuation accepted = %v, want %v with %d unapplied records", accepted, wantAccepted, len(files)-len(seen))
+			}
+			if _, _, ok := q.cursor("p"); ok {
+				t.Fatal("cursor advanced before the continuation was applied")
+			}
+		}
+	}
+	if cycle < 3 {
+		t.Fatalf("only %d capacity-release cycles, want several", cycle)
+	}
+	if _, cursor, ok := q.cursor("p"); !ok || cursor != 11 {
+		t.Fatalf("cursor after applying continuation = %d/%v, want 11/true", cursor, ok)
+	}
+	if got := q.due("p", time.Now(), 0); len(got) != 0 {
+		t.Fatalf("applied records remained queued: %d", len(got))
+	}
+	if !q.accept("p", "epoch", 11, true, files) {
+		t.Fatal("replayed completed index was not accepted")
+	}
+	if got := q.due("p", time.Now(), 0); len(got) != 0 {
+		t.Fatalf("completed replay re-queued %d applied records", len(got))
+	}
+}
+
+func TestPeerQueueContinuationUsesNewerVector(t *testing.T) {
+	q := newPeerQueue()
+	files := make([]folder.FileInfo, peerPendingLimit+1)
+	for i := range files {
+		files[i] = queueInfo(fmt.Sprintf("f%05d", i), 1)
+	}
+	if q.accept("p", "epoch", 12, false, files) {
+		t.Fatal("oversized index unexpectedly accepted")
+	}
+	newer := queueInfo(files[0].Name, 2)
+	files[0] = newer
+	if q.accept("p", "epoch", 12, true, files) {
+		t.Fatal("continuation unexpectedly fit before releasing capacity")
+	}
+	got := q.due("p", time.Now(), 0)
+	if len(got) != peerPendingLimit {
+		t.Fatalf("pending after same-index reset replay = %d, want %d", len(got), peerPendingLimit)
+	}
+	for _, fi := range got {
+		if fi.Name == newer.Name && !samePeerVersion(fi, newer) {
+			t.Fatalf("pending vector for %q = %#v, want newer %#v", fi.Name, fi, newer)
+		}
 		q.applied("p", "epoch", fi)
 	}
-	if !q.canPoll("p") {
-		t.Fatal("poll still blocked after capacity freed")
+	if _, _, ok := q.cursor("p"); ok {
+		t.Fatal("cursor advanced while oversized suffix remained")
 	}
-	if !q.accept("p", "epoch", 11, false, files[len(files)-1:]) {
-		t.Fatal("index not accepted after freeing capacity")
+	if !q.accept("p", "epoch", 12, false, files) {
+		t.Fatal("final suffix record was not accepted")
 	}
-	if _, cursor, _ := q.cursor("p"); cursor != 11 {
-		t.Fatalf("cursor after retry = %d, want 11", cursor)
+	last := q.due("p", time.Now(), 0)
+	if len(last) != 1 || last[0].Name != files[len(files)-1].Name {
+		t.Fatalf("continuation suffix = %#v, want only %q", last, files[len(files)-1].Name)
+	}
+	q.applied("p", "epoch", last[0])
+	if _, cursor, ok := q.cursor("p"); !ok || cursor != 12 {
+		t.Fatalf("cursor after newer vector continuation = %d/%v", cursor, ok)
 	}
 }
