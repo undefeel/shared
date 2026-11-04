@@ -54,14 +54,18 @@ cat > "$S" <<SPEC
 # Review $ID, round $ROUND (read-only)
 
 ## Target
-Current worktree, commits $(git log --format='%h' "$BASE"..HEAD | tr '\n' ' ').
+Worktree \`$ROOT\` (absolute path; work only there), commits $(git log --format='%h' "$BASE"..HEAD | tr '\n' ' ').
 Requirements: \`$SPEC_TASK\`. Design: \`plan/design/perf.md\` (its first section of owner decisions overrides the rest) and \`plan/design/folder.md\`. The design docs are in Russian.
 
 ## Change
 Review \`git diff $BASE...HEAD\` against the spec and the design. Look for bugs: escaping the root or following symlinks, fd leaks, lock order scanMu → saveMu → mu, races with watcher/Scan/multiple runPeer/downloads, a transient error turning into a delete or tombstone, data loss on a crash between steps, unintended wire-format changes. Check that every test required by the spec exists and really tests what it claims. Check the diff stays inside the spec's Ownership.
 
 ## Constraints
-Do NOT change, create or delete any file, do not commit, do not run git commands that modify state. You may read files and run read-only commands. Answer in English in the \`worker_done\` body: a list of \`[blocker|major|minor] file:line — issue — how to fix\`, or exactly "no findings". blocker/major only with a concrete execution path.
+- Static review only: read files and run read-only commands (git diff/log/show, grep, cat). Do NOT run tests, builds or go vet — the author already ran the acceptance commands; they would create caches and artifacts.
+- Do NOT change, create or delete any file, do not commit, do not run git commands that modify state.
+- Do NOT start workers or sub-agents (no orchestration worker-start, no dispatch). Parallel read-only tool calls are fine; read whole files when useful.
+- Report format: this task's format overrides any default report length (such as a three-sentence summary). The \`worker_done\` body is in English and contains only a list of \`[blocker|major|minor] file:line — issue — how to fix\`, or exactly "no findings". blocker/major only with a concrete execution path.
+- Run the worker_done command as a single line (no line breaks inside the command).
 
 ## Ownership
 None (read-only).
