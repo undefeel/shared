@@ -22,6 +22,11 @@ struct ControlClient {
     }
 
     private func request(_ method: String, _ path: String, body: Data?) throws -> Data {
+        var socketInfo = stat()
+        guard lstat(socketPath, &socketInfo) == 0,
+              (socketInfo.st_mode & S_IFMT) == S_IFSOCK,
+              socketInfo.st_uid == getuid() else { throw Failure.notRunning }
+
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Failure.notRunning }
         defer { close(fd) }
@@ -93,12 +98,18 @@ enum SharedirPaths {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/sharedir.log")
     }
 
-    /// Unix-сокеты ограничены ~104 байтами: длинный путь демон уносит в TMPDIR.
+    /// Unix-сокеты ограничены ~104 байтами.
+    /// Таблица Go (config_test.go):
+    ///   /Users/alice/.config/sharedir -> /Users/alice/.config/sharedir/ctl.sock
+    ///   /tmp/<110 h> -> $TMPDIR/sharedir-<uid>/f99d0153b32f.sock
     static var socket: String {
         let p = home.appendingPathComponent("ctl.sock").path
         if p.utf8.count < 100 { return p }
         let digest = SHA256.hash(data: Data(home.path.utf8))
         let hex = digest.prefix(6).map { String(format: "%02x", $0) }.joined()
-        return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sharedir-\(hex).sock").path
+        let tempDir = ProcessInfo.processInfo.environment["TMPDIR"] ?? "/tmp"
+        return URL(fileURLWithPath: tempDir)
+            .appendingPathComponent("sharedir-\(getuid())", isDirectory: true)
+            .appendingPathComponent("\(hex).sock").path
     }
 }
