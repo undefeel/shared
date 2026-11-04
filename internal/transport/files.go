@@ -64,8 +64,15 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, item := range req.Items {
-		if item.ID == "" || item.Name == "" || len(item.ID)+len(item.Name)+len(item.Hash) > (BatchMaxHeader-256)/6 || ids[item.ID] || names[item.Name] || item.Size < 0 || item.Size > BatchMaxPlain {
+		if item.ID == "" || item.Name == "" || ids[item.ID] || names[item.Name] || item.Size < 0 || item.Size > BatchMaxPlain {
 			http.Error(w, "invalid batch item", 400)
+			return
+		}
+		// Validate the escaped wire representation, including worst-case
+		// status and numeric fields, before starting the response.
+		header, _ := json.Marshal(BatchHeader{ID: item.ID, Name: item.Name, Hash: item.Hash, Status: "version_changed", Size: BatchMaxPlain, WireSize: BatchMaxWire, Encoding: "identity"})
+		if len(header) > BatchMaxHeader {
+			http.Error(w, "batch header too large", 400)
 			return
 		}
 		ids[item.ID], names[item.Name] = true, true
