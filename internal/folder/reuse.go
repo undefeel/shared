@@ -20,7 +20,7 @@ func (f *Folder) reuseCandidates(fi FileInfo) []FileInfo {
 			return
 		}
 		seen[name] = true
-		if cur := f.files[name]; cur != nil && !cur.Deleted && cur.Hash == fi.Hash && cur.Size == fi.Size {
+		if cur := f.files[name]; cur != nil && !cur.Deleted && (name == fi.Name || (cur.Hash == fi.Hash && cur.Size == fi.Size)) {
 			c := *cur
 			c.Version = cur.Version.Copy()
 			out = append(out, c)

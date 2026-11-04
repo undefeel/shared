@@ -195,7 +195,7 @@ func TestRunPeerRetriesOnlyFailedBodyWithoutBaselineRefetch(t *testing.T) {
 	}
 	body := strings.Repeat("z", 300<<10)
 	for _, name := range []string{"bad", "good-a", "good-b"} {
-		if err := os.WriteFile(filepath.Join(source.Root, name), []byte(body), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(source.Root, name), []byte(body+name), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -272,7 +272,7 @@ func TestRunPeerRetriesOnlyFailedBodyWithoutBaselineRefetch(t *testing.T) {
 	}
 	for _, name := range []string{"bad", "good-a", "good-b"} {
 		got, err := os.ReadFile(filepath.Join(destination.Root, name))
-		if err != nil || string(got) != body {
+		if err != nil || string(got) != body+name {
 			t.Fatalf("%s body not durably applied: err=%v bytes=%d", name, err, len(got))
 		}
 	}

@@ -107,3 +107,30 @@ func TestReuseChangedDuringCloneFallsBack(t *testing.T) {
 		t.Fatalf("body=%q err=%v", body, e)
 	}
 }
+
+func TestReuseSymlinkDonorFallsBack(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	n.write(t, "donor", "body", time.Unix(100, 0))
+	if e := n.f.Scan(); e != nil {
+		t.Fatal(e)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	os.WriteFile(outside, []byte("body"), 0600)
+	os.Remove(filepath.Join(n.f.Root, "donor"))
+	os.Symlink(outside, filepath.Join(n.f.Root, "donor"))
+	calls := 0
+	r := incoming("body", Vector{"B": 1}, 200e9)
+	tmp, e := n.f.downloadOrReuse(context.Background(), r, func(_ context.Context, _ FileInfo, w io.Writer) error {
+		calls++
+		_, e := io.WriteString(w, "body")
+		return e
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer n.f.root.unlink(tmp, false)
+	if calls != 1 {
+		t.Fatal("followed donor symlink")
+	}
+}
