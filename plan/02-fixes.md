@@ -32,7 +32,7 @@
 | 02-12 | глубокий снимок и save | L3 | sol | 02-11 | done | `task_8df04ac4b7c6` | `ctx_70c2a09ec7c0` |
 | 02-13 | staging полного Scan | L2 | luna | 02-10, 02-12 | done | `task_4572aa79fc95` | `ctx_2a826fb7b265` |
 | 02-14 | canonical names и коллизии | L2 | luna | 02-12, 02-13 | done | `task_ff16ffc13a96` | `ctx_3c0f5597b545` |
-| 02-15 | binding, latch и миграция | L3 | sol | 02-14 | review | `task_b282941a5c41` | `ctx_1d56dcc9b099` |
+| 02-15 | binding, latch и миграция | L3 | sol | 02-14 | done | `task_b282941a5c41` | `ctx_1d56dcc9b099` |
 | 02-16 | барьер корня в Scan | L2 | luna | 02-15 | todo | `task_95fcc8bb5687` | |
 | 02-17 | capture и уникальные conflicts | L3 | sol | 02-11, 02-15 | todo | `task_efec4aa7296e` | |
 | 02-18 | intent и recovery | L3 | sol | 02-12, 02-15, 02-17 | todo | `task_f9e9cd0474af` | |
