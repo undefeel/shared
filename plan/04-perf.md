@@ -57,9 +57,9 @@
 | ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
 | 04-10 | codec schema=3 | L3 | sol | — | done | `task_e0012807b32a` | `ctx_f30215cc8b18` |
-| 04-11 | append/replay | L3 | sol | 04-10 | todo | `task_424caacccdd1` |  |
+| 04-11 | append/replay | L3 | sol | 04-10 | in_progress | `task_424caacccdd1` | `ctx_2981398b175d` |
 | 04-12 | compaction | L3 | sol | 04-11 | todo | `task_1afb877b0106` |  |
-| 04-13 | типы group-intent | L3 | sol | 04-10 | todo | `task_2b2c1fbdeff6` |  |
+| 04-13 | типы group-intent | L3 | sol | 04-10 | in_progress | `task_2b2c1fbdeff6` | `ctx_7d0a1d8dd9d1` |
 | 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | `task_0dccad190400` |  |
 | 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | `task_d77c2050c37a` |  |
 | 04-16 | миграция helpers | L3 | sol | 04-15 | todo | `task_a5e694ea19d8` |  |
