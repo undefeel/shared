@@ -31,7 +31,7 @@
 | 02-11 | no-replace и flush платформ | L3 | sol | 02-10 | done | `task_97de5a4673c1` | `ctx_d80e9ed00308` |
 | 02-12 | глубокий снимок и save | L3 | sol | 02-11 | done | `task_8df04ac4b7c6` | `ctx_70c2a09ec7c0` |
 | 02-13 | staging полного Scan | L2 | luna | 02-10, 02-12 | done | `task_4572aa79fc95` | `ctx_2a826fb7b265` |
-| 02-14 | canonical names и коллизии | L2 | luna | 02-12, 02-13 | todo | `task_ff16ffc13a96` | |
+| 02-14 | canonical names и коллизии | L2 | luna | 02-12, 02-13 | in_progress | `task_ff16ffc13a96` | `ctx_3c0f5597b545` |
 | 02-15 | binding, latch и миграция | L3 | sol | 02-14 | todo | `task_b282941a5c41` | |
 | 02-16 | барьер корня в Scan | L2 | luna | 02-15 | todo | `task_95fcc8bb5687` | |
 | 02-17 | capture и уникальные conflicts | L3 | sol | 02-11, 02-15 | todo | `task_efec4aa7296e` | |
