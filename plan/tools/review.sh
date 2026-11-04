@@ -8,23 +8,23 @@ AGENT=(--agent codex --model gpt-6-luna --effort "$EF")
 WT="$(dirname "$ROOT")/t$ID"; BR="undefeel/t$ID"
 mkdir -p plan/specs/review; S="plan/specs/review/$ID.md"
 cat > "$S" <<SPEC
-# Ревью $ID (только чтение)
+# Review $ID (read-only)
 
 ## Target
-Ветка \`$BR\` в текущем worktree, коммиты: $(git log --format='%h' main.."$BR" | tr '\n' ' ').
-Что требовалось — \`plan/specs/$ID.md\`; общий проект — \`plan/design/folder.md\` (раздел «Решение владельца» важнее остального) и для этапа 04 \`plan/design/perf.md\`.
+Branch \`$BR\` in the current worktree, commits: $(git log --format='%h' main.."$BR" | tr '\n' ' ').
+Requirements: \`plan/specs/$ID.md\`; overall design: \`plan/design/folder.md\` (the "owner decision" section overrides the rest) and, for stage 04, \`plan/design/perf.md\` (its "owner decisions" section overrides the rest). The design docs are in Russian.
 
 ## Change
-Проверь diff \`git diff main...$BR\` на соответствие spec и проекту и на баги: выход за корень и следование симлинкам, утечки fd, порядок блокировок scanMu → saveMu → mu, гонки с watcher/Scan/несколькими runPeer, превращение временной ошибки в удаление или tombstone, потеря данных при сбое между шагами, совместимость формата \`/index\` и \`/file\`. Проверь, что тесты из spec есть и действительно проверяют заявленное (а не проходят тривиально).
+Review \`git diff main...$BR\` against the spec and the design, and look for bugs: escaping the root or following symlinks, fd leaks, lock order scanMu → saveMu → mu, races with watcher/Scan/multiple runPeer/downloads, a transient error turning into a delete or tombstone, data loss on a crash between steps, wire-format changes of \`/index\` and \`/file\`. Check that the tests required by the spec exist and actually test what they claim (not trivially passing).
 
 ## Constraints
-Код не меняй, ничего не коммить, тесты повторно не запускай. Ответ — в теле \`worker_done\`: список \`[blocker|major|minor] файл:строка — суть — как исправить\` или «замечаний нет». blocker/major — только с конкретным путём исполнения.
+Do not change code, do not commit, do not re-run tests. Answer in English in the \`worker_done\` body: a list of \`[blocker|major|minor] file:line — issue — how to fix\`, or "no findings". blocker/major only with a concrete execution path.
 
 ## Ownership
-Нет (только чтение).
+None (read-only).
 
 ## Observable acceptance
-Отчёт в теле \`worker_done\`.
+Report in the \`worker_done\` body.
 SPEC
-orca orchestration worker-start --spec-file "$S" --task-title "Ревью $ID" --worktree "path:$WT" \
+orca orchestration worker-start --spec-file "$S" --task-title "Review $ID" --worktree "path:$WT" \
   "${AGENT[@]}" --json | jq -r '.result.dispatchId // .'

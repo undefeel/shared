@@ -58,31 +58,31 @@
 |---|---|---|---|---|---|---|---|
 | 04-10 | codec schema=3 | L3 | sol | — | done | `task_e0012807b32a` | `ctx_f30215cc8b18` |
 | 04-11 | append/replay | L3 | sol | 04-10 | in_progress | `task_424caacccdd1` | `ctx_2981398b175d` |
-| 04-12 | compaction | L3 | sol | 04-11 | todo | `task_1afb877b0106` |  |
-| 04-13 | типы group-intent | L3 | sol | 04-10 | in_progress | `task_2b2c1fbdeff6` | `ctx_7d0a1d8dd9d1` |
-| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | `task_0dccad190400` |  |
-| 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | `task_d77c2050c37a` |  |
-| 04-16 | миграция helpers | L3 | sol | 04-15 | todo | `task_a5e694ea19d8` |  |
-| 04-17 | подключить store Open/save | L3 | sol | 04-16 | todo | `task_eb2db96b4906` |  |
-| 04-18 | control persistence | L3 | sol | 04-17 | todo | `task_11f1bda00b29` |  |
-| 04-19 | commit группы | L3 | sol | 04-18 | todo | `task_29c2d4124b68` |  |
-| 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_138a41f67663` |  |
-| 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_e576a21f893e` |  |
-| 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_879c6c7a7563` |  |
+| 04-12 | compaction | L3 | sol | 04-11 | todo | `task_624dcd4c677c` |  |
+| 04-13 | типы group-intent | L3 | sol | 04-10 | review | `task_2b2c1fbdeff6` | `ctx_7d0a1d8dd9d1` |
+| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | `task_6567310b9d6e` |  |
+| 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | `task_0f5916456a72` |  |
+| 04-16 | миграция helpers | L3 | sol | 04-15 | todo | `task_1d0bd69ed27a` |  |
+| 04-17 | подключить store Open/save | L3 | sol | 04-16 | todo | `task_baca33ae52a0` |  |
+| 04-18 | control persistence | L3 | sol | 04-17 | todo | `task_b76cc2dbdd21` |  |
+| 04-19 | commit группы | L3 | sol | 04-18 | todo | `task_ac0b212eb33e` |  |
+| 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_4c8301145da2` |  |
+| 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_81ace8acdeec` |  |
+| 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_aeda2677bfa4` |  |
 | 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
-| 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_7c52a6713b09` |  |
+| 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_3b1341dbe038` |  |
 | 04-25 | handshake primitive | L2 | luna | — | review | `task_8a511af85279` | `ctx_a2d77225581a` |
-| 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b5801286b17` |  |
-| 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_20fe2cf8cbf4` |  |
-| 04-28 | /files server | L3 | sol | 04-27 | todo | `task_568d72350beb` |  |
-| 04-29 | /files client | L2 | luna | 04-28 | todo | `task_f8b064fdf584` |  |
-| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_76b47f186047` |  |
-| 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_26fe36214891` |  |
-| 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_bf20451a38d3` |  |
+| 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b850ab8fbad` |  |
+| 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_87f491eab235` |  |
+| 04-28 | /files server | L3 | sol | 04-27 | todo | `task_033135d6a137` |  |
+| 04-29 | /files client | L2 | luna | 04-28 | todo | `task_64fc7ddf6592` |  |
+| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_34a2529b4f5c` |  |
+| 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_5d95a7441831` |  |
+| 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_5a026455e3e9` |  |
 | 04-50 | bounded log writer | L2 | luna | — | review | `task_9fc335af3492` | `ctx_25d91e4bfc39` |
-| 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_705d5629db39` |  |
-| 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_d4afee100756` |  |
-| 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | `task_e2eff8412917` |  |
+| 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_d5d764e0f251` |  |
+| 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_6061edeb90cb` |  |
+| 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | `task_186a3c318ad0` |  |
 
 Волны B (04-33…04-41) и C (04-42…04-49, 04-51, 04-55…04-57) — задачи и spec создаются после замера волны A. Ownership и тесты каждой задачи — таблица «Задачи реализации» в `plan/design/perf.md`.
 
@@ -90,3 +90,4 @@
 
 Критерии готовности этапа: R1–R20 реализованы или явно отложены с причиной; `go vet ./...`, `go test -race ./...`, `make build`, `make app` зелёные; бенчмарк R20 в порогах; Linux-тесты и проверка по `docs/power-loss-check.md` — за владельцем.
 - 04-10: бюджет codec расширен до ~550 строк с тестами (ответ на вопрос воркера), log frame encode/decode остаётся в 04-10.
+- Язык воркеров — английский (правило в CLAUDE.md, 2026-11-04). Неначатые задачи волны A пересозданы с английскими spec, старые task_id помечены failed «superseded».
