@@ -56,33 +56,33 @@
 ### Волна A — фундамент и сеть
 | ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
-| 04-10 | codec schema=3 | L3 | sol | — | todo | | |
-| 04-11 | append/replay | L3 | sol | 04-10 | todo | | |
-| 04-12 | compaction | L3 | sol | 04-11 | todo | | |
-| 04-13 | типы group-intent | L3 | sol | 04-10 | todo | | |
-| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | | |
-| 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | | |
-| 04-16 | миграция helpers | L3 | sol | 04-15 | todo | | |
-| 04-17 | подключить store Open/save | L3 | sol | 04-16 | todo | | |
-| 04-18 | control persistence | L3 | sol | 04-17 | todo | | |
-| 04-19 | commit группы | L3 | sol | 04-18 | todo | | |
-| 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | | |
-| 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | | |
-| 04-22 | connect group apply | L3 | sol | 04-21 | todo | | |
-| 04-23 | config concurrency | L2 | luna | — | todo | | |
-| 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | | |
-| 04-25 | handshake primitive | L2 | luna | — | todo | | |
-| 04-26 | frame codec | L2 | luna | 04-25 | todo | | |
-| 04-27 | compression helper | L2 | luna | 04-26 | todo | | |
-| 04-28 | /files server | L3 | sol | 04-27 | todo | | |
-| 04-29 | /files client | L2 | luna | 04-28 | todo | | |
-| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | | |
-| 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | | |
-| 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | | |
-| 04-50 | bounded log writer | L2 | luna | — | todo | | |
-| 04-52 | macOS error UI | L2 | luna | 04-32 | todo | | |
-| 04-53 | QML error UI | L2 | luna | 04-32 | todo | | |
-| 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | | |
+| 04-10 | codec schema=3 | L3 | sol | — | in_progress | `task_e0012807b32a` | `ctx_f30215cc8b18` |
+| 04-11 | append/replay | L3 | sol | 04-10 | todo | `task_424caacccdd1` |  |
+| 04-12 | compaction | L3 | sol | 04-11 | todo | `task_1afb877b0106` |  |
+| 04-13 | типы group-intent | L3 | sol | 04-10 | todo | `task_2b2c1fbdeff6` |  |
+| 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | `task_0dccad190400` |  |
+| 04-15 | hooks/flush contract | L3 | sol | 04-12, 04-14 | todo | `task_d77c2050c37a` |  |
+| 04-16 | миграция helpers | L3 | sol | 04-15 | todo | `task_a5e694ea19d8` |  |
+| 04-17 | подключить store Open/save | L3 | sol | 04-16 | todo | `task_eb2db96b4906` |  |
+| 04-18 | control persistence | L3 | sol | 04-17 | todo | `task_11f1bda00b29` |  |
+| 04-19 | commit группы | L3 | sol | 04-18 | todo | `task_29c2d4124b68` |  |
+| 04-20 | очередь coordinator | L3 | sol | 04-19 | todo | `task_138a41f67663` |  |
+| 04-21 | staging apply extraction | L3 | sol | 04-20 | todo | `task_e576a21f893e` |  |
+| 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_879c6c7a7563` |  |
+| 04-23 | config concurrency | L2 | luna | — | in_progress | `task_2fff94561cda` | `ctx_5239cd95da9d` |
+| 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_7c52a6713b09` |  |
+| 04-25 | handshake primitive | L2 | luna | — | in_progress | `task_8a511af85279` | `ctx_a2d77225581a` |
+| 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b5801286b17` |  |
+| 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_20fe2cf8cbf4` |  |
+| 04-28 | /files server | L3 | sol | 04-27 | todo | `task_568d72350beb` |  |
+| 04-29 | /files client | L2 | luna | 04-28 | todo | `task_f8b064fdf584` |  |
+| 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_76b47f186047` |  |
+| 04-31 | retry queue primitive | L2 | luna | 04-30 | todo | `task_26fe36214891` |  |
+| 04-32 | daemon pipeline | L3 | sol | 04-24, 04-31 | todo | `task_bf20451a38d3` |  |
+| 04-50 | bounded log writer | L2 | luna | — | in_progress | `task_9fc335af3492` | `ctx_25d91e4bfc39` |
+| 04-52 | macOS error UI | L2 | luna | 04-32 | todo | `task_705d5629db39` |  |
+| 04-53 | QML error UI | L2 | luna | 04-32 | todo | `task_d4afee100756` |  |
+| 04-54 | perf harness | L3 | sol | 04-32, 04-50 | todo | `task_e2eff8412917` |  |
 
 Волны B (04-33…04-41) и C (04-42…04-49, 04-51, 04-55…04-57) — задачи и spec создаются после замера волны A. Ownership и тесты каждой задачи — таблица «Задачи реализации» в `plan/design/perf.md`.
 
