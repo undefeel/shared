@@ -311,7 +311,7 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 // before reading any store; archives retain the complete previous causal epoch.
 func (f *Folder) resetStore(c *Folder, token string) (err error) {
 	dir := filepath.Dir(f.statePath)
-	if err = os.Link(f.statePath, f.statePath+".reset-"+token); err != nil && !os.IsExist(err) {
+	if err = os.Link(f.statePath, f.statePath+".reset-"+token); err != nil && !os.IsExist(err) && !os.IsNotExist(err) {
 		return err
 	}
 	for _, name := range []string{"index.snapshot", "index.log"} {

@@ -368,6 +368,9 @@ func TestStoreDurabilityFailurePoisonsWriter(t *testing.T) {
 func TestResetInterruptedAfterMarkerRecovers(t *testing.T) {
 	f := rootStateFixture(t)
 	epoch := f.store.state.StoreID
+	if err := os.Remove(f.statePath); err != nil {
+		t.Fatal(err)
+	}
 	_ = f.blockRoot("root_empty", "test")
 	token := f.Blocked().Token
 	f.SetPersistenceProbe(PersistenceProbe{Fault: func(_, phase string, _, _ uint64) error {

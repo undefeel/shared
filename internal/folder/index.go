@@ -233,8 +233,7 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 		f.files[fi.Name] = fi
 	}
 	f.wireStore()
-	data, _ := json.Marshal(p)
-	if err = f.initRoot(data); err == nil {
+	if err = f.initRoot(nil); err == nil {
 		err = f.recoverIntent()
 	}
 	if err != nil {
