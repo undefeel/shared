@@ -354,6 +354,7 @@ func (t *helloTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	local.Protocol = ProtocolVersion
 	b, _ := json.Marshal(local)
 	h.Body = io.NopCloser(bytes.NewReader(b))
+	h.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 	h.ContentLength = int64(len(b))
 	h.Header = make(http.Header)
 	h.Header.Set(ProtocolHeader, "2")
@@ -376,6 +377,9 @@ func (t *helloTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	r = r.Clone(r.Context())
+	if r.Header == nil {
+		r.Header = make(http.Header)
+	}
 	r.Header.Set(ProtocolHeader, "2")
 	return t.base.RoundTrip(r)
 }
@@ -402,7 +406,7 @@ func (c *Client) get(ctx context.Context, addr, path string, q url.Values) (*htt
 	req.Header.Set(portHeader, strconv.Itoa(c.port))
 	req.Header.Set(ProtocolHeader, "2")
 	req.Header.Set("Accept-Encoding", "identity")
-	if strings.HasPrefix(addr, RelayHost+":") {
+	if addr == RelayHost || strings.HasPrefix(addr, RelayHost+":") {
 		req.Header.Set("Accept-Encoding", "gzip")
 	}
 	resp, err := c.http.Do(req)

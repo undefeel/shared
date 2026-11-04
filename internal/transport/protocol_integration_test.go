@@ -109,7 +109,10 @@ func TestV2GzipSingleFile(t *testing.T) {
 	base := hc.Transport
 	var encoding string
 	hc.Transport = &helloTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		r.Header.Set("Accept-Encoding", "gzip")
+		u := *r.URL
+		u.Host = strings.TrimPrefix(srv.URL, "https://")
+		r = r.Clone(r.Context())
+		r.URL = &u
 		resp, err := base.RoundTrip(r)
 		if err == nil && r.URL.Path == "/file" {
 			encoding = resp.Header.Get("Content-Encoding")
@@ -118,7 +121,7 @@ func TestV2GzipSingleFile(t *testing.T) {
 	})}
 	c := &Client{http: hc}
 	var out bytes.Buffer
-	if err := c.Fetcher(strings.TrimPrefix(srv.URL, "https://"))(context.Background(), files[0], &out); err != nil {
+	if err := c.Fetcher(RelayHost)(context.Background(), files[0], &out); err != nil {
 		t.Fatal(err)
 	}
 	if encoding != "gzip" || out.String() != plain {
