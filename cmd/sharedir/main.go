@@ -156,8 +156,21 @@ func cmdRun(home string, args []string) error {
 	fs.Bool("no-tray", true, "устарел: трей теперь выключен по умолчанию")
 	parse(fs, args)
 
-	logger := log.New(os.Stderr, "", log.LstdFlags)
-	log.SetOutput(os.Stderr)
+	logPath := ""
+	if runtime.GOOS == "darwin" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		logPath = filepath.Join(h, "Library/Logs/sharedir.log")
+	}
+	writer, closeOutput, err := app.NewRunLogOutput(runtime.GOOS, logPath, os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer closeOutput()
+	logger := log.New(writer, "", log.LstdFlags)
+	log.SetOutput(writer)
 	d, err := app.New(home, logger)
 	if err != nil {
 		return err
