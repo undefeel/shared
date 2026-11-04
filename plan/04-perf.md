@@ -71,7 +71,7 @@
 | 04-22 | connect group apply | L3 | sol | 04-21 | todo | `task_aeda2677bfa4` |  |
 | 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_3b1341dbe038` |  |
-| 04-25 | handshake primitive | L2 | luna | — | review | `task_8a511af85279` | `ctx_a2d77225581a` |
+| 04-25 | handshake primitive | L2 | luna | — | done | `task_8a511af85279` | `ctx_a2d77225581a` |
 | 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b850ab8fbad` |  |
 | 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_87f491eab235` |  |
 | 04-28 | /files server | L3 | sol | 04-27 | todo | `task_033135d6a137` |  |
