@@ -8,6 +8,7 @@ package folder
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -137,6 +138,11 @@ type Folder struct {
 	// scanMu сериализует сканирование и запись файлов с пира, чтобы скан
 	// не принял только что записанный файл за удалённый (и наоборот).
 	scanMu sync.Mutex
+	// Lock order: scanMu → saveMu → mu. I/O never holds mu.
+	saveMu            sync.Mutex
+	generation        uint64       // saveMu; attempts, including failed saves
+	durableGeneration uint64       // saveMu; advances only after directory flush
+	persistHooks      persistHooks // set before concurrent use, for fault injection
 
 	mu       sync.Mutex
 	files    map[string]*FileInfo
@@ -147,9 +153,17 @@ type Folder struct {
 	ignore   []string
 }
 
+type persistHooks struct {
+	marshal  func(any) ([]byte, error)
+	rename   func(string, string) error
+	syncFile func(*os.File) error
+	syncDir  func(*os.File) error
+}
+
 type persisted struct {
-	Clock uint64      `json:"clock"`
-	Files []*FileInfo `json:"files"`
+	Generation uint64      `json:"generation,omitempty"`
+	Clock      uint64      `json:"clock"`
+	Files      []*FileInfo `json:"files"`
 }
 
 func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
@@ -177,6 +191,7 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 			return nil, err
 		}
 		f.clock = p.Clock
+		f.generation, f.durableGeneration = p.Generation, p.Generation
 		for _, fi := range p.Files {
 			f.files[fi.Name] = fi
 		}
@@ -200,23 +215,71 @@ func (f *Folder) notify() {
 	f.changed = make(chan struct{})
 }
 
+// save serializes writers before taking a deep snapshot, including mergeOnly
+// changes made under mu. A delayed writer cannot overwrite a newer snapshot.
 func (f *Folder) save() error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	f.generation++
 	f.mu.Lock()
-	p := persisted{Clock: f.clock, Files: make([]*FileInfo, 0, len(f.files))}
+	p := persisted{Generation: f.generation, Clock: f.clock, Files: make([]*FileInfo, 0, len(f.files))}
 	for _, fi := range f.files {
-		p.Files = append(p.Files, fi)
+		c := *fi
+		c.Version = fi.Version.Copy()
+		p.Files = append(p.Files, &c)
 	}
 	f.mu.Unlock()
 	sort.Slice(p.Files, func(i, j int) bool { return p.Files[i].Name < p.Files[j].Name })
-	data, err := json.Marshal(p)
+	marshal := f.persistHooks.marshal
+	if marshal == nil {
+		marshal = json.Marshal
+	}
+	data, err := marshal(p)
 	if err != nil {
 		return err
 	}
-	tmp := f.statePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	dir, err := os.Open(filepath.Dir(f.statePath))
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, f.statePath)
+	defer dir.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(f.statePath), ".sharedir-index-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	defer tmp.Close()
+	if n, err := tmp.Write(data); err != nil {
+		return err
+	} else if n != len(data) {
+		return io.ErrShortWrite
+	}
+	flush := f.persistHooks.syncFile
+	if flush == nil {
+		flush = syncFile
+	}
+	if err := flush(tmp); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	rename := f.persistHooks.rename
+	if rename == nil {
+		rename = os.Rename
+	}
+	if err := rename(tmp.Name(), f.statePath); err != nil {
+		return err
+	}
+	flush = f.persistHooks.syncDir
+	if flush == nil {
+		flush = syncDir
+	}
+	if err := flush(dir); err != nil {
+		return err
+	}
+	f.durableGeneration = p.Generation
+	return nil
 }
 
 // Snapshot возвращает копию индекса и его текущий seq.
@@ -227,6 +290,7 @@ func (f *Folder) Snapshot() ([]FileInfo, uint64) {
 	for _, fi := range f.files {
 		c := *fi
 		c.Disk = ""
+		c.Version = fi.Version.Copy()
 		out = append(out, c)
 	}
 	return out, f.seq
@@ -263,7 +327,9 @@ func (f *Folder) Lookup(name string) (FileInfo, string, bool) {
 	if !ok {
 		return FileInfo{}, "", false
 	}
-	return *fi, filepath.Join(f.Root, fi.diskPath()), true
+	c := *fi
+	c.Version = fi.Version.Copy()
+	return c, filepath.Join(f.Root, fi.diskPath()), true
 }
 
 func (f *Folder) Stats() Stats {
