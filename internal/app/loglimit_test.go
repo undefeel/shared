@@ -2,10 +2,13 @@ package app
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestBoundedLogWriterRotation(t *testing.T) {
@@ -43,6 +46,146 @@ func TestBoundedLogWriterRotation(t *testing.T) {
 	}
 	if got[0] != 'b' {
 		t.Errorf("oldest retained log starts with %q, want b", got[0])
+	}
+}
+
+func TestBoundedLogWriterRecoversAfterRotationFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	w, err := NewBoundedLogWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Write(bytes.Repeat([]byte("x"), logFileLimit)); err != nil {
+		t.Fatal(err)
+	}
+	originalRename := w.rename
+	failed := false
+	w.rename = func(old, new string) error {
+		if old == path && !failed {
+			failed = true
+			return os.ErrPermission
+		}
+		return originalRename(old, new)
+	}
+	if _, err := w.Write([]byte("retry")); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("first write error = %v, want injected rotation error", err)
+	}
+	if _, err := w.Write([]byte("recovered")); err != nil {
+		t.Fatalf("write after failed rotation: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "recovered" {
+		t.Fatalf("active log = %q, want recovered", got)
+	}
+}
+
+func TestBoundedLogWriterPreservesOversizedExistingLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	want := bytes.Repeat([]byte("legacy"), logFileLimit/6+17)
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewBoundedLogWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	got, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("rotated legacy log has %d bytes, want %d", len(got), len(want))
+	}
+	if info, err := os.Stat(path); err != nil || info.Size() != 0 {
+		t.Fatalf("new active log stat = %v, %v; want empty file", info, err)
+	}
+}
+
+func TestBoundedLogWriterDoesNotSplitWriteAcrossFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	w, err := NewBoundedLogWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	prefix := bytes.Repeat([]byte("p"), logFileLimit-2)
+	if _, err := w.Write(prefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("whole-line")); err != nil {
+		t.Fatal(err)
+	}
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(active) != "whole-line" || !bytes.Equal(rotated, prefix) {
+		t.Fatalf("active=%q rotated size=%d; line or prefix was split", active, len(rotated))
+	}
+}
+
+func TestBoundedLogWriterRedirectsStderrAfterRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sharedir.log")
+	oldStdout, err := unix.Dup(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr, err := unix.Dup(2)
+	if err != nil {
+		_ = unix.Close(oldStdout)
+		t.Fatal(err)
+	}
+	restore := func() {
+		if oldStdout < 0 {
+			return
+		}
+		_ = unix.Dup2(oldStdout, 1)
+		_ = unix.Dup2(oldStderr, 2)
+		_ = unix.Close(oldStdout)
+		_ = unix.Close(oldStderr)
+		oldStdout, oldStderr = -1, -1
+	}
+	t.Cleanup(restore)
+	w, err := NewBoundedLogWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.redirectFDs = true
+	if err := w.redirectStandardFDs(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(bytes.Repeat([]byte("r"), logFileLimit)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("rotate")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stderr.Write([]byte("stderr-current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restore()
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(active, []byte("stderr-current")) || bytes.Contains(rotated, []byte("stderr-current")) {
+		t.Fatal("stderr output did not land in the active log after rotation")
 	}
 }
 

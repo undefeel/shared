@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -18,10 +20,12 @@ const (
 // logFileLimit bytes each. It is intended for diagnostic output, so it does
 // not fsync individual writes.
 type BoundedLogWriter struct {
-	mu   sync.Mutex
-	path string
-	file *os.File
-	size int64
+	mu          sync.Mutex
+	path        string
+	file        *os.File
+	size        int64
+	rename      func(string, string) error
+	redirectFDs bool
 }
 
 func NewBoundedLogWriter(path string) (*BoundedLogWriter, error) {
@@ -37,19 +41,10 @@ func NewBoundedLogWriter(path string) (*BoundedLogWriter, error) {
 		f.Close()
 		return nil, err
 	}
-	w := &BoundedLogWriter{path: path, file: f, size: st.Size()}
-	if w.size > logFileLimit {
-		// An older unbounded log may predate this writer. Discard its oversized
-		// contents rather than carrying an over-limit generation forward.
-		if err := f.Truncate(0); err != nil {
-			f.Close()
-			return nil, err
-		}
-		w.size = 0
-	}
-	if w.size == logFileLimit {
+	w := &BoundedLogWriter{path: path, file: f, size: st.Size(), rename: os.Rename}
+	if w.size >= logFileLimit {
 		if err := w.rotate(); err != nil {
-			f.Close()
+			_ = w.Close()
 			return nil, err
 		}
 	}
@@ -67,60 +62,118 @@ func NewRunLogOutput(goos, path string, stderr io.Writer) (io.Writer, func() err
 	if err != nil {
 		return nil, nil, err
 	}
+	terminal := false
+	redirect := false
+	if f, ok := stderr.(*os.File); ok {
+		_, ioctlErr := unix.IoctlGetWinsize(int(f.Fd()), unix.TIOCGWINSZ)
+		terminal = ioctlErr == nil
+		redirect = !terminal
+	}
+	if terminal {
+		return io.MultiWriter(w, stderr), w.Close, nil
+	}
+	if redirect {
+		w.redirectFDs = true
+		if err := w.redirectStandardFDs(); err != nil {
+			_ = w.Close()
+			return nil, nil, err
+		}
+	}
 	return w, w.Close, nil
 }
 
 func (w *BoundedLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.file == nil {
-		return 0, os.ErrClosed
+	if err := w.ensureOpen(); err != nil {
+		return 0, err
 	}
-	written := 0
-	for len(p) > 0 {
-		if w.size == logFileLimit {
-			if err := w.rotate(); err != nil {
-				return written, err
-			}
-		}
-		next := logFileLimit - w.size
-		if int64(len(p)) < next {
-			next = int64(len(p))
-		}
-		n, err := writeAll(w.file, p[:int(next)])
-		w.size += int64(n)
-		written += n
-		p = p[n:]
-		if err != nil {
-			return written, err
+	st, err := w.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	w.size = st.Size()
+	if w.size > 0 && (w.size >= logFileLimit || int64(len(p)) > logFileLimit-w.size) {
+		if err := w.rotate(); err != nil {
+			return 0, err
 		}
 	}
-	return written, nil
+	n, err := writeAll(w.file, p)
+	w.size += int64(n)
+	return n, err
 }
 
 func (w *BoundedLogWriter) rotate() error {
-	if err := w.file.Close(); err != nil {
+	if w.file != nil {
+		if err := w.file.Close(); err != nil {
+			w.file = nil
+			return w.reopenAfterRotateError(err)
+		}
 		w.file = nil
-		return err
 	}
-	w.file = nil
+	failed := func(err error) error { return w.reopenAfterRotateError(err) }
 	if err := os.Remove(w.backup(logFileCount - 1)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return failed(err)
 	}
 	for i := logFileCount - 2; i >= 1; i-- {
-		if err := os.Rename(w.backup(i), w.backup(i+1)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		if err := w.rename(w.backup(i), w.backup(i+1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return failed(err)
 		}
 	}
-	if err := os.Rename(w.path, w.backup(1)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+	if err := w.rename(w.path, w.backup(1)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return failed(err)
 	}
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return failed(err)
+	}
+	w.file, w.size = f, 0
+	if w.redirectFDs {
+		if err := w.redirectStandardFDs(); err != nil {
+			_ = f.Close()
+			w.file = nil
+			return failed(err)
+		}
+	}
+	return nil
+}
+
+func (w *BoundedLogWriter) ensureOpen() error {
+	if w.file != nil {
+		return nil
+	}
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
-	w.file, w.size = f, 0
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	w.file, w.size = f, st.Size()
+	if w.redirectFDs {
+		if err := w.redirectStandardFDs(); err != nil {
+			_ = f.Close()
+			w.file = nil
+			return err
+		}
+	}
 	return nil
+}
+
+func (w *BoundedLogWriter) reopenAfterRotateError(cause error) error {
+	if err := w.ensureOpen(); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+func (w *BoundedLogWriter) redirectStandardFDs() error {
+	if err := unix.Dup2(int(w.file.Fd()), 1); err != nil {
+		return err
+	}
+	return unix.Dup2(int(w.file.Fd()), 2)
 }
 
 func (w *BoundedLogWriter) backup(n int) string { return fmt.Sprintf("%s.%d", w.path, n) }
