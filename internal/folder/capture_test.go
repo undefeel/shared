@@ -171,11 +171,39 @@ func TestCaptureRecoveryCollisionAndDiscard(t *testing.T) {
 	}
 	captureBytes(t, dir, c.Original, "old")
 	captureBytes(t, dir, c.Recovery, "prior")
+	if err := c.discard(); err == nil {
+		t.Fatal("discard accepted an uncaptured entry")
+	}
+	if err := os.Remove(filepath.Join(dir, c.Recovery)); err != nil {
+		t.Fatal(err)
+	}
+	mustCapture(t, c)
 	if err := c.discard(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, c.Recovery)); !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	captureBytes(t, dir, c.Original, "old")
+
+}
+
+func TestCaptureDiscardReplacedRecovery(t *testing.T) {
+	_, c, dir := captureFixture(t, "file")
+	mustCapture(t, c)
+	// Keep the captured inode alive to prevent inode number reuse in this test.
+	held, err := os.Open(filepath.Join(dir, c.Recovery))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := os.Remove(filepath.Join(dir, c.Recovery)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, c.Recovery), []byte("replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.discard(); err == nil {
+		t.Fatal("discard accepted a replacement inode")
+	}
+	captureBytes(t, dir, c.Recovery, "replacement")
 }

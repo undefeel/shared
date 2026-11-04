@@ -22,6 +22,7 @@ type capture struct {
 	parent             *os.File
 	Original, Recovery string // relative Disk paths; may be NFD
 	ops                platformFSOps
+	identity           os.FileInfo // dev/ino from the descriptor opened by take
 }
 
 func captureToken() string {
@@ -46,7 +47,7 @@ func (r *rootFS) openCapture(original, recovery string) (*capture, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &capture{p, original, recovery, platformOps()}, nil
+	return &capture{parent: p, Original: original, Recovery: recovery, ops: platformOps()}, nil
 }
 
 func (c *capture) Close() error { return c.parent.Close() }
@@ -57,7 +58,15 @@ func (c *capture) take() error {
 		return err
 	}
 	defer f.Close()
-	return c.ops.renameNoReplace(c.parent, path.Base(c.Original), c.parent, path.Base(c.Recovery))
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if err = c.ops.renameNoReplace(c.parent, path.Base(c.Original), c.parent, path.Base(c.Recovery)); err != nil {
+		return err
+	}
+	c.identity = info
+	return nil
 }
 
 // restore preserves a target created after capture, promoting the captured inode
@@ -76,6 +85,22 @@ func (c *capture) restore(peer, hash string) (string, error) {
 // discard is called only after the index is durably committed. The coordinator
 // must flush the parent afterwards, then remove and flush the transaction intent.
 func (c *capture) discard() error {
+	if c.identity == nil {
+		return fmt.Errorf("capture identity unavailable")
+	}
+	f, err := openRegularAt(c.parent, path.Base(c.Recovery), unix.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	// SameFile compares device and inode on the supported Unix platforms.
+	if !os.SameFile(c.identity, info) {
+		return fmt.Errorf("capture inode changed: %s", c.Recovery)
+	}
 	return unix.Unlinkat(int(c.parent.Fd()), path.Base(c.Recovery), 0)
 }
 
