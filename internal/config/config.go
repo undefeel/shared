@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 )
 
 const (
@@ -50,15 +52,30 @@ func Home() (string, error) {
 
 func Path(home string) string { return filepath.Join(home, "config.json") }
 
-// SocketPath возвращает путь управляющего сокета. Unix-сокеты ограничены
-// ~104 байтами, поэтому для длинных путей уходим в TMPDIR.
-func SocketPath(home string) string {
+// SocketPath возвращает путь управляющего сокета. Для длинных путей он
+// использует приватный runtime-каталог.
+func SocketPath(home string) (string, error) {
 	p := filepath.Join(home, "ctl.sock")
 	if len(p) < 100 {
-		return p
+		return p, nil
 	}
 	sum := sha256.Sum256([]byte(home))
-	return filepath.Join(os.TempDir(), "sharedir-"+hex.EncodeToString(sum[:6])+".sock")
+	base := filepath.Join(os.TempDir(), fmt.Sprintf("sharedir-%d", os.Getuid()))
+	if runtime.GOOS == "linux" && os.Getenv("XDG_RUNTIME_DIR") != "" {
+		base = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "sharedir")
+	}
+	if err := os.Mkdir(base, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("не удалось создать приватный каталог сокета %s: %w", base, err)
+	}
+	fi, err := os.Lstat(base)
+	if err != nil {
+		return "", fmt.Errorf("не удалось проверить приватный каталог сокета %s: %w", base, err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || uint32(st.Uid) != uint32(os.Getuid()) || fi.Mode().Perm()&^os.FileMode(0o700) != 0 {
+		return "", fmt.Errorf("небезопасный каталог сокета %s: требуется каталог владельца uid %d с правами не шире 0700", base, os.Getuid())
+	}
+	return filepath.Join(base, hex.EncodeToString(sum[:6])+".sock"), nil
 }
 
 func Load(home string) (*Config, error) {

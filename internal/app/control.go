@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"syscall"
 	"time"
 
 	"sharedir/internal/config"
@@ -19,18 +21,57 @@ import (
 var ErrNotRunning = errors.New("daemon is not running")
 
 func listenControl(home string) (net.Listener, error) {
-	p := config.SocketPath(home)
-	if c, err := net.DialTimeout("unix", p, time.Second); err == nil {
-		c.Close()
-		return nil, fmt.Errorf("sharedir уже запущен (%s)", p)
+	p, err := config.SocketPath(home)
+	if err != nil {
+		return nil, err
 	}
-	os.Remove(p) // остался от упавшего процесса
+	if fi, statErr := os.Lstat(p); statErr == nil {
+		if !ownedSocket(fi) {
+			return nil, fmt.Errorf("небезопасный управляющий сокет %s: владелец не совпадает с текущим пользователем", p)
+		}
+		if daemonAtSocket(p) {
+			return nil, fmt.Errorf("sharedir уже запущен (%s)", p)
+		}
+		if err := os.Remove(p); err != nil {
+			return nil, fmt.Errorf("не удалось удалить неактивный управляющий сокет %s: %w", p, err)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("не удалось проверить управляющий сокет %s: %w", p, statErr)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, err
+	}
 	ln, err := net.Listen("unix", p)
 	if err != nil {
 		return nil, err
 	}
-	os.Chmod(p, 0o600)
+	if err := os.Chmod(p, 0o600); err != nil {
+		ln.Close()
+		os.Remove(p)
+		return nil, fmt.Errorf("не удалось ограничить права управляющего сокета %s: %w", p, err)
+	}
 	return ln, nil
+}
+
+func ownedSocket(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && fi.Mode()&os.ModeSocket != 0 && fi.Mode()&os.ModeSymlink == 0 && uint32(st.Uid) == uint32(os.Getuid())
+}
+
+func daemonAtSocket(p string) bool {
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", p)
+	}}}
+	resp, err := client.Get("http://sharedir/status")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var status map[string]any
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&status) == nil && status != nil
 }
 
 type pairRequest struct {
@@ -81,10 +122,17 @@ func (d *Daemon) controlHandler() http.Handler {
 type Ctl struct{ http *http.Client }
 
 func NewCtl(home string) *Ctl {
-	p := config.SocketPath(home)
+	p, pathErr := config.SocketPath(home)
 	return &Ctl{http: &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			if pathErr != nil {
+				return nil, pathErr
+			}
+			fi, err := os.Lstat(p)
+			if err != nil || !ownedSocket(fi) {
+				return nil, fmt.Errorf("небезопасный управляющий сокет %s: владелец не совпадает с текущим пользователем", p)
+			}
 			return (&net.Dialer{}).DialContext(ctx, "unix", p)
 		}},
 	}}
