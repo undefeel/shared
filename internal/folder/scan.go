@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"reflect"
 	"strings"
 	"time"
 
@@ -54,7 +53,7 @@ func matchIgnore(patterns []string, name string) bool {
 type scanIO struct {
 	openDir  func(*rootFS, string) (*os.File, error)
 	readDir  func(*os.File) ([]os.DirEntry, error)
-	info     func(*os.File, os.DirEntry) (os.FileInfo, error)
+	info     func(*os.File, os.DirEntry) (os.FileInfo, scanStat, error)
 	openRead func(*rootFS, string) (*os.File, error)
 }
 
@@ -65,25 +64,57 @@ func (f *Folder) rootScanIO() scanIO {
 		func(r *rootFS, p string) (*os.File, error) { return r.openRead(p) }}
 }
 
-func infoAt(dir *os.File, entry os.DirEntry) (os.FileInfo, error) {
+func infoAt(dir *os.File, entry os.DirEntry) (os.FileInfo, scanStat, error) {
 	var st unix.Stat_t
 	if err := unix.Fstatat(int(dir.Fd()), entry.Name(), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return nil, err
+		return nil, scanStat{}, err
 	}
 	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
-		return nil, nil
+		return nil, scanStat{}, nil
 	}
-	flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
-	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-		flags |= unix.O_DIRECTORY
+	meta := scanStatFromSys(&st, st.Size, uint32(st.Mode))
+	return scanFileInfo{name: entry.Name(), size: st.Size, mode: fileMode(uint32(st.Mode)), mtime: time.Unix(0, meta.mtime), sys: &st}, meta, nil
+}
+
+type scanFileInfo struct {
+	name  string
+	size  int64
+	mode  os.FileMode
+	mtime time.Time
+	sys   *unix.Stat_t
+}
+
+func (i scanFileInfo) Name() string       { return i.name }
+func (i scanFileInfo) Size() int64        { return i.size }
+func (i scanFileInfo) Mode() os.FileMode  { return i.mode }
+func (i scanFileInfo) ModTime() time.Time { return i.mtime }
+func (i scanFileInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i scanFileInfo) Sys() any           { return i.sys }
+
+func fileMode(mode uint32) os.FileMode {
+	m := os.FileMode(mode & 0o777)
+	switch mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		m |= os.ModeDir
+	case unix.S_IFIFO:
+		m |= os.ModeNamedPipe
+	case unix.S_IFCHR:
+		m |= os.ModeDevice | os.ModeCharDevice
+	case unix.S_IFBLK:
+		m |= os.ModeDevice
+	case unix.S_IFSOCK:
+		m |= os.ModeSocket
 	}
-	fd, err := unix.Openat(int(dir.Fd()), entry.Name(), flags, 0)
-	if err != nil {
-		return nil, err
+	if mode&unix.S_ISUID != 0 {
+		m |= os.ModeSetuid
 	}
-	file := os.NewFile(uintptr(fd), entry.Name())
-	defer file.Close()
-	return file.Stat()
+	if mode&unix.S_ISGID != 0 {
+		m |= os.ModeSetgid
+	}
+	if mode&unix.S_ISVTX != 0 {
+		m |= os.ModeSticky
+	}
+	return m
 }
 
 func readIgnore(ioops scanIO, r *rootFS) ([]string, error) {
@@ -113,39 +144,27 @@ func readIgnore(ioops scanIO, r *rootFS) ([]string, error) {
 	return patterns, nil
 }
 
-func stableHash(file *os.File) (string, os.FileInfo, error) {
+func stableHash(file *os.File) (string, os.FileInfo, scanStat, error) {
 	before, err := file.Stat()
 	if err != nil {
-		return "", nil, err
+		return "", nil, scanStat{}, err
 	}
 	if !before.Mode().IsRegular() {
-		return "", nil, errors.New("scan: file is no longer regular")
+		return "", nil, scanStat{}, errors.New("scan: file is no longer regular")
 	}
 	h := sha256.New()
 	if _, err = io.Copy(h, file); err != nil {
-		return "", nil, err
+		return "", nil, scanStat{}, err
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return "", nil, err
+		return "", nil, scanStat{}, err
 	}
-	statField := func(info os.FileInfo, names ...string) any {
-		st := reflect.ValueOf(info.Sys()).Elem()
-		for _, name := range names {
-			if field := st.FieldByName(name); field.IsValid() {
-				return field.Interface()
-			}
-		}
-		return nil
+	meta := scanStatFromInfo(after)
+	if scanStatFromInfo(before) != meta {
+		return "", nil, scanStat{}, errors.New("scan: file changed while hashing")
 	}
-	if !reflect.DeepEqual(statField(before, "Dev"), statField(after, "Dev")) ||
-		!reflect.DeepEqual(statField(before, "Ino"), statField(after, "Ino")) ||
-		before.Size() != after.Size() || before.Mode() != after.Mode() ||
-		!before.ModTime().Equal(after.ModTime()) ||
-		!reflect.DeepEqual(statField(before, "Ctim", "Ctimespec"), statField(after, "Ctim", "Ctimespec")) {
-		return "", nil, errors.New("scan: file changed while hashing")
-	}
-	return hex.EncodeToString(h.Sum(nil)), after, nil
+	return hex.EncodeToString(h.Sum(nil)), after, meta, nil
 }
 
 func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
@@ -171,7 +190,12 @@ func (f *Folder) scanWith(ioops scanIO) error {
 			indexed[name] = true
 		}
 	}
+	cached := make(map[string]scanHashCache, len(f.hashCache))
+	for disk, entry := range f.hashCache {
+		cached[disk] = entry
+	}
 	f.mu.Unlock()
+	newCache := make(map[string]scanHashCache)
 	var walk func(string) error
 	walk = func(dir string) error {
 		d, err := ioops.openDir(r, dir)
@@ -190,7 +214,7 @@ func (f *Folder) scanWith(ioops scanIO) error {
 				disk = dir + "/" + nameOnDisk
 			}
 			name := norm.NFC.String(disk)
-			info, err := ioops.info(d, entry)
+			info, meta, err := ioops.info(d, entry)
 			if err != nil {
 				return err
 			}
@@ -215,18 +239,28 @@ func (f *Folder) scanWith(ioops scanIO) error {
 				}
 				continue
 			}
-			file, err := ioops.openRead(r, disk)
-			if err != nil {
-				return err
+			hash, stable := "", info
+			if entry, ok := cached[disk]; ok && entry.scanStat == meta {
+				hash = entry.hash
+			} else {
+				file, err := ioops.openRead(r, disk)
+				if err != nil {
+					return err
+				}
+				var stableMeta scanStat
+				hash, stable, stableMeta, err = stableHash(file)
+				closeErr := file.Close()
+				if err != nil {
+					return err
+				}
+				if closeErr != nil {
+					return closeErr
+				}
+				if stableMeta != meta {
+					return errors.New("scan: entry changed before hashing: " + disk)
+				}
 			}
-			hash, stable, hashErr := stableHash(file)
-			closeErr := file.Close()
-			if hashErr != nil {
-				return hashErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
+			newCache[disk] = scanHashCache{scanStat: meta, hash: hash}
 			fi := &FileInfo{Name: name, Size: stable.Size(), ModTime: stable.ModTime().UnixNano(), Exec: stable.Mode().Perm()&0100 != 0, Hash: hash}
 			if disk != name {
 				fi.Disk = disk
@@ -238,21 +272,20 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	if err := walk("."); err != nil {
 		return err
 	}
-	return f.commitScan(candidate, patterns)
+	return f.commitScan(candidate, patterns, newCache)
 }
 
-func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string) error {
+func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
 	f.mu.Lock()
-	oldFiles := f.files
-	oldClock := f.clock
-	oldIgnore := f.ignore
-	next := make(map[string]*FileInfo, len(oldFiles)+len(found))
-	for k, v := range oldFiles {
+	next := make(map[string]*FileInfo, len(f.files)+len(found))
+	for k, v := range f.files {
 		c := *v
 		c.Version = v.Version.Copy()
 		next[k] = &c
 	}
-	clock := oldClock
+	clock := f.clock
 	tick := func(v Vector) uint64 {
 		for _, n := range v {
 			if n > clock {
@@ -265,17 +298,12 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string) error
 	changed := 0
 	dirty := false
 	for name, fi := range found {
-		old := oldFiles[name]
+		old := f.files[name]
 		if old == nil || old.Deleted || old.Size != fi.Size || old.ModTime != fi.ModTime || old.Exec != fi.Exec || old.Hash != fi.Hash || old.Disk != fi.Disk {
 			dirty = true
 		}
 		if old != nil && !old.Deleted && old.Hash == fi.Hash && old.Exec == fi.Exec {
 			fi.Version = old.Version.Copy()
-			if old.Size == fi.Size && old.ModTime == fi.ModTime && old.Disk == fi.Disk {
-				fi.Version = old.Version.Copy()
-			} else {
-				fi.Version = old.Version.Copy()
-			}
 		} else {
 			if old != nil {
 				fi.Version = old.Version.Copy()
@@ -287,7 +315,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string) error
 		}
 		next[name] = fi
 	}
-	for name, fi := range oldFiles {
+	for name, fi := range f.files {
 		if fi.Deleted || found[name] != nil || matchIgnore(patterns, name) {
 			continue
 		}
@@ -297,23 +325,31 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string) error
 		changed++
 		dirty = true
 	}
-	// save() owns saveMu and snapshots under mu; publish only a complete candidate.
-	f.files, f.clock = next, clock
-	f.ignore = append([]string(nil), patterns...)
+	var p persisted
+	if dirty {
+		p = persisted{Generation: f.generation + 1, Clock: clock, Files: make([]*FileInfo, 0, len(next))}
+		for _, fi := range next {
+			c := *fi
+			c.Version = fi.Version.Copy()
+			p.Files = append(p.Files, &c)
+		}
+	}
 	f.mu.Unlock()
 	if dirty {
-		if err := f.save(); err != nil {
-			f.mu.Lock()
-			f.files, f.clock, f.ignore = oldFiles, oldClock, oldIgnore
-			f.mu.Unlock()
+		f.generation++
+		if err := f.persistLocked(p); err != nil {
 			return err
 		}
 	}
 	f.mu.Lock()
+	f.files, f.clock, f.ignore, f.hashCache = next, clock, append([]string(nil), patterns...), hashCache
 	if changed > 0 {
 		f.notify()
 	}
 	f.lastScan = time.Now()
 	f.mu.Unlock()
+	if changed > 0 && f.log != nil {
+		f.log.Printf("скан: локальных изменений: %d", changed)
+	}
 	return nil
 }
