@@ -196,6 +196,7 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	}
 	f.mu.Unlock()
 	newCache := make(map[string]scanHashCache)
+	canonicalDisk := make(map[string]string)
 	var walk func(string) error
 	walk = func(dir string) error {
 		d, err := ioops.openDir(r, dir)
@@ -214,6 +215,13 @@ func (f *Folder) scanWith(ioops scanIO) error {
 				disk = dir + "/" + nameOnDisk
 			}
 			name := norm.NFC.String(disk)
+			if !validName(name) {
+				return errors.New("scan: invalid canonical name: " + disk)
+			}
+			if prior, ok := canonicalDisk[name]; ok && prior != disk {
+				return errors.New("scan: canonical name collision: " + prior + " and " + disk)
+			}
+			canonicalDisk[name] = disk
 			info, meta, err := ioops.info(d, entry)
 			if err != nil {
 				return err
