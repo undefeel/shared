@@ -10,7 +10,7 @@
 ## Волна 1 — параллельно
 | ID | Задача | Находки | Уровень | Исполнитель | Файлы | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|---|---|
-| 02-01 | Проект исправлений folder + разбиение на задачи | 01-02-01…11 | L3 | sol | `plan/design/folder.md` | — | in_progress | `task_3e3493b9eff1` | `ctx_50ea3a04e925` |
+| 02-01 | Проект исправлений folder + разбиение на задачи | 01-02-01…11 | L3 | sol | `plan/design/folder.md` | — | done | `task_3e3493b9eff1` | `ctx_50ea3a04e925` |
 | 02-02 | Relay: лимиты после авторизации, гонка accept, systemd | 01-01-06, -07 | L2 | luna | `internal/relay/server.go`, тесты, `deploy/sharedir-relay.service` | — | done | `task_a9dd43701411` | `ctx_aca933a7f1fa` |
 | 02-03 | Discovery: лимит таблицы и частоты | 01-01-03 (UDP) | L2 | luna | `internal/discovery/*` | — | done | `task_a5e353dcfa14` | `ctx_2fa06cb0b7c8` |
 | 02-04 | Transport + сервер демона: отзыв доступа, таймауты, лимиты индекса и загрузки | 01-01-01, -02, -03 (incoming), -04, -05 | L3 | sol | `internal/transport/*`, `internal/app/daemon.go` (сеть), `internal/app/relay.go` | — | done | `task_ca25c330076e` | `ctx_3f0f2affa738` |
@@ -24,7 +24,7 @@
 - 02-04: каналы через relay приходят с IP VPS, поэтому лимит 16 на IP ограничивает все relay-соединения разом; `Index` читает до 512 MiB в память.
 
 ## Волна 2 — реализация folder
-Задачи 02-10… появятся из `plan/design/folder.md` (итог 02-01). Задачи, которые трогают `daemon.go` или `transport.go`, ждут 02-04. Правку README (политики) делает haiku, L1.
+Проект готов: `plan/design/folder.md`, 21 задача 02-10…02-30. **Ждёт решения владельца об объёме** (полный проект или облегчённый вариант, политика recovery-копий). Задачи, которые трогают `daemon.go` или `transport.go`, ждут 02-04. Правку README (политики) делает haiku, L1.
 
 Ревью кода: L1–L2 — luna-low, L3 — luna high, только чтение.
 
