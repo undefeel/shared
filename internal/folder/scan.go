@@ -173,6 +173,11 @@ func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
 func (f *Folder) scanWith(ioops scanIO) error {
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
+	// The persistent latch is checked before opening or walking the root. A
+	// returning mount or a successful later scan cannot implicitly confirm it.
+	if err := f.guardRoot(); err != nil {
+		return err
+	}
 	r, err := openRootFS(f.Root)
 	if err != nil {
 		return err
@@ -279,6 +284,17 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	}
 	if err := walk("."); err != nil {
 		return err
+	}
+	// Recheck after the complete walk so a root replacement during scanning
+	// cannot publish a candidate collected from a stale directory descriptor.
+	if err := f.guardRoot(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	hasIndexedEntries := len(f.files) != 0 // tombstones also require confirmation
+	f.mu.Unlock()
+	if len(candidate) == 0 && hasIndexedEntries {
+		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
 	}
 	return f.commitScan(candidate, patterns, newCache)
 }
