@@ -21,6 +21,7 @@ git add plan && git commit -qm "plan: $ID done
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 git push -q origin HEAD:main 2>/dev/null || git -c credential.helper="!gh auth git-credential" push -q https://github.com/undefeel/shared.git HEAD:main || echo "ВНИМАНИЕ: push не прошёл"
 git -C "$MAIN_CO" merge -q --ff-only "$(git branch --show-current)"
+git update-ref refs/remotes/origin/main HEAD  # база для новых worktree Orca
 for ds in "$@"; do orca orchestration worker-release --dispatch "$ds" 2>&1 | tail -1; done
 orca worktree rm --worktree "path:$WT" 2>&1 | tail -1
 git branch -d "$BR"
