@@ -22,10 +22,16 @@ func TestPeerQueueFailureDoesNotRepeatAcceptedIndex(t *testing.T) {
 	if !q.accept("p", "epoch", 64, false, files) {
 		t.Fatal("index not accepted")
 	}
+	if q.canPoll("p") {
+		t.Fatal("poll allowed while the accepted index still has queued work")
+	}
 	failed := files[17]
 	q.failed("p", "epoch", failed, now)
 	if _, _, ok := q.cursor("p"); ok {
 		t.Fatal("cursor advanced before queued records were applied")
+	}
+	if q.canPoll("p") {
+		t.Fatal("poll allowed during retry backoff for an already accepted index")
 	}
 	if got := q.due("p", now, 0); len(got) != 63 {
 		t.Fatalf("immediately due = %d, want 63", len(got))
@@ -179,5 +185,23 @@ func TestPeerQueueContinuationUsesNewerVector(t *testing.T) {
 	q.applied("p", "epoch", last[0])
 	if _, cursor, ok := q.cursor("p"); !ok || cursor != 12 {
 		t.Fatalf("cursor after newer vector continuation = %d/%v", cursor, ok)
+	}
+}
+
+func TestPeerQueueEpochChangeClearsOldCursor(t *testing.T) {
+	q := newPeerQueue()
+	old := queueInfo("old", 1)
+	if !q.accept("p", "epoch-1", 1, false, []folder.FileInfo{old}) {
+		t.Fatal("old epoch index not accepted")
+	}
+	q.applied("p", "epoch-1", old)
+	if _, _, ok := q.cursor("p"); !ok {
+		t.Fatal("old epoch cursor was not recorded")
+	}
+	if !q.accept("p", "epoch-2", 1, false, []folder.FileInfo{queueInfo("new", 1)}) {
+		t.Fatal("new epoch index not accepted")
+	}
+	if _, _, ok := q.cursor("p"); ok {
+		t.Fatal("stale cursor remained visible before the new epoch was applied")
 	}
 }

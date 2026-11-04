@@ -78,21 +78,14 @@ func (q *peerQueue) accept(peer, epoch string, cursor uint64, reset bool, files 
 		}
 		delete(q.blocked, peer)
 		delete(q.indexes, peer)
+		delete(q.cursors, peer)
 		haveIndex = false
 	}
 	// A reset bit can accompany a retry. Only a changed epoch or cursor starts
 	// a new index continuation.
 	newIndex := !haveIndex || index.epoch != epoch || index.cursor != cursor
 	if newIndex {
-		records := make(map[string]peerIndexRecord)
-		if haveIndex {
-			for name, record := range index.records {
-				if !record.done {
-					records[name] = record
-				}
-			}
-		}
-		index = peerIndex{epoch: epoch, cursor: cursor, records: records}
+		index = peerIndex{epoch: epoch, cursor: cursor, records: make(map[string]peerIndexRecord)}
 	}
 	left := false
 	for _, fi := range files {
@@ -241,5 +234,28 @@ func (q *peerQueue) cursor(peer string) (epoch string, cursor uint64, ok bool) {
 func (q *peerQueue) canPoll(peer string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return !q.blocked[peer] && len(q.pending) < peerPendingLimit
+	if q.blocked[peer] || len(q.pending) >= peerPendingLimit {
+		return false
+	}
+	index, exists := q.indexes[peer]
+	if !exists {
+		return true
+	}
+	for name, record := range index.records {
+		if record.done {
+			continue
+		}
+		if _, queued := q.pending[peerItemKey{peer: peer, epoch: index.epoch, name: name}]; !queued {
+			// The same index still has a suffix that has not entered the queue.
+			return true
+		}
+	}
+	// All records are queued or complete. Waiting for application/backoff here
+	// avoids repeatedly fetching the same index while work is already pending.
+	for _, record := range index.records {
+		if !record.done {
+			return false
+		}
+	}
+	return true
 }
