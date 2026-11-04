@@ -64,6 +64,20 @@ func (f *Folder) DrainApply() {
 	f.applyMu.Unlock()
 }
 
+// PendingApplyCount reports ready operations waiting for the next durable
+// group, for lifecycle diagnostics and deterministic drain tests.
+func (f *Folder) PendingApplyCount() int {
+	f.applyMu.Lock()
+	c := f.applyCoordinator
+	f.applyMu.Unlock()
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pending)
+}
+
 func (f *Folder) applyGroup(requests []*groupRequest) error {
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()

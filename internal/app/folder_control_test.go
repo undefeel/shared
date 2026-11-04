@@ -221,6 +221,40 @@ func TestStopFolderCancelsAndDrainsBlockedDownload(t *testing.T) {
 	}
 }
 
+func TestPauseDrainsReadyCoordinatorGroup(t *testing.T) {
+	d := folderDaemon(t)
+	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	doneRunner := make(chan struct{})
+	d.peers["peer"] = &peerRunner{cancel: cancel, done: doneRunner, st: PeerStatus{ID: "peer"}}
+	body := []byte("ready-group-body")
+	hash := sha256.Sum256(body)
+	d.workers.Add(1)
+	go func() {
+		defer d.workers.Done()
+		defer close(doneRunner)
+		_, _ = d.folder.ApplyRemote(ctx, "peer", []folder.FileInfo{{Name: "paused-ready", Size: int64(len(body)), Hash: hex.EncodeToString(hash[:]), Version: folder.Vector{"peer": 1}}}, func(_ context.Context, _ folder.FileInfo, w io.Writer) error {
+			_, err := w.Write(body)
+			return err
+		}, nil)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.folder.PendingApplyCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("ready group was not queued at coordinator")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := d.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(d.Config().Folder, "paused-ready")); !os.IsNotExist(err) {
+		t.Fatalf("ready group mutated folder after pause: %v", err)
+	}
+}
+
 func TestUnpairWaitsForRunnerDrainWithoutDaemonLock(t *testing.T) {
 	d := folderDaemon(t)
 	id := d.ID.ID
