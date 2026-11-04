@@ -333,7 +333,8 @@ func decodeIndex(out *IndexResponse, r io.Reader) error {
 		case "files":
 			out.Files, err = decodeFiles(d)
 		default:
-			err = skipJSONValue(d)
+			var ignored json.RawMessage
+			err = d.Decode(&ignored)
 		}
 		if err != nil {
 			return err
@@ -364,9 +365,12 @@ func decodeFiles(d *json.Decoder) ([]folder.FileInfo, error) {
 	}
 	files := make([]folder.FileInfo, 0)
 	for d.More() {
-		fi, err := decodeFileInfo(d)
-		if err != nil {
+		var fi folder.FileInfo
+		if err := d.Decode(&fi); err != nil {
 			return nil, err
+		}
+		if len(fi.Name) > 4096 || len(fi.Version) > 64 {
+			return nil, invalidIndexRecord(fi.Name)
 		}
 		files = append(files, fi)
 	}
@@ -374,139 +378,8 @@ func decodeFiles(d *json.Decoder) ([]folder.FileInfo, error) {
 	return files, err
 }
 
-func decodeFileInfo(d *json.Decoder) (folder.FileInfo, error) {
-	var fi folder.FileInfo
-	tok, err := d.Token()
-	if err != nil {
-		return fi, err
-	}
-	if tok != json.Delim('{') {
-		return fi, errors.New("invalid index record: expected object")
-	}
-	for d.More() {
-		tok, err = d.Token()
-		if err != nil {
-			return fi, err
-		}
-		key, ok := tok.(string)
-		if !ok {
-			return fi, errors.New("invalid index record field")
-		}
-		switch strings.ToLower(key) {
-		case "name":
-			err = d.Decode(&fi.Name)
-		case "size":
-			err = d.Decode(&fi.Size)
-		case "mtime":
-			err = d.Decode(&fi.ModTime)
-		case "exec":
-			err = d.Decode(&fi.Exec)
-		case "hash":
-			err = d.Decode(&fi.Hash)
-		case "deleted":
-			err = d.Decode(&fi.Deleted)
-		case "disk":
-			err = d.Decode(&fi.Disk)
-		case "version":
-			fi.Version, err = decodeVersion(d, fi.Name)
-		default:
-			err = skipJSONValue(d)
-		}
-		if err != nil {
-			return fi, err
-		}
-		if len(fi.Name) > 4096 {
-			return fi, invalidIndexRecord(fi.Name)
-		}
-	}
-	_, err = d.Token()
-	if err == nil && len(fi.Version) > 64 {
-		err = invalidIndexRecord(fi.Name)
-	}
-	return fi, err
-}
-
-func decodeVersion(d *json.Decoder, name string) (folder.Vector, error) {
-	tok, err := d.Token()
-	if err != nil {
-		return nil, err
-	}
-	if tok != json.Delim('{') {
-		return nil, errors.New("invalid index version: expected object")
-	}
-	v := make(folder.Vector)
-	count := 0
-	for d.More() {
-		if count == 64 {
-			return nil, invalidIndexRecord(name)
-		}
-		tok, err = d.Token()
-		if err != nil {
-			return nil, err
-		}
-		key, ok := tok.(string)
-		if !ok {
-			return nil, errors.New("invalid index version key")
-		}
-		var clock uint64
-		if err := d.Decode(&clock); err != nil {
-			return nil, err
-		}
-		v[key] = clock
-		count++
-	}
-	_, err = d.Token()
-	return v, err
-}
-
 func invalidIndexRecord(name string) error {
 	return fmt.Errorf("invalid index record %q: name or version exceeds limit", name[:min(len(name), 80)])
-}
-
-func skipJSONValue(d *json.Decoder) error {
-	tok, err := d.Token()
-	if err != nil {
-		return err
-	}
-	return skipValueToken(d, tok)
-}
-
-func skipValueToken(d *json.Decoder, tok json.Token) error {
-	delim, ok := tok.(json.Delim)
-	if !ok {
-		return nil
-	}
-	var close json.Delim
-	switch delim {
-	case '{':
-		close = '}'
-	case '[':
-		close = ']'
-	default:
-		return errors.New("invalid JSON value")
-	}
-	for d.More() {
-		if delim == '{' {
-			if _, err := d.Token(); err != nil {
-				return err
-			}
-		}
-		value, err := d.Token()
-		if err != nil {
-			return err
-		}
-		if err := skipValueToken(d, value); err != nil {
-			return err
-		}
-	}
-	end, err := d.Token()
-	if err != nil {
-		return err
-	}
-	if end != close {
-		return errors.New("invalid JSON value")
-	}
-	return nil
 }
 
 // Fetcher возвращает загрузчик файлов с пира по адресу addr.
