@@ -34,7 +34,7 @@
 | 02-14 | canonical names и коллизии | L2 | luna | 02-12, 02-13 | done | `task_ff16ffc13a96` | `ctx_3c0f5597b545` |
 | 02-15 | binding, latch и миграция | L3 | sol | 02-14 | done | `task_b282941a5c41` | `ctx_1d56dcc9b099` |
 | 02-16 | барьер корня в Scan | L2 | luna | 02-15 | in_progress | `task_95fcc8bb5687` | `ctx_c46b97ebf731` |
-| 02-17 | capture и уникальные conflicts | L3 | sol | 02-11, 02-15 | in_progress | `task_efec4aa7296e` | `ctx_63d520c09566` |
+| 02-17 | capture и уникальные conflicts | L3 | sol | 02-11, 02-15 | done | `task_efec4aa7296e` | `ctx_63d520c09566` |
 | 02-18 | intent и recovery | L3 | sol | 02-12, 02-15, 02-17 | todo | `task_f9e9cd0474af` | |
 | 02-19 | commit coordinator | L3 | sol | 02-16, 02-18 | todo | `task_b28f3827a7bf` | |
 | 02-20 | повторное решение и применение | L3 | sol | 02-14, 02-16, 02-19 | todo | `task_4f09f0705869` | |
