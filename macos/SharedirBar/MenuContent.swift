@@ -236,10 +236,11 @@ private struct PeerRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(peer.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                    link
                     Spacer(minLength: 4)
                     trailing(progress)
                 }
-                Text(subtitle(progress)).font(.system(size: 11)).foregroundStyle(secondaryColor).lineLimit(1)
+                Text(status(progress)).font(.system(size: 11)).foregroundStyle(secondaryColor).lineLimit(1)
                 // Полоска есть всегда, как в Omarchy: синяя — идёт приём,
                 // серая полная — всё актуально, серая частичная — пауза, пустая — нет связи.
                 ProgressView(value: progress?.fraction ?? (peer.connected && peer.isSynced ? 1 : 0))
@@ -262,11 +263,30 @@ private struct PeerRow: View {
         }
     }
 
-    private func subtitle(_ progress: DaemonStatus.Progress?) -> String {
-        let text = status(progress)
-        // Связь через relay медленнее прямой — пусть это будет видно.
-        guard peer.connected, peer.addr == "relay" else { return text }
-        return L("%@ · via relay", text)
+    /// Как идёт связь: напрямую (с IP) или через relay. Через relay медленнее —
+    /// эта подпись темнее, чтобы бросалась в глаза.
+    @ViewBuilder
+    private var link: some View {
+        if peer.connected, let addr = peer.addr, !addr.isEmpty {
+            let relay = addr == "relay"
+            HStack(spacing: 3) {
+                Image(systemName: relay ? "cloud" : "arrow.left.and.right")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(relay ? L("via relay") : L("direct") + " · " + Self.host(addr))
+                    .lineLimit(1)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(relay ? labelColor : secondaryColor)
+            .help(relay ? L("Connected through the relay server") : L("Connected directly on the local network"))
+        }
+    }
+
+    /// «192.168.0.17:22100» → «192.168.0.17», «[fe80::1]:22100» → «fe80::1».
+    static func host(_ addr: String) -> String {
+        if let url = URLComponents(string: "tcp://" + addr), let h = url.host, !h.isEmpty {
+            return h.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        }
+        return addr
     }
 
     private func status(_ progress: DaemonStatus.Progress?) -> String {

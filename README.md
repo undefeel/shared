@@ -135,9 +135,8 @@ sharedir relay use "$(ssh root@VPS cat /root/sharedir-relay-url.txt)"
 sharedir status    # «relay … connected», у пира вне LAN — адрес relay
 ```
 
-`sharedir relay off` отключает relay. В приложении macOS у пира, связанного через relay,
-стоит пометка «через relay»; в виджете Omarchy у каждого пира на связи видно, как идёт связь:
-«напрямую · IP» или «через relay». С relay на прямую связь демон переходит сразу, как только
+`sharedir relay off` отключает relay. В приложении macOS и в виджете Omarchy у каждого пира
+на связи видно, как идёт связь: «напрямую · IP» или «через relay». С relay на прямую связь демон переходит сразу, как только
 увидит пира в локальной сети.
 
 ## Команды
