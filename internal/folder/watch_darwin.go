@@ -7,22 +7,26 @@ import (
 	"github.com/fsnotify/fsevents"
 )
 
-// Watch вызывает onChange при любых изменениях в папке. На macOS используется
-// FSEvents: один поток на всё дерево, без дескриптора на каждый файл.
-func (f *Folder) Watch(ctx context.Context, onChange func()) error {
+// Watch вызывает onChange при любых изменениях в папке. stop отменяет
+// подписку, done закрывается после Stop для нативного FSEvents stream.
+// На macOS FSEvents использует один поток на всё дерево.
+func (f *Folder) Watch(ctx context.Context, onChange func()) (func(), <-chan struct{}, error) {
 	es := &fsevents.EventStream{
 		Paths:   []string{f.Root},
 		Latency: 300 * time.Millisecond,
 		Flags:   fsevents.FileEvents | fsevents.WatchRoot,
 	}
 	if err := es.Start(); err != nil {
-		return err
+		return nil, nil, err
 	}
+	watchCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer es.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-watchCtx.Done():
 				return
 			case events, ok := <-es.Events:
 				if !ok {
@@ -37,7 +41,7 @@ func (f *Folder) Watch(ctx context.Context, onChange func()) error {
 			}
 		}
 	}()
-	return nil
+	return stop, done, nil
 }
 
 func notifyWatchError(_ error, onChange func()) { onChange() }

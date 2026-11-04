@@ -9,13 +9,16 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// Watch вызывает onChange при любых изменениях в папке. inotify не умеет
-// рекурсию, поэтому подписываемся на каждый каталог, включая новые.
-func (f *Folder) Watch(ctx context.Context, onChange func()) error {
+// Watch вызывает onChange при изменениях в дереве. stop отменяет подписку,
+// done закрывается после фактического закрытия fsnotify watcher. inotify не
+// умеет рекурсию, поэтому подписываемся на каждый каталог, включая новые.
+func (f *Folder) Watch(ctx context.Context, onChange func()) (func(), <-chan struct{}, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
+	watchCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
 	root := filepath.Clean(f.Root)
 	// Watching the parent catches rename/remove/replacement of the root itself;
 	// the root watch remains pinned to the original inode.
@@ -42,10 +45,11 @@ func (f *Folder) Watch(ctx context.Context, onChange func()) error {
 	}
 	addTree(f.Root)
 	go func() {
+		defer close(done)
 		defer w.Close()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-watchCtx.Done():
 				return
 			case ev, ok := <-w.Events:
 				if !ok {
@@ -66,7 +70,7 @@ func (f *Folder) Watch(ctx context.Context, onChange func()) error {
 			}
 		}
 	}()
-	return nil
+	return stop, done, nil
 }
 
 func notifyWatchError(_ error, onChange func()) { onChange() }

@@ -32,26 +32,27 @@ func waitWatch(t *testing.T, ch <-chan struct{}) {
 	}
 }
 
-func startTestWatch(t *testing.T, f *Folder) (context.CancelFunc, <-chan struct{}) {
+func startTestWatch(t *testing.T, f *Folder) (func(), <-chan struct{}, <-chan struct{}) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan struct{}, 32)
-	if err := f.Watch(ctx, func() {
+	stop, done, err := f.Watch(ctx, func() {
 		select {
 		case events <- struct{}{}:
 		default:
 		}
-	}); err != nil {
+	})
+	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
-	t.Cleanup(cancel)
-	return cancel, events
+	t.Cleanup(func() { stop(); <-done; cancel() })
+	return stop, done, events
 }
 
 func TestWatchRootReplacementSignalsChange(t *testing.T) {
 	f := watchFixture(t)
-	_, events := startTestWatch(t, f)
+	_, _, events := startTestWatch(t, f)
 	old := f.Root + ".old"
 	if err := os.Rename(f.Root, old); err != nil {
 		t.Fatal(err)
@@ -67,7 +68,7 @@ func TestWatchRootReplacementSignalsChange(t *testing.T) {
 
 func TestWatchEventDuringScanIsRetainedForFullScan(t *testing.T) {
 	f := watchFixture(t)
-	_, events := startTestWatch(t, f)
+	_, _, events := startTestWatch(t, f)
 	f.scanMu.Lock()
 	if err := os.WriteFile(filepath.Join(f.Root, "during-scan"), []byte("x"), 0644); err != nil {
 		f.scanMu.Unlock()
@@ -85,7 +86,8 @@ func TestWatchEventDuringScanIsRetainedForFullScan(t *testing.T) {
 
 func TestWatchRebindUsesNewRootSubscription(t *testing.T) {
 	f := watchFixture(t)
-	oldCancel, _ := startTestWatch(t, f)
+	oldRoot := f.Root
+	oldStop, oldDone, oldEvents := startTestWatch(t, f)
 	if err := f.blockRoot("root_changed", "test rebind"); err == nil {
 		t.Fatal("expected blocked root")
 	}
@@ -94,11 +96,30 @@ func TestWatchRebindUsesNewRootSubscription(t *testing.T) {
 	if err := os.Mkdir(newRoot, 0755); err != nil {
 		t.Fatal(err)
 	}
-	oldCancel()
+	oldStop()
+	<-oldDone
+	for {
+		select {
+		case <-oldEvents:
+		default:
+			goto oldDrained
+		}
+	}
+oldDrained:
 	if err := f.Confirm(blocked.Token, "rebind", newRoot); err != nil {
 		t.Fatal(err)
 	}
-	_, events := startTestWatch(t, f)
+	_, _, events := startTestWatch(t, f)
+	if err := os.WriteFile(filepath.Join(oldRoot, "old-tree-write"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-events:
+		t.Fatal("new watcher observed an old-tree event after rebind")
+	case <-oldEvents:
+		t.Fatal("closed watcher delivered an old-tree event after rebind")
+	case <-time.After(300 * time.Millisecond):
+	}
 	if err := os.WriteFile(filepath.Join(newRoot, "new-file"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +136,7 @@ func TestWatchDoesNotObserveExternalTreeThroughSymlink(t *testing.T) {
 	if err := os.Symlink(external, link); err != nil {
 		t.Fatal(err)
 	}
-	_, events := startTestWatch(t, f)
+	_, _, events := startTestWatch(t, f)
 	// Drain the event for creating the link before writing in the target.
 	time.Sleep(100 * time.Millisecond)
 	for {
