@@ -42,6 +42,9 @@ var ru = map[string]string{
 	"other":   "Прочее",
 
 	// sharedir status.
+	"Folder is blocked": "Папка остановлена",
+	"Confirm with: sharedir folder-confirm --action reset|rebind --token %s": "Подтвердите: sharedir folder-confirm --action reset|rebind --token %s",
+	"Last scan failed (%s): %s":                  "Последний скан не удался (%s): %s — локальные изменения не отправляются",
 	"Sync is paused (sharedir resume)":           "⏸  синхронизация на паузе (sharedir resume)",
 	"Folder: %s (%d files, %.1f MB)":             "Папка: %s (%d файлов, %.1f МБ)",
 	"Paired devices:":                            "Сопряжённые устройства:",

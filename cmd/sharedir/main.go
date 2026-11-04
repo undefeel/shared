@@ -194,6 +194,9 @@ func cmdStatus(home string, args []string) error {
 		fmt.Printf("⚠️  %s: %s\n", i18n.T("Folder is blocked"), st.FolderError.Message)
 		fmt.Printf("   %s\n", i18n.T("Confirm with: sharedir folder-confirm --action reset|rebind --token %s", st.FolderError.Token))
 	}
+	if st.ScanError != nil {
+		fmt.Printf("⚠️  %s\n", i18n.T("Last scan failed (%s): %s", st.ScanError.Path, st.ScanError.Message))
+	}
 	if st.Paused {
 		fmt.Println(i18n.T("Sync is paused (sharedir resume)"))
 	}
