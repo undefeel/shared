@@ -49,6 +49,8 @@ var ru = {
   "Sync is paused": "Синхронизация остановлена",
   "Paused on that device": "На паузе на том устройстве",
   "%1 files failed, retrying": "Не удалось файлов: %1, повтор",
+  "direct": "напрямую",
+  "via relay": "через relay",
 
   // Сопряжение
   "Incoming connection": "Входящее подключение",
@@ -156,6 +158,13 @@ function peerCaption(language, peer) {
   case "retry": return t(language, "%1 files failed, retrying", [peer.failed || 0])
   default: return ""
   }
+}
+
+// Как идёт связь с пиром: напрямую (с IP) или через relay. Пусто — нет связи.
+function peerLink(language, peer) {
+  if (!peer.connected || !peer.addr) return ""
+  if (peer.addr === "relay") return t(language, "via relay")
+  return t(language, "direct") + " · " + String(peer.addr).replace(/:\d+$/, "").replace(/^\[|\]$/g, "")
 }
 
 function prettyId(id) {

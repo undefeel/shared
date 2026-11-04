@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"sharedir/internal/identity"
 )
 
 const (
@@ -29,6 +31,10 @@ type Announcement struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Port  int    `json:"port"`
+	// Ask — «ответьте сразу»: шлётся при старте, чтобы найти соседей за
+	// секунду, а не ждать их планового анонса (до interval). Старые версии
+	// поле игнорируют.
+	Ask bool `json:"ask,omitempty"`
 }
 
 type Device struct {
@@ -43,12 +49,15 @@ type Discovery struct {
 	port int
 	self Announcement
 	log  *log.Logger
+	// onSeen вызывается, когда устройство появилось в сети: впервые, после
+	// пропажи дольше ttl или на новом адресе. Вызывается вне блокировки.
+	onSeen func(Device)
 
 	mu      sync.Mutex
 	devices map[string]Device
 }
 
-func Start(ctx context.Context, port int, self Announcement, logger *log.Logger) (*Discovery, error) {
+func Start(ctx context.Context, port int, self Announcement, logger *log.Logger, onSeen func(Device)) (*Discovery, error) {
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		var serr error
 		c.Control(func(fd uintptr) {
@@ -69,7 +78,7 @@ func Start(ctx context.Context, port int, self Announcement, logger *log.Logger)
 		return nil, err
 	}
 	self.Magic = magic
-	d := &Discovery{conn: pc.(*net.UDPConn), port: port, self: self, log: logger, devices: map[string]Device{}}
+	d := &Discovery{conn: pc.(*net.UDPConn), port: port, self: self, log: logger, onSeen: onSeen, devices: map[string]Device{}}
 	go d.recvLoop()
 	go d.sendLoop(ctx)
 	go func() { <-ctx.Done(); d.conn.Close() }()
@@ -107,13 +116,15 @@ func broadcastAddrs() []net.IP {
 	return out
 }
 
-func (d *Discovery) packet() []byte {
-	b, _ := json.Marshal(d.self)
+func (d *Discovery) packet(ask bool) []byte {
+	a := d.self
+	a.Ask = ask
+	b, _ := json.Marshal(a)
 	return b
 }
 
-func (d *Discovery) announce() {
-	pkt := d.packet()
+func (d *Discovery) announce(ask bool) {
+	pkt := d.packet(ask)
 	for _, ip := range broadcastAddrs() {
 		d.conn.WriteToUDP(pkt, &net.UDPAddr{IP: ip, Port: d.port})
 	}
@@ -122,8 +133,10 @@ func (d *Discovery) announce() {
 func (d *Discovery) sendLoop(ctx context.Context) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	ask := true
 	for {
-		d.announce()
+		d.announce(ask)
+		ask = false
 		select {
 		case <-ctx.Done():
 			return
@@ -140,20 +153,29 @@ func (d *Discovery) recvLoop() {
 			return
 		}
 		var a Announcement
-		if json.Unmarshal(buf[:n], &a) != nil || a.Magic != magic || a.ID == d.self.ID || a.Port <= 0 {
+		if json.Unmarshal(buf[:n], &a) != nil || a.Magic != magic || a.ID == d.self.ID || a.Port <= 0 || a.Port > 65535 {
+			continue
+		}
+		// Пакет может прислать кто угодно в сети: принимаем только канонический ID.
+		if id, err := identity.Normalize(a.ID); err != nil || id != a.ID {
 			continue
 		}
 		addr := net.JoinHostPort(src.IP.String(), strconv.Itoa(a.Port))
 		d.mu.Lock()
 		prev, known := d.devices[a.ID]
-		d.devices[a.ID] = Device{ID: a.ID, Name: a.Name, Addr: addr, LastSeen: time.Now()}
+		dev := Device{ID: a.ID, Name: a.Name, Addr: addr, LastSeen: time.Now()}
+		d.devices[a.ID] = dev
 		d.mu.Unlock()
 		if !known || prev.Addr != addr {
-			d.log.Printf("обнаружено устройство %q (%s) на %s", a.Name, a.ID[:7], addr)
+			d.log.Printf("обнаружено устройство %q (%s) на %s", a.Name, identity.ShortID(a.ID), addr)
 		}
-		// Новому соседу отвечаем сразу, не дожидаясь своего таймера.
-		if !known || time.Since(prev.LastSeen) > interval {
-			d.conn.WriteToUDP(d.packet(), &net.UDPAddr{IP: src.IP, Port: d.port})
+		if d.onSeen != nil && (!known || prev.Addr != addr || time.Since(prev.LastSeen) > ttl) {
+			d.onSeen(dev)
+		}
+		// Новому соседу или тому, кто просит, отвечаем сразу, не дожидаясь
+		// своего таймера. Ответ без Ask, так что пинг-понга не будет.
+		if a.Ask || !known || time.Since(prev.LastSeen) > interval {
+			d.conn.WriteToUDP(d.packet(false), &net.UDPAddr{IP: src.IP, Port: d.port})
 		}
 	}
 }

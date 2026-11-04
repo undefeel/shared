@@ -85,6 +85,7 @@ type Status struct {
 
 type peerRunner struct {
 	cancel context.CancelFunc // nil, пока синхронизация на паузе
+	lan    chan struct{}      // пир появился в LAN: пора уходить с relay
 	mu     sync.Mutex
 	st     PeerStatus
 }
@@ -185,7 +186,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.Log.Printf("слушаю TCP :%d", cfg.Port)
 
 	if cfg.Discovery {
-		d.disc, err = discovery.Start(ctx, cfg.DiscoveryPort, discovery.Announcement{ID: d.ID.ID, Name: cfg.Name, Port: cfg.Port}, d.Log)
+		d.disc, err = discovery.Start(ctx, cfg.DiscoveryPort, discovery.Announcement{ID: d.ID.ID, Name: cfg.Name, Port: cfg.Port}, d.Log, d.peerOnLAN)
 		if err != nil {
 			d.Log.Printf("обнаружение в LAN отключено: %v", err)
 		}
@@ -322,7 +323,7 @@ func (d *Daemon) syncPeers() {
 	for id, p := range want {
 		pr, ok := d.peers[id]
 		if !ok {
-			pr = &peerRunner{st: PeerStatus{ID: id, Name: p.Name, State: StateSearching}}
+			pr = &peerRunner{lan: make(chan struct{}, 1), st: PeerStatus{ID: id, Name: p.Name, State: StateSearching}}
 			d.peers[id] = pr
 			delete(d.incoming, id)
 		}
@@ -394,6 +395,22 @@ func (d *Daemon) addrs(id string) []string {
 	return out
 }
 
+// peerOnLAN — discovery увидел устройство в сети. Если с ним сейчас висит
+// long-poll через relay, runPeer прервёт его и сразу перейдёт на прямую связь,
+// не дожидаясь ответа пира (до pollTimeout).
+func (d *Daemon) peerOnLAN(dev discovery.Device) {
+	d.mu.Lock()
+	pr := d.peers[dev.ID]
+	d.mu.Unlock()
+	if pr == nil {
+		return
+	}
+	select {
+	case pr.lan <- struct{}{}:
+	default:
+	}
+}
+
 func sleepCtx(ctx context.Context, d time.Duration) {
 	select {
 	case <-ctx.Done():
@@ -423,7 +440,29 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			attempt++
 		}
 
-		idx, err := client.Index(ctx, addr, since)
+		// Через relay long-poll прерываем, как только пир появится в LAN.
+		pollCtx, stopPoll := ctx, func() {}
+		if addr == transport.RelayHost {
+			var cancel context.CancelFunc
+			pollCtx, cancel = context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-pr.lan:
+					cancel()
+				case <-done:
+				}
+			}()
+			stopPoll = func() { close(done); cancel() }
+		}
+		idx, err := client.Index(pollCtx, addr, since)
+		toLAN := err != nil && pollCtx.Err() != nil && ctx.Err() == nil
+		stopPoll()
+		if toLAN {
+			d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", pr.name())
+			addr, since, attempt = "", 0, 0
+			continue
+		}
 		if errors.Is(err, transport.ErrPeerPaused) {
 			pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = true, addr, StatePeerPaused })
 			d.changed()
@@ -449,7 +488,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		}
 
 		pr.mu.Lock()
-		if !pr.st.Connected {
+		if !pr.st.Connected || pr.st.Addr != addr {
 			d.Log.Printf("%s: подключено к %s", pr.st.Name, addr)
 		}
 		pr.st.Connected, pr.st.Addr = true, addr

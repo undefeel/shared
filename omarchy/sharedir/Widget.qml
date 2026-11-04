@@ -431,9 +431,23 @@ Panel {
         : (peer.state === "synced" ? 1 : 0)
     }
 
-    Caption {
+    Item {
       width: parent.width
-      text: S.peerCaption(root.lang, peer)
+      implicitHeight: peerCaption.implicitHeight
+      Caption {
+        id: peerCaption
+        width: parent.width - (peerLink.text !== "" ? peerLink.implicitWidth + Style.space(8) : 0)
+        text: S.peerCaption(root.lang, peer)
+      }
+      // Тип связи: через relay медленнее, пусть это будет видно.
+      Caption {
+        id: peerLink
+        anchors.right: parent.right
+        anchors.baseline: peerCaption.baseline
+        text: S.peerLink(root.lang, peer)
+        color: peer.addr === "relay" ? root.foreground : root.dim
+        elide: Text.ElideNone
+      }
     }
   }
 
