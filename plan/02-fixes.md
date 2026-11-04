@@ -43,7 +43,7 @@
 | 02-23 | безопасная выдача /file | L3 | sol | 02-19, 02-22 | done | `task_a00a59d21e3f` | `ctx_fb7d634b252d` |
 | 02-24 | интеграция остановки демона и control | L3 | sol | 02-16, 02-20, 02-23 | done | `task_b26f087a7d18` | `ctx_8919cfefb2f1` |
 | 02-25 | watcher после rebind | L2 | luna | 02-24 | done | `task_2edf2066053f` | `ctx_b44e8eb6d5a7` |
-| 02-26 | CLI подтверждения | L1 | antigravity | 02-24 | in_progress | `task_b276f2e4ca2a` | `ctx_4fd6990a24df` |
+| 02-26 | CLI подтверждения | L1 | antigravity | 02-24 | review | `task_b276f2e4ca2a` | `ctx_4fd6990a24df` |
 | 02-27 | macOS меню | L2 | luna | 02-24 | in_progress | `task_79b6ee2d8284` | `ctx_77640c0ab8b9` |
 | 02-28 | Omarchy виджет | L2 | luna | 02-26 | todo | `task_2e483d867673` | |
 | 02-29 | фиксация политики README | L1 | haiku | 02-21, 02-24, 02-26 | todo | `task_56f08d93d87a` | |
