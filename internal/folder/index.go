@@ -16,6 +16,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"golang.org/x/sys/unix"
 	"time"
 )
 
@@ -164,6 +167,8 @@ type Folder struct {
 }
 
 type persistHooks struct {
+	probe    PersistenceProbe
+	counters PersistenceCounters
 	marshal  func(any) ([]byte, error)
 	rename   func(string, string) error
 	syncFile func(*os.File) error
@@ -402,4 +407,117 @@ func (f *Folder) Stats() Stats {
 	}
 	sort.Slice(s.Kinds, func(i, j int) bool { return s.Kinds[i].Bytes > s.Kinds[j].Bytes })
 	return s
+}
+
+// PersistenceProbe is installed before concurrent Folder use. Callbacks must be
+// concurrency-safe and must not reenter Folder. Nil callbacks leave I/O intact.
+// Flush observes each attempted syscall separately; Fault can fail that attempt.
+// Write observes actual returned bytes, including short writes and failures.
+type PersistenceProbe struct {
+	Write    func(kind, path string, n int, err error)
+	Flush    func(kind, phase string, dev, inode uint64)
+	Fault    func(kind, phase string, dev, inode uint64) error
+	Phase    func(txID, phase string)
+	ClockNow func() time.Time
+}
+
+// PersistenceCounters counts syscall attempts and actual returned write bytes.
+// Linux has no FULLFSYNC attempt; counters never count a synthetic flush there.
+type PersistenceCounters struct{ Bytes, Fsync, Fullfsync, Barrierfsync uint64 }
+
+func (f *Folder) SetPersistenceProbe(p PersistenceProbe) { f.persistHooks.probe = p }
+func (f *Folder) PersistenceStats() PersistenceCounters {
+	c := &f.persistHooks.counters
+	return PersistenceCounters{atomic.LoadUint64(&c.Bytes), atomic.LoadUint64(&c.Fsync), atomic.LoadUint64(&c.Fullfsync), atomic.LoadUint64(&c.Barrierfsync)}
+}
+
+func (h *persistHooks) write(kind, path string, w io.Writer, data []byte) (int, error) {
+	n, err := w.Write(data)
+	if n > 0 {
+		atomic.AddUint64(&h.counters.Bytes, uint64(n))
+	}
+	if h.probe.Write != nil {
+		h.probe.Write(kind, path, n, err)
+	}
+	return n, err
+}
+func (h *persistHooks) phase(txID, phase string) {
+	if h.probe.Phase != nil {
+		h.probe.Phase(txID, phase)
+	}
+}
+func (h *persistHooks) clockNow() time.Time {
+	if h.probe.ClockNow != nil {
+		return h.probe.ClockNow()
+	}
+	return time.Now()
+}
+func fileDevice(file *os.File) (uint64, uint64, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &st); err != nil {
+		return 0, 0, err
+	}
+	return uint64(st.Dev), uint64(st.Ino), nil
+}
+func (h *persistHooks) flush(file *os.File, phase, kind string, call func() error) error {
+	dev, inode, err := fileDevice(file)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case "fsync":
+		atomic.AddUint64(&h.counters.Fsync, 1)
+	case "FULLFSYNC":
+		atomic.AddUint64(&h.counters.Fullfsync, 1)
+	case "BARRIERFSYNC":
+		atomic.AddUint64(&h.counters.Barrierfsync, 1)
+	}
+	if h.probe.Flush != nil {
+		h.probe.Flush(kind, phase, dev, inode)
+	}
+	if h.probe.Fault != nil {
+		if err := h.probe.Fault(kind, phase, dev, inode); err != nil {
+			return err
+		}
+	}
+	return call()
+}
+
+// fsyncOnly is used for every prepared inode and directory before device flush.
+func (h *persistHooks) fsyncOnly(file *os.File, phase string) error {
+	return h.flush(file, phase, "fsync", func() error { return platformOps().fsync(int(file.Fd())) })
+}
+
+// durableFile preserves fsync then hardware flush for intent/commit/snapshot.
+func (h *persistHooks) durableFile(file *os.File, phase string) error {
+	if err := h.fsyncOnly(file, phase); err != nil {
+		return err
+	}
+	return h.fullSyncDevices([]*os.File{file}, phase)
+}
+func (h *persistHooks) fullSyncDevices(files []*os.File, phase string) error {
+	return h.fullSyncDevicesWithOps(files, phase, platformOps(), fileDevice)
+}
+
+// Deduplication is local to one phase invocation. Representatives stay open
+// throughout the call; state and root devices must both be supplied by caller.
+func (h *persistHooks) fullSyncDevicesWithOps(files []*os.File, phase string, ops platformFSOps, identity func(*os.File) (uint64, uint64, error)) error {
+	if ops.fullSync == nil {
+		return nil
+	}
+	seen := make(map[uint64]bool)
+	for _, file := range files {
+		dev, _, err := identity(file)
+		if err != nil {
+			return err
+		}
+		if seen[dev] {
+			continue
+		}
+		if err := h.flush(file, phase, "FULLFSYNC", func() error { return ops.syncDevice(file) }); err != nil {
+			return err
+		}
+		seen[dev] = true
+	}
+	return nil
 }
