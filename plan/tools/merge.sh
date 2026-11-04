@@ -19,7 +19,7 @@ for ds in "$@"; do sed -i '' -E "s/(, )?$ID \`$ds\`//; s/^Активные: , /�
 git add plan && git commit -qm "plan: $ID done
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-git push -q origin HEAD:main
+git push -q origin HEAD:main || echo "ВНИМАНИЕ: push не прошёл"
 git -C "$MAIN_CO" fetch -q origin && git -C "$MAIN_CO" merge -q --ff-only origin/main
 for ds in "$@"; do orca orchestration worker-release --dispatch "$ds" 2>&1 | tail -1; done
 orca worktree rm --worktree "path:$WT" 2>&1 | tail -1

@@ -1,7 +1,7 @@
 # STATUS
 
 Run: run_c60a6f0bca08 (этап 02)
-Активные: 02-16 `ctx_c46b97ebf731`, 02-18 `ctx_d8045c5da3ce`
+Активные: 02-18 `ctx_d8045c5da3ce`
 
 ## Очередь
 **push в origin не работает (Permission denied publickey) — main впереди origin, запушить после починки ключа.**
