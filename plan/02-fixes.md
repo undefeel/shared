@@ -39,7 +39,7 @@
 | 02-19 | commit coordinator | L3 | sol | 02-16, 02-18 | done | `task_b28f3827a7bf` | `ctx_c338e098d63a` |
 | 02-20 | повторное решение и применение | L3 | sol | 02-14, 02-16, 02-19 | done | `task_4f09f0705869` | `ctx_ec752c9d87dd` |
 | 02-21 | Exec и локальные права | L2 | luna | 02-20 | done | `task_4fd2a3217c07` | `ctx_516f79518b7b` |
-| 02-22 | проверка размера folder | L2 | luna | 02-21 | review | `task_d05e01a8ba91` | `ctx_ba338ad0bdce` |
+| 02-22 | проверка размера folder | L2 | luna | 02-21 | done | `task_d05e01a8ba91` | `ctx_ba338ad0bdce` |
 | 02-23 | безопасная выдача /file | L3 | sol | 02-19, 02-22 | todo | `task_a00a59d21e3f` | |
 | 02-24 | интеграция остановки демона и control | L3 | sol | 02-16, 02-20, 02-23 | todo | `task_b26f087a7d18` | |
 | 02-25 | watcher после rebind | L2 | luna | 02-24 | todo | `task_2edf2066053f` | |
