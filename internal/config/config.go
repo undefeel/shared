@@ -15,8 +15,11 @@ import (
 )
 
 const (
-	DefaultPort          = 22100
-	DefaultDiscoveryPort = 22101
+	DefaultPort                = 22100
+	DefaultDiscoveryPort       = 22101
+	DefaultDownloadConcurrency = 6
+	MinDownloadConcurrency     = 1
+	MaxDownloadConcurrency     = 8
 )
 
 type Peer struct {
@@ -26,13 +29,14 @@ type Peer struct {
 }
 
 type Config struct {
-	Name          string `json:"name"`
-	Folder        string `json:"folder"`
-	Port          int    `json:"port"`
-	Discovery     bool   `json:"discovery"`
-	DiscoveryPort int    `json:"discovery_port"`
-	Peers         []Peer `json:"peers"`
-	Paused        bool   `json:"paused,omitempty"`
+	Name                string `json:"name"`
+	Folder              string `json:"folder"`
+	Port                int    `json:"port"`
+	Discovery           bool   `json:"discovery"`
+	DiscoveryPort       int    `json:"discovery_port"`
+	DownloadConcurrency int    `json:"download_concurrency"`
+	Peers               []Peer `json:"peers"`
+	Paused              bool   `json:"paused,omitempty"`
 	// Relay — sharedir-relay://ID:TOKEN@host:port; пусто — без relay.
 	Relay string `json:"relay,omitempty"`
 }
@@ -90,6 +94,18 @@ func Load(home string) (*Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", Path(home), err)
 	}
+	// A missing setting gets the default; an explicitly configured zero is
+	// invalid, so retain field presence separately from the Go zero value.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, fmt.Errorf("%s: %w", Path(home), err)
+	}
+	if _, present := fields["download_concurrency"]; !present {
+		c.DownloadConcurrency = DefaultDownloadConcurrency
+	}
+	if err := validateDownloadConcurrency(c.DownloadConcurrency); err != nil {
+		return nil, fmt.Errorf("%s: %w", Path(home), err)
+	}
 	if c.Port == 0 {
 		c.Port = DefaultPort
 	}
@@ -101,6 +117,12 @@ func Load(home string) (*Config, error) {
 }
 
 func (c *Config) Save(home string) error {
+	if c.DownloadConcurrency == 0 {
+		c.DownloadConcurrency = DefaultDownloadConcurrency
+	}
+	if err := validateDownloadConcurrency(c.DownloadConcurrency); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -110,6 +132,13 @@ func (c *Config) Save(home string) error {
 		return err
 	}
 	return os.Rename(tmp, Path(home))
+}
+
+func validateDownloadConcurrency(n int) error {
+	if n < MinDownloadConcurrency || n > MaxDownloadConcurrency {
+		return fmt.Errorf("download_concurrency must be between %d and %d", MinDownloadConcurrency, MaxDownloadConcurrency)
+	}
+	return nil
 }
 
 func (c *Config) FindPeer(id string) *Peer {
