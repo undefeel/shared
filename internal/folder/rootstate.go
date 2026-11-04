@@ -48,6 +48,10 @@ func bindingOf(r *rootFS, path string) (rootBinding, error) {
 
 // blockRoot requires scanMu. A failed save keeps the in-memory latch closed.
 func (f *Folder) blockRoot(code, message string) error {
+	return f.blockRootWithSaveLock(code, message, false)
+}
+
+func (f *Folder) blockRootWithSaveLock(code, message string, saveHeld bool) error {
 	if e := f.Blocked(); e != nil {
 		return e
 	}
@@ -60,7 +64,11 @@ func (f *Folder) blockRoot(code, message string) error {
 	f.blocked = e
 	f.mu.Unlock()
 	f.Kick()
-	if err := f.save(); err != nil {
+	save := f.save
+	if saveHeld {
+		save = f.saveLocked
+	}
+	if err := save(); err != nil {
 		return err
 	}
 	return e
@@ -68,7 +76,9 @@ func (f *Folder) blockRoot(code, message string) error {
 
 // guardRoot requires scanMu; callers recheck after download/before publication.
 // Comparing both the configured pathname and the held fd detects replacement.
-func (f *Folder) guardRoot() error {
+func (f *Folder) guardRoot() error { return f.guardRootWithSaveLock(false) }
+
+func (f *Folder) guardRootWithSaveLock(saveHeld bool) error {
 	if e := f.Blocked(); e != nil {
 		return e
 	}
@@ -77,26 +87,26 @@ func (f *Folder) guardRoot() error {
 	f.mu.Unlock()
 	path, err := filepath.Abs(f.Root)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	if path != binding.Path {
-		return f.blockRoot("root_changed", "configured path changed")
+		return f.blockRootWithSaveLock("root_changed", "configured path changed", saveHeld)
 	}
 	current, err := openRootFS(path)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	defer current.Close()
 	now, err := bindingOf(current, path)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	held, err := bindingOf(f.root, path)
 	if err != nil {
-		return f.blockRoot("root_unavailable", err.Error())
+		return f.blockRootWithSaveLock("root_unavailable", err.Error(), saveHeld)
 	}
 	if now != binding || held != binding {
-		return f.blockRoot("root_changed", "root identity changed")
+		return f.blockRootWithSaveLock("root_changed", "root identity changed", saveHeld)
 	}
 	return nil
 }
@@ -168,6 +178,7 @@ func (f *Folder) initRoot(data []byte) error {
 
 // Close requires callers to drain watcher and peer operations first.
 func (f *Folder) Close() error {
+	f.drainApply()
 	var err error
 	if f.store != nil {
 		err = f.store.close()
@@ -190,6 +201,7 @@ var ErrStaleToken = errors.New("stale folder confirmation token")
 
 // SetConfiguredRoot serializes path changes with all tree commits.
 func (f *Folder) SetConfiguredRoot(configuredPath string) error {
+	f.drainApply()
 	p, err := filepath.Abs(configuredPath)
 	if err != nil {
 		return err
@@ -209,6 +221,7 @@ func (f *Folder) SetConfiguredRoot(configuredPath string) error {
 // Confirm requires callers to cancel and drain old runners and watchers first.
 // Work on a private candidate so readers continue seeing the latch until durable success.
 func (f *Folder) Confirm(token, action, configuredPath string) error {
+	f.drainApply()
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	blocked := f.Blocked()

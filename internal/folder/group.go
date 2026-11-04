@@ -22,6 +22,7 @@ const (
 // scanMu -> saveMu before intent; after intent it must finish without cancellation.
 // Generation identifies the confirmed binding epoch, not the store generation.
 type groupRequest struct {
+	apply      *applyOperation
 	Context    context.Context
 	Names      []string
 	Generation uint64
@@ -54,11 +55,14 @@ var errGroupClosed = errors.New("group coordinator closed")
 
 func (c *groupCoordinator) signal() { close(c.changed); c.changed = make(chan struct{}) }
 
-func (c *groupCoordinator) submit(ctx context.Context, names []string, generation uint64, bytes int64) error {
+func (c *groupCoordinator) submit(ctx context.Context, names []string, generation uint64, bytes int64, payload ...*applyOperation) error {
 	if bytes < 0 || len(names) == 0 {
 		return errors.New("invalid group request")
 	}
 	r := &groupRequest{Context: ctx, Names: append([]string(nil), names...), Generation: generation, Bytes: bytes, done: make(chan error, 1)}
+	if len(payload) != 0 {
+		r.apply = payload[0]
+	}
 	for {
 		c.mu.Lock()
 		if err := ctx.Err(); err != nil {

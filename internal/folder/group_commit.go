@@ -1,6 +1,7 @@
 package folder
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,7 @@ import (
 // holds scanMu -> saveMu, rechecks decisions/binding/cancellation before entry,
 // and does all hashing outside these locks. No cancellation is checked after G2.
 // preparedDirs is leaf-first and includes all directories created in staging.
-func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedDirs []*os.File, publish func()) (err error) {
+func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedDirs []*os.File, publish func(), beforeIntent ...func() error) (err error) {
 	if err = g.validate(f.binding, f.confirmedGeneration); err != nil {
 		return err
 	}
@@ -28,7 +29,7 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 	if blocked != nil {
 		return blocked
 	}
-	if err = f.guardRoot(); err != nil {
+	if err = f.guardRootWithSaveLock(true); err != nil {
 		return err
 	}
 	// Never overwrite a previous group's cleanup marker. Only a commit verified
@@ -43,6 +44,30 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 		}
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
+	}
+	// The public FileInfo deliberately omits store-only tombstone metadata.
+	// Put the exact durable fields into private intent copies before encoding.
+	oldFiles := make(map[string]storeFile, len(f.store.state.Files))
+	for _, fi := range f.store.state.Files {
+		oldFiles[fi.Name] = fi
+	}
+	for i := range g.Entries {
+		e := &g.Entries[i]
+		if e.Before != nil {
+			c := *e.Before
+			c.StoreDeletedAt = oldFiles[c.Name].DeletedAt
+			e.Before = &c
+		}
+		if e.After != nil {
+			c := *e.After
+			if c.Deleted {
+				c.StoreDeletedAt = oldFiles[c.Name].DeletedAt
+				if c.StoreDeletedAt == 0 {
+					c.StoreDeletedAt = f.persistHooks.clockNow().UnixNano()
+				}
+			}
+			e.After = &c
+		}
 	}
 	frame := storeFrame{Kind: "Commit", TxID: g.TxID, PreviousGeneration: g.BaseGeneration, Generation: g.Generation, Clock: g.Clock}
 	for i, e := range g.Entries {
@@ -62,8 +87,9 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 	if _, err = encodeFrame(frame); err != nil {
 		return err
 	} // Size limit before intent.
+	intentStarted := false
 	defer func() {
-		if err != nil {
+		if err != nil && (intentStarted || (!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && err != errLocalChanged)) {
 			f.mu.Lock()
 			if f.blocked == nil {
 				f.blocked = &RootError{Code: "commit_failed", Message: err.Error(), Token: captureToken()}
@@ -89,6 +115,12 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 	if err = f.persistHooks.fullSyncDevices(devices, "G1"); err != nil {
 		return err
 	}
+	for _, check := range beforeIntent {
+		if err = check(); err != nil {
+			return err
+		}
+	}
+	intentStarted = true
 	f.persistHooks.phase(tx, "G2")
 	if err = f.writeGroupIntent(g); err != nil {
 		return err

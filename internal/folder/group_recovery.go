@@ -16,7 +16,7 @@ func recoveryFile(fi *FileInfo) *storeFile {
 	if fi == nil {
 		return nil
 	}
-	s := &storeFile{Name: fi.Name, Disk: fi.Disk, Hash: fi.Hash, Size: fi.Size, ModTime: fi.ModTime, Exec: fi.Exec, Deleted: fi.Deleted}
+	s := &storeFile{Name: fi.Name, Disk: fi.Disk, Hash: fi.Hash, Size: fi.Size, ModTime: fi.ModTime, Exec: fi.Exec, Deleted: fi.Deleted, DeletedAt: fi.StoreDeletedAt}
 	for peer, counter := range fi.Version {
 		s.Version = append(s.Version, storePair{peer, counter})
 	}
@@ -129,6 +129,20 @@ func (f *Folder) recoverGroup(g groupIntent, state storeSnapshot, commit *storeF
 			if err != nil {
 				return err
 			}
+			if !committed {
+				// An open local writer may have changed the captured bytes after G2.
+				// The pinned identity still proves provenance: restore/preserve those
+				// latest bytes rather than requiring the old indexed hash.
+				dev, ino, statErr := fileDevice(file)
+				if statErr != nil {
+					file.Close()
+					return statErr
+				}
+				if e.Identity != (captureIdentity{dev, ino}) {
+					file.Close()
+					return ambiguous()
+				}
+			}
 			file.Close()
 			if committed {
 				err = c.discard()
@@ -138,8 +152,6 @@ func (f *Folder) recoverGroup(g groupIntent, state storeSnapshot, commit *storeF
 				if !errors.Is(err, errCaptureIdentity) {
 					return err
 				}
-			} else if err = f.checkRecoveryFile(e.Capture, e.Before, &e.Identity); err != nil {
-				return err
 			}
 			if !committed {
 				err = c.ops.renameNoReplace(c.parent, path.Base(e.Capture), c.parent, path.Base(e.Target))
