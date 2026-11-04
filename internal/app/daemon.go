@@ -196,7 +196,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go srv.Serve(tls.NewListener(d.connections.Limit(ln), srv.TLSConfig))
 	// Тот же сервер принимает и каналы, пришедшие через relay.
 	relayLn := newConnListener()
-	go srv.Serve(tls.NewListener(d.connections.Limit(relayLn), srv.TLSConfig))
+	go srv.Serve(tls.NewListener(d.connections.LimitRelay(relayLn, 0), srv.TLSConfig))
 	go d.relayLoop(ctx, relayLn)
 	defer srv.Close()
 	d.Log.Printf("слушаю TCP :%d", cfg.Port)
