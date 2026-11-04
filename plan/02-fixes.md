@@ -38,7 +38,7 @@
 | 02-18 | intent и recovery | L3 | sol | 02-12, 02-15, 02-17 | done | `task_f9e9cd0474af` | `ctx_d8045c5da3ce` |
 | 02-19 | commit coordinator | L3 | sol | 02-16, 02-18 | done | `task_b28f3827a7bf` | `ctx_c338e098d63a` |
 | 02-20 | повторное решение и применение | L3 | sol | 02-14, 02-16, 02-19 | done | `task_4f09f0705869` | `ctx_ec752c9d87dd` |
-| 02-21 | Exec и локальные права | L2 | luna | 02-20 | todo | `task_4fd2a3217c07` | |
+| 02-21 | Exec и локальные права | L2 | luna | 02-20 | in_progress | `task_4fd2a3217c07` | `ctx_516f79518b7b` |
 | 02-22 | проверка размера folder | L2 | luna | 02-21 | todo | `task_d05e01a8ba91` | |
 | 02-23 | безопасная выдача /file | L3 | sol | 02-19, 02-22 | todo | `task_a00a59d21e3f` | |
 | 02-24 | интеграция остановки демона и control | L3 | sol | 02-16, 02-20, 02-23 | todo | `task_b26f087a7d18` | |
