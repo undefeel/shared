@@ -155,7 +155,7 @@ func (c *Client) fetchFilesAttempt(ctx context.Context, addr string, items []Bat
 }
 
 func retryableFilesError(err error) bool {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) {
 		return true
 	}
 	var ne net.Error

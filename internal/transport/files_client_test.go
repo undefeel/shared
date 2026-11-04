@@ -57,7 +57,9 @@ func TestFetchFilesKeepsGoodFramesAndRetriesOnlyRemaining(t *testing.T) {
 				t.Errorf("first request has %d items", len(items))
 			}
 			writeFileFrame(w, a, "alpha")
-			return // truncated stream after one complete frame
+			w.(http.Flusher).Flush()
+			<-r.Context().Done() // the client's idle watchdog cancels this attempt
+			return
 		}
 		if len(items) != 1 || items[0].ID != "b" {
 			t.Errorf("retry items = %+v", items)
@@ -66,6 +68,7 @@ func TestFetchFilesKeepsGoodFramesAndRetriesOnlyRemaining(t *testing.T) {
 		_ = WriteBatchFrame(w, BatchHeader{End: true, Count: 1}, nil)
 	})
 	defer closeServer()
+	c.BodyIdleTimeout = 20 * time.Millisecond
 	got, err := c.FetchFiles(context.Background(), addr, []BatchItem{a, b})
 	if err != nil {
 		t.Fatal(err)
@@ -75,23 +78,32 @@ func TestFetchFilesKeepsGoodFramesAndRetriesOnlyRemaining(t *testing.T) {
 	}
 }
 
-func TestFetchFilesCancelReturnsCompletedFrames(t *testing.T) {
+func TestFetchFilesCancellationStopsStalledRequest(t *testing.T) {
 	a, b := batchItem("a", "a.txt", "alpha"), batchItem("b", "b.txt", "bravo")
 	started := make(chan struct{})
+	stopped := make(chan struct{})
 	c, addr, closeServer := clientForFiles(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-sharedir-files;version=2")
 		_, _ = readBatchIDs(r.Body)
 		_ = WriteBatchMagic(w)
-		writeFileFrame(w, a, "alpha")
 		w.(http.Flusher).Flush()
 		close(started)
 		<-r.Context().Done()
+		close(stopped)
 	})
 	defer closeServer()
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { <-started; time.Sleep(10 * time.Millisecond); cancel() }()
-	got, err := c.FetchFiles(ctx, addr, []BatchItem{a, b})
-	if err == nil || len(got) != 1 || string(got["a"].Body) != "alpha" {
-		t.Fatalf("results=%+v err=%v", got, err)
+	type response struct {
+		got map[string]BatchResult
+		err error
+	}
+	done := make(chan response, 1)
+	go func() { got, err := c.FetchFiles(ctx, addr, []BatchItem{a, b}); done <- response{got, err} }()
+	<-started
+	cancel()
+	result := <-done
+	<-stopped
+	if result.err != context.Canceled || len(result.got) != 0 {
+		t.Fatalf("results=%+v err=%v", result.got, result.err)
 	}
 }
