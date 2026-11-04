@@ -1,4 +1,4 @@
-.PHONY: build mac app linux test clean omarchy
+.PHONY: build mac app linux test test-macos test-omarchy clean omarchy
 
 build: mac linux
 
@@ -22,6 +22,9 @@ test-macos:
 	mkdir -p bin
 	swiftc -parse-as-library -swift-version 5 -target "$$(uname -m)-apple-macos14.0" macos/SharedirBar/ControlClient.swift macos/SharedirBar/MenuContent.swift macos/SharedirBar/Snapshot.swift macos/SharedirBar/Store.swift macos/tests/StatusTests.swift -o bin/sharedir-status-tests
 	bin/sharedir-status-tests
+
+test-omarchy:
+	node --test omarchy/sharedir/tests/logic.test.mjs
 
 clean:
 	rm -rf bin
