@@ -57,7 +57,7 @@
 | ID | Задача | Уровень | Исполнитель | Зависимости | Статус | `task_id` | `dispatch_id` |
 |---|---|---|---|---|---|---|---|
 | 04-10 | codec schema=3 | L3 | sol | — | done | `task_e0012807b32a` | `ctx_f30215cc8b18` |
-| 04-11 | append/replay | L3 | sol | 04-10 | in_progress | `task_424caacccdd1` | `ctx_2981398b175d` |
+| 04-11 | append/replay | L3 | sol | 04-10 | review | `task_424caacccdd1` | `ctx_2981398b175d` |
 | 04-12 | compaction | L3 | sol | 04-11 | todo | `task_624dcd4c677c` |  |
 | 04-13 | типы group-intent | L3 | sol | 04-10 | review | `task_2b2c1fbdeff6` | `ctx_7d0a1d8dd9d1` |
 | 04-14 | recovery группы | L3 | sol | 04-11, 04-13 | todo | `task_6567310b9d6e` |  |
@@ -72,7 +72,7 @@
 | 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_3b1341dbe038` |  |
 | 04-25 | handshake primitive | L2 | luna | — | done | `task_8a511af85279` | `ctx_a2d77225581a` |
-| 04-26 | frame codec | L2 | luna | 04-25 | todo | `task_5b850ab8fbad` |  |
+| 04-26 | frame codec | L2 | luna | 04-25 | in_progress | `task_5b850ab8fbad` | `ctx_e81281d83e45` |
 | 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_87f491eab235` |  |
 | 04-28 | /files server | L3 | sol | 04-27 | todo | `task_033135d6a137` |  |
 | 04-29 | /files client | L2 | luna | 04-28 | todo | `task_64fc7ddf6592` |  |
