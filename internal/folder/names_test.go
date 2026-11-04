@@ -135,3 +135,16 @@ func TestOpenRejectsMaliciousLegacyDiskWithoutRemovingFiles(t *testing.T) {
 		t.Fatalf("legacy validation removed a copy: %q, %v", b, err)
 	}
 }
+
+func TestValidDiskRequiresSameCanonicalName(t *testing.T) {
+	nfd := "é.txt" // NFD для "é.txt"
+	if !validDisk("é.txt", nfd) {
+		t.Fatal("NFD-путь того же имени должен проходить")
+	}
+	if validDisk("a.txt", "b.txt") {
+		t.Fatal("Disk другого имени не должен проходить")
+	}
+	if validDisk("a.txt", "dir/a.txt") {
+		t.Fatal("Disk в другом каталоге не должен проходить")
+	}
+}

@@ -20,5 +20,5 @@ func validDisk(name, disk string) bool {
 	if disk == "" {
 		return validName(name)
 	}
-	return validName(name) && utf8.ValidString(disk) && diskName(disk)
+	return validName(name) && utf8.ValidString(disk) && diskName(disk) && norm.NFC.String(disk) == name
 }
