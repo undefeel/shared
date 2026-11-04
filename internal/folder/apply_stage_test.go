@@ -71,3 +71,26 @@ func TestApplyStageMetadataOnlyDoesNotFetch(t *testing.T) {
 		t.Fatal("Exec was not applied")
 	}
 }
+
+func TestApplyStageRejectsLocalRace(t *testing.T) {
+	n := applySeed(t)
+	before, _ := n.f.Snapshot()
+	r := incoming("new", Vector{"B": 1}, 200e9)
+	st := step{l: &before[0], r: r, act: takeWithConflict}
+	generation := n.f.ConfirmedGeneration()
+	prepared, err := n.f.stageApply(context.Background(), st, bodyFetch("new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.close(n.f)
+	// The writer runs after preparation and before lock acquisition.
+	n.write(t, "x", "edited", time.Unix(300, 0))
+	if _, err = n.f.applyStaged(context.Background(), "B", generation, st, prepared); err != errLocalChanged {
+		t.Fatalf("local race error=%v", err)
+	}
+	assertBody(t, n, "edited")
+	after, _ := n.f.Snapshot()
+	if after[0].Deleted || after[0].Hash != before[0].Hash || after[0].Version.Compare(before[0].Version) != Equal {
+		t.Fatal("stale staging published an index change", after)
+	}
+}

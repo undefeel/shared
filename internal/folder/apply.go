@@ -172,7 +172,6 @@ var errLocalChanged = errors.New("файл изменён локально, по
 
 // applyOne treats step as a forecast only. Network I/O never holds scanMu.
 func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, st step, fetch Fetcher) (step, error) {
-	r := st.r
 	if e := f.Blocked(); e != nil {
 		return st, e
 	}
@@ -181,6 +180,11 @@ func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, s
 		return st, err
 	}
 	defer prepared.close(f)
+	return f.applyStaged(ctx, peer, generation, st, prepared)
+}
+
+func (f *Folder) applyStaged(ctx context.Context, peer string, generation uint64, st step, prepared *stagedApply) (step, error) {
+	r := st.r
 	tmp := prepared.tmp
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
