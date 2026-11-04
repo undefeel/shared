@@ -69,7 +69,7 @@
 | 04-19 | commit группы | L3 | sol | 04-18 | done | `task_8b9cce11d4db` | `ctx_28b45367fe67` |
 | 04-20 | очередь coordinator | L3 | sol | 04-19 | done | `task_2bf0b88271c6` | `ctx_88fbee192066` |
 | 04-21 | staging apply extraction | L3 | sol | 04-20 | done | `task_708e0596d8b3` | `ctx_be4447ee6cbd` |
-| 04-22 | connect group apply | L3 | sol | 04-21 | in_progress | `task_f0f4420dc2f4` | `ctx_1e95fd8d64cd` |
+| 04-22 | connect group apply | L3 | sol | 04-21 | review | `task_f0f4420dc2f4` | `ctx_1e95fd8d64cd` |
 | 04-23 | config concurrency | L2 | luna | — | done | `task_2fff94561cda` | `ctx_5239cd95da9d` |
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | superseded→04-60 | `task_79bf5dd1f327` |  |
 | 04-25 | handshake primitive | L2 | luna | — | done | `task_8a511af85279` | `ctx_a2d77225581a` |
