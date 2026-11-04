@@ -174,6 +174,10 @@ func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
 func (f *Folder) scanWith(ioops scanIO) error {
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
+	return f.scanLocked(ioops, false)
+}
+
+func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) error {
 	// The persistent latch is checked before opening or walking the root. A
 	// returning mount or a successful later scan cannot implicitly confirm it.
 	if err := f.guardRoot(); err != nil {
@@ -293,10 +297,10 @@ func (f *Folder) scanWith(ioops scanIO) error {
 	if ioops.beforeCommit != nil {
 		ioops.beforeCommit()
 	}
-	return f.commitScan(candidate, patterns, newCache)
+	return f.commitScan(candidate, patterns, newCache, allowEmpty)
 }
 
-func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache) error {
+func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache, allowEmpty bool) error {
 	// Keep the final binding check in the commit path: a root replaced after
 	// the walk must not publish a candidate collected from another directory.
 	// scanMu is held by Scan; guardRoot persists any resulting latch itself.
@@ -313,7 +317,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	}
 	// Decide against the same current files snapshot used to build next. Release
 	// both locks before blockRoot persists the latch through saveMu.
-	if len(found) == 0 && len(f.files) != 0 {
+	if !allowEmpty && len(found) == 0 && len(f.files) != 0 {
 		f.mu.Unlock()
 		f.saveMu.Unlock()
 		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")

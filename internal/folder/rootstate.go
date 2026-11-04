@@ -178,3 +178,102 @@ func (f *Folder) ConfirmedGeneration() uint64 {
 	defer f.mu.Unlock()
 	return f.confirmedGeneration
 }
+
+// ErrStaleToken means the displayed root error is no longer current.
+var ErrStaleToken = errors.New("stale folder confirmation token")
+
+// SetConfiguredRoot serializes path changes with all tree commits.
+func (f *Folder) SetConfiguredRoot(configuredPath string) error {
+	p, err := filepath.Abs(configuredPath)
+	if err != nil {
+		return err
+	}
+	f.scanMu.Lock()
+	defer f.scanMu.Unlock()
+	if p == f.Root {
+		return nil
+	}
+	f.Root = p
+	return f.blockRoot("root_changed", "configured path changed")
+}
+
+// Confirm requires callers to cancel and drain old runners and watchers first.
+// Work on a private candidate so readers continue seeing the latch until durable success.
+func (f *Folder) Confirm(token, action, configuredPath string) error {
+	f.scanMu.Lock()
+	defer f.scanMu.Unlock()
+	blocked := f.Blocked()
+	if blocked == nil || token != blocked.Token {
+		return ErrStaleToken
+	}
+	if action != "reset" && action != "rebind" {
+		return errors.New("action must be reset or rebind")
+	}
+	p, err := filepath.Abs(configuredPath)
+	if err != nil {
+		return err
+	}
+	r, err := openRootFS(p)
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			r.Close()
+		}
+	}()
+	binding, err := bindingOf(r, p)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	c := &Folder{Root: p, root: r, binding: binding, statePath: f.statePath, me: f.me, log: f.log,
+		confirmedGeneration: f.confirmedGeneration + 1, files: map[string]*FileInfo{}, clock: f.clock,
+		generation: f.generation, durableGeneration: f.durableGeneration, persistHooks: f.persistHooks,
+		changed: make(chan struct{})}
+	for k, v := range f.files {
+		copy := *v
+		copy.Version = v.Version.Copy()
+		c.files[k] = &copy
+	}
+	f.mu.Unlock()
+	if action == "reset" {
+		if err = os.Link(f.statePath, f.statePath+".reset-"+token); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		dir, e := os.Open(filepath.Dir(f.statePath))
+		if e != nil {
+			return e
+		}
+		err = syncDir(dir)
+		dir.Close()
+		if err != nil {
+			return err
+		}
+		c.files = map[string]*FileInfo{}
+		err = c.save()
+	} else {
+		err = c.scanLocked(c.rootScanIO(), true)
+		if err == nil {
+			err = c.save()
+		}
+	}
+	if err != nil {
+		_ = f.save()
+		return err
+	}
+	old := f.root
+	f.mu.Lock()
+	f.root, f.Root, f.binding, f.blocked = r, p, binding, nil
+	f.files, f.clock, f.confirmedGeneration = c.files, c.clock, c.confirmedGeneration
+	f.ignore, f.hashCache, f.lastScan = c.ignore, c.hashCache, c.lastScan
+	f.generation, f.durableGeneration = c.generation, c.durableGeneration
+	f.notify()
+	f.mu.Unlock()
+	ok = true
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
+}

@@ -212,3 +212,66 @@ func TestScanNonemptyDoesNotClearRootLatch(t *testing.T) {
 		t.Fatalf("Scan changed latch: got=%+v want token=%q", got, token)
 	}
 }
+
+func TestConfirmResetPreservesFiles(t *testing.T) {
+	f := rootScanFixture(t)
+	other := t.TempDir()
+	if err := os.WriteFile(filepath.Join(other, "kept"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.SetConfiguredRoot(other)
+	token := f.Blocked().Token
+	if err := f.Confirm(token, "reset", other); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.files) != 0 {
+		t.Fatal("reset retained index")
+	}
+	if _, err := os.Stat(filepath.Join(other, "kept")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(f.statePath + ".reset-" + token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfirmRebindEmptyOnce(t *testing.T) {
+	f := rootScanFixture(t)
+	other := t.TempDir()
+	_ = f.SetConfiguredRoot(other)
+	if err := f.Confirm(f.Blocked().Token, "rebind", other); err != nil {
+		t.Fatal(err)
+	}
+	if !f.files["item"].Deleted {
+		t.Fatal("rebind did not publish deletion")
+	}
+	if err := f.Scan(); err == nil {
+		t.Fatal("empty bypass reused")
+	}
+}
+
+func TestConfirmStaleToken(t *testing.T) {
+	f := rootScanFixture(t)
+	other := t.TempDir()
+	_ = f.SetConfiguredRoot(other)
+	token := f.Blocked().Token
+	if err := f.Confirm(token, "reset", other); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Confirm(token, "reset", other); err != ErrStaleToken {
+		t.Fatal(err)
+	}
+}
+
+func TestConfirmRejectsMissingRoot(t *testing.T) {
+	f := rootScanFixture(t)
+	other := filepath.Join(t.TempDir(), "missing")
+	_ = f.SetConfiguredRoot(other)
+	token := f.Blocked().Token
+	if err := f.Confirm(token, "reset", other); err == nil {
+		t.Fatal("accepted missing root")
+	}
+	if f.Blocked().Token != token {
+		t.Fatal("consumed token")
+	}
+}
