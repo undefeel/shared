@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -274,23 +275,111 @@ func (c *Client) Index(ctx context.Context, addr string, since uint64) (*IndexRe
 		limit = MaxIndexBytes
 	}
 	body := c.progressBody(resp.Body, cancel)
-	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	var out IndexResponse
+	if err := decodeIndex(&out, &indexLimitReader{r: body, limit: limit}); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+var errIndexTooLarge = errors.New("index exceeds size limit")
+
+// indexLimitReader probes one byte past the limit so an exactly-sized body is
+// accepted while an oversized one fails instead of appearing truncated.
+type indexLimitReader struct {
+	r     io.Reader
+	limit int64
+	n     int64
+}
+
+func (r *indexLimitReader) Read(p []byte) (int, error) {
+	if r.n == r.limit {
+		var probe [1]byte
+		n, err := r.r.Read(probe[:])
+		if n != 0 {
+			return 0, errIndexTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.limit-r.n {
+		p = p[:r.limit-r.n]
+	}
+	n, err := r.r.Read(p)
+	r.n += int64(n)
+	return n, err
+}
+
+func decodeIndex(out *IndexResponse, r io.Reader) error {
+	d := json.NewDecoder(r)
+	tok, err := d.Token()
+	if err != nil {
+		return err
+	}
+	if tok != json.Delim('{') {
+		return errors.New("invalid index: expected object")
+	}
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return err
+		}
+		name, ok := key.(string)
+		if !ok {
+			return errors.New("invalid index field")
+		}
+		switch strings.ToLower(name) {
+		case "seq":
+			err = d.Decode(&out.Seq)
+		case "files":
+			out.Files, err = decodeFiles(d)
+		default:
+			var ignored json.RawMessage
+			err = d.Decode(&ignored)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return err
+	}
+	// Consume trailing whitespace and reject trailing values, also forcing the
+	// size-limited reader to probe for an oversized body.
+	var extra json.RawMessage
+	if err := d.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("invalid index: trailing data")
+		}
+		return err
+	}
+	return nil
+}
+
+func decodeFiles(d *json.Decoder) ([]folder.FileInfo, error) {
+	tok, err := d.Token()
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > limit {
-		return nil, errors.New("index exceeds size limit")
+	if tok != json.Delim('[') {
+		return nil, errors.New("invalid index: files must be an array")
 	}
-	var out IndexResponse
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, err
-	}
-	for _, fi := range out.Files {
-		if len(fi.Name) > 4096 || len(fi.Version) > 64 {
-			return nil, fmt.Errorf("invalid index record %q: name or version exceeds limit", fi.Name[:min(len(fi.Name), 80)])
+	files := make([]folder.FileInfo, 0)
+	for d.More() {
+		var fi folder.FileInfo
+		if err := d.Decode(&fi); err != nil {
+			return nil, err
 		}
+		if len(fi.Name) > 4096 || len(fi.Version) > 64 {
+			return nil, invalidIndexRecord(fi.Name)
+		}
+		files = append(files, fi)
 	}
-	return &out, nil
+	_, err = d.Token()
+	return files, err
+}
+
+func invalidIndexRecord(name string) error {
+	return fmt.Errorf("invalid index record %q: name or version exceeds limit", name[:min(len(name), 80)])
 }
 
 // Fetcher возвращает загрузчик файлов с пира по адресу addr.
