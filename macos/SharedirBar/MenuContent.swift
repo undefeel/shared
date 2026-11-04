@@ -72,22 +72,6 @@ struct MenuContent: View {
         .foregroundStyle(labelColor)
         .padding(6)
         .frame(width: 320)
-        .confirmationDialog(
-            confirmationTitle,
-            isPresented: Binding(
-                get: { store.folderConfirmation != nil },
-                set: { if !$0 { store.folderConfirmation = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: store.folderConfirmation
-        ) { confirmation in
-            // Подтверждение передаётся в действие: к моменту вызова SwiftUI уже
-            // закрыл диалог и сбросил store.folderConfirmation через биндинг.
-            Button(confirmationButton, role: .destructive) { store.confirmFolder(confirmation) }
-            Button(L("Cancel"), role: .cancel) { store.folderConfirmation = nil }
-        } message: { _ in
-            Text(confirmationMessage)
-        }
     }
 
     // MARK: Заголовок
@@ -155,11 +139,31 @@ struct MenuContent: View {
                     .font(.system(size: 10, design: .monospaced)).foregroundStyle(secondaryColor)
                     .lineLimit(2).truncationMode(.middle)
             }
-            HStack(spacing: 8) {
-                Button(L("Start over…")) { store.requestFolderConfirmation(.reset) }
-                    .controlSize(.small)
-                Button(L("Keep this folder…")) { store.requestFolderConfirmation(.rebind) }
-                    .controlSize(.small)
+            if let confirmation = store.folderConfirmation {
+                // Подтверждение прямо в меню, как у сопряжения: системный
+                // confirmationDialog внутри MenuBarExtra не вызывал действие кнопки.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(confirmationTitle).font(.system(size: 12, weight: .semibold))
+                    Text(confirmationMessage)
+                        .font(.system(size: 11)).foregroundStyle(secondaryColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        Button(L("Cancel")) { withAnimation(.snappy) { store.folderConfirmation = nil } }
+                            .controlSize(.small)
+                        Button(confirmationButton, role: .destructive) { store.confirmFolder(confirmation) }
+                            .controlSize(.small)
+                            .tint(.red)
+                    }
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.08)))
+            } else {
+                HStack(spacing: 8) {
+                    Button(L("Start over…")) { withAnimation(.snappy) { store.requestFolderConfirmation(.reset) } }
+                        .controlSize(.small)
+                    Button(L("Keep this folder…")) { withAnimation(.snappy) { store.requestFolderConfirmation(.rebind) } }
+                        .controlSize(.small)
+                }
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
