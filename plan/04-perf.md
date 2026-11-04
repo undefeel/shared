@@ -74,7 +74,7 @@
 | 04-24 | download pool | L3 | sol | 04-22, 04-23 | todo | `task_79bf5dd1f327` |  |
 | 04-25 | handshake primitive | L2 | luna | — | done | `task_8a511af85279` | `ctx_a2d77225581a` |
 | 04-26 | frame codec | L2 | luna | 04-25 | done | `task_5b850ab8fbad` | `ctx_e81281d83e45` |
-| 04-27 | compression helper | L2 | luna | 04-26 | todo | `task_44a2a5233339` |  |
+| 04-27 | compression helper | L2 | luna | 04-26 | in_progress | `task_44a2a5233339` | `ctx_ffb31e07df28` |
 | 04-28 | /files server | L3 | sol | 04-27 | todo | `task_e088338343e8` |  |
 | 04-29 | /files client | L2 | luna | 04-28 | todo | `task_1162babf6097` |  |
 | 04-30 | v2 routes/client | L3 | sol | 04-29, 04-18 | todo | `task_e5daddeebcf4` |  |
