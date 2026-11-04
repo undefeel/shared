@@ -213,14 +213,7 @@ func newFileRecovery(t *testing.T, content string, exists, wantCommit bool) {
 		}
 	}
 	recoverJournal(t, f)
-	data, err := os.ReadFile(f.statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var p persisted
-	if err = json.Unmarshal(data, &p); err != nil {
-		t.Fatal(err)
-	}
+	p := readPersisted(t, f)
 	if wantCommit {
 		if len(p.Files) != 1 || p.Files[0].Version.Compare(after.Version) != Equal || p.Files[0].Hash != after.Hash || p.Generation != j.Generation {
 			t.Fatalf("incoming transaction not preserved: %+v", p)
@@ -233,7 +226,7 @@ func newFileRecovery(t *testing.T, content string, exists, wantCommit bool) {
 	}
 	if exists {
 		journalBytes(t, f, "new", content)
-	} else if _, err = os.Stat(filepath.Join(f.Root, "new")); !errors.Is(err, os.ErrNotExist) {
+	} else if _, err := os.Stat(filepath.Join(f.Root, "new")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("absent target changed: %v", err)
 	}
 	recoverJournal(t, f)

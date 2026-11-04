@@ -110,7 +110,7 @@ func TestRootLatchSurvivesRestart(t *testing.T) {
 	}
 }
 func TestUnknownSchemaPreservesIndex(t *testing.T) {
-	f := rootStateFixture(t)
+	f := &Folder{Root: t.TempDir(), statePath: filepath.Join(t.TempDir(), "index.json")}
 	data, _ := json.Marshal(persisted{Schema: 99})
 	if err := os.WriteFile(f.statePath, data, 0600); err != nil {
 		t.Fatal(err)

@@ -1,9 +1,12 @@
 package folder
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -17,6 +20,9 @@ func persistFolder(t *testing.T) *Folder {
 }
 func readPersisted(t *testing.T, f *Folder) persisted {
 	t.Helper()
+	if f.store != nil {
+		return storePersisted(f.store.state)
+	}
 	b, err := os.ReadFile(f.statePath)
 	if err != nil {
 		t.Fatal(err)
@@ -203,6 +209,193 @@ func TestSaveUniqueTemporaryFile(t *testing.T) {
 	for range 2 {
 		if err := f.save(); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestStoreDigestIndependentOfEncodingHistory(t *testing.T) {
+	if os.Getenv("SHAREDIR_DIGEST_CHILD") == "1" {
+		b, _ := encodeSnapshot(codecFixture())
+		_ = b
+		fmt.Printf("%x", storeDigest(storeFile{Name: "a", Version: []storePair{{"me", 1}}}))
+		os.Exit(0)
+	}
+	want := fmt.Sprintf("%x", storeDigest(storeFile{Name: "a", Version: []storePair{{"me", 1}}}))
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStoreDigestIndependentOfEncodingHistory$")
+	cmd.Env = append(os.Environ(), "SHAREDIR_DIGEST_CHILD=1")
+	got, err := cmd.Output()
+	if err != nil || string(got) != want {
+		t.Fatalf("digest %s want %s: %v", got, want, err)
+	}
+}
+
+func TestStoreReplayAndNoJSONRewrite(t *testing.T) {
+	f := rootStateFixture(t)
+	before, err := os.ReadFile(f.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(f.Root, "a"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(f.statePath)
+	if !bytes.Equal(before, after) {
+		t.Fatal("JSON rewritten")
+	}
+	// A snapshot is authoritative even when the obsolete JSON is invalid.
+	if err = os.WriteFile(f.statePath, []byte("invalid archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g, err := Open(f.Root, f.statePath, "me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if fi, _, ok := g.Lookup("a"); !ok || fi.Hash == "" {
+		t.Fatal("Open did not replay before serving lookup")
+	}
+	writes := 0
+	g.SetPersistenceProbe(PersistenceProbe{Write: func(string, string, int, error) { writes++ }})
+	gen := g.durableGeneration
+	if err = g.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 0 || g.durableGeneration != gen {
+		t.Fatal("no-op Scan wrote state")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(f.statePath), "index.snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data[11] = 99
+	if err = os.WriteFile(filepath.Join(filepath.Dir(f.statePath), "index.snapshot"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(f.Root, f.statePath, "me", nil); err == nil {
+		t.Fatal("unknown snapshot schema accepted")
+	}
+}
+
+func TestLegacyIntentRecoveredBeforeMigration(t *testing.T) {
+	f, j := journalFixture(t, 1)
+	p := storePersisted(f.store.state)
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(f.statePath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"index.snapshot", "index.log"} {
+		if err = os.Remove(filepath.Join(filepath.Dir(f.statePath), name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g, err := Open(f.Root, f.statePath, "me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	journalBytes(t, g, j.Target, "old")
+	if _, err = os.Stat(g.intentPath()); !os.IsNotExist(err) {
+		t.Fatal("legacy intent remains", err)
+	}
+	if g.store == nil {
+		t.Fatal("legacy index not migrated")
+	}
+}
+
+func TestStoreConfirmEpochAndHistory(t *testing.T) {
+	for _, action := range []string{"reset", "rebind"} {
+		t.Run(action, func(t *testing.T) {
+			f := rootStateFixture(t)
+			if err := os.WriteFile(filepath.Join(f.Root, "a"), []byte("a"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Scan(); err != nil {
+				t.Fatal(err)
+			}
+			epoch := f.store.state.StoreID
+			_ = f.blockRoot("root_empty", "test")
+			token := f.Blocked().Token
+			if err := f.Confirm(token, action, f.Root); err != nil {
+				t.Fatal(err)
+			}
+			if (f.store.state.StoreID == epoch) != (action == "rebind") {
+				t.Fatal("incorrect store epoch")
+			}
+			if err := f.Confirm(token, action, f.Root); !errors.Is(err, ErrStaleToken) {
+				t.Fatal("stale token accepted", err)
+			}
+			g, err := Open(f.Root, f.statePath, "me", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer g.Close()
+			if g.Blocked() != nil || g.ConfirmedGeneration() != 1 {
+				t.Fatal("confirmation lost")
+			}
+			_, _, exists := g.Lookup("a")
+			if exists != (action == "rebind") {
+				t.Fatal("incorrect retained history")
+			}
+		})
+	}
+}
+
+func TestStoreDurabilityFailurePoisonsWriter(t *testing.T) {
+	f := rootStateFixture(t)
+	f.files["a"] = &FileInfo{Name: "a", Version: Vector{"me": 1}}
+	generation := f.durableGeneration
+	f.SetPersistenceProbe(PersistenceProbe{Fault: func(_, phase string, _, _ uint64) error {
+		if phase == "G4" {
+			return errors.New("flush failed")
+		}
+		return nil
+	}})
+	if err := f.save(); err == nil {
+		t.Fatal("durability error reported success")
+	}
+	f.SetPersistenceProbe(PersistenceProbe{})
+	if err := f.save(); err == nil || f.durableGeneration != generation {
+		t.Fatal("uncertain writer reused")
+	}
+}
+
+func TestResetInterruptedAfterMarkerRecovers(t *testing.T) {
+	f := rootStateFixture(t)
+	epoch := f.store.state.StoreID
+	if err := os.Remove(f.statePath); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.blockRoot("root_empty", "test")
+	token := f.Blocked().Token
+	f.SetPersistenceProbe(PersistenceProbe{Fault: func(_, phase string, _, _ uint64) error {
+		if phase == "reset" {
+			return errors.New("power loss after reset marker")
+		}
+		return nil
+	}})
+	if err := f.Confirm(token, "reset", f.Root); err == nil {
+		t.Fatal("failed reset reported success")
+	}
+	if f.Blocked() == nil {
+		t.Fatal("failed confirmation opened latch")
+	}
+	g, err := Open(f.Root, f.statePath, "me", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if g.store.state.StoreID == epoch || g.Blocked() != nil {
+		t.Fatal("durable reset marker not completed")
+	}
+	for _, name := range []string{"index.snapshot", "index.log"} {
+		if _, err = os.Stat(filepath.Join(filepath.Dir(f.statePath), name+".reset-"+token)); err != nil {
+			t.Fatal("epoch archive missing", err)
 		}
 	}
 }

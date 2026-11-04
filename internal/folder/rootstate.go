@@ -1,10 +1,12 @@
 package folder
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -166,10 +168,14 @@ func (f *Folder) initRoot(data []byte) error {
 
 // Close requires callers to drain watcher and peer operations first.
 func (f *Folder) Close() error {
-	if f.root != nil {
-		return f.root.Close()
+	var err error
+	if f.store != nil {
+		err = f.store.close()
 	}
-	return nil
+	if f.root != nil {
+		return errors.Join(err, f.root.Close())
+	}
+	return err
 }
 
 // ConfirmedGeneration tags downloads; callers compare it again under scanMu.
@@ -209,6 +215,10 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 	if blocked == nil || token != blocked.Token {
 		return ErrStaleToken
 	}
+	if f.store != nil {
+		f.saveMu.Lock()
+		defer f.saveMu.Unlock()
+	}
 	if action != "reset" && action != "rebind" {
 		return errors.New("action must be reset or rebind")
 	}
@@ -241,7 +251,10 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 		c.files[k] = &copy
 	}
 	f.mu.Unlock()
-	if action == "reset" {
+	if action == "reset" && f.store != nil {
+		c.files = map[string]*FileInfo{}
+		err = f.resetStore(c, token)
+	} else if action == "reset" {
 		if err = os.Link(f.statePath, f.statePath+".reset-"+token); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
 		}
@@ -257,14 +270,27 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 		c.files = map[string]*FileInfo{}
 		err = c.save()
 	} else {
+		c.store = f.store
+		if c.store != nil {
+			c.wireStore()
+		}
 		err = c.scanLocked(c.rootScanIO(), true)
 		if err == nil {
 			err = c.save()
 		}
 	}
 	if err != nil {
-		_ = f.save()
+		if f.store != nil {
+			f.wireStore()
+		}
+		if f.store == nil {
+			_ = f.save()
+		}
 		return err
+	}
+	if c.store != nil {
+		f.store = c.store
+		f.wireStore()
 	}
 	old := f.root
 	f.mu.Lock()
@@ -279,4 +305,83 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 		_ = old.Close()
 	}
 	return nil
+}
+
+// A durable reset marker is the switch point. Restart completes replacement
+// before reading any store; archives retain the complete previous causal epoch.
+func (f *Folder) resetStore(c *Folder, token string) (err error) {
+	dir := filepath.Dir(f.statePath)
+	if err = os.Link(f.statePath, f.statePath+".reset-"+token); err != nil && !os.IsExist(err) && !os.IsNotExist(err) {
+		return err
+	}
+	for _, name := range []string{"index.snapshot", "index.log"} {
+		data, e := os.ReadFile(filepath.Join(dir, name))
+		if e != nil {
+			return e
+		}
+		if e = migrationReplace(filepath.Join(dir, name+".reset-"+token), data,
+			func(file *os.File) error { return f.persistHooks.durableFile(file, "reset-archive") },
+			func(file *os.File) error { return f.persistHooks.fsyncOnly(file, "reset-archive") }, &f.persistHooks); e != nil {
+			return e
+		}
+	}
+	next := storeSnapshot{Schema: storeSchema, Clock: c.clock,
+		Control: storeControl{Binding: c.binding, ConfirmedGeneration: c.confirmedGeneration}}
+	if _, err = rand.Read(next.StoreID[:]); err != nil {
+		return err
+	}
+	data, err := encodeSnapshot(next)
+	if err != nil {
+		return err
+	}
+	// Any uncertain marker/replacement must fence the old writer.
+	defer func() {
+		if err != nil {
+			f.store.failed = fmt.Errorf("reset requires recovery: %w", err)
+		}
+	}()
+	err = migrationReplace(filepath.Join(dir, "index.reset"), data,
+		func(file *os.File) error { return f.persistHooks.durableFile(file, "reset-marker") },
+		func(file *os.File) error { return f.persistHooks.fsyncOnly(file, "reset-marker") }, &f.persistHooks)
+	if err != nil {
+		return err
+	}
+	if err = f.completeReset(); err != nil {
+		return err
+	}
+	c.store, err = openIndexStore(filepath.Join(dir, "index.log"), next)
+	if err != nil {
+		return err
+	}
+	c.generation, c.durableGeneration = 0, 0
+	c.wireStore()
+	return f.store.close()
+}
+
+func (f *Folder) completeReset() error {
+	dir := filepath.Dir(f.statePath)
+	marker := filepath.Join(dir, "index.reset")
+	data, err := os.ReadFile(marker)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	next, err := decodeSnapshot(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	flush := func(file *os.File) error { return f.persistHooks.durableFile(file, "reset") }
+	syncDirectory := func(file *os.File) error { return f.persistHooks.fsyncOnly(file, "reset") }
+	if err = migrationReplace(filepath.Join(dir, "index.snapshot"), data, flush, syncDirectory, &f.persistHooks); err != nil {
+		return err
+	}
+	if err = migrationReplace(filepath.Join(dir, "index.log"), encodeLogHeader(storeLogHeader{StoreID: next.StoreID, BaseGeneration: next.Generation}), flush, syncDirectory, &f.persistHooks); err != nil {
+		return err
+	}
+	if err = os.Remove(marker); err != nil {
+		return err
+	}
+	return migrationSyncDir(dir, syncDirectory)
 }

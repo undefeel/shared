@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -63,12 +64,14 @@ func (f *Folder) writeIntent(j journalIntent) error {
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	if _, err = tmp.Write(data); err != nil {
-		return err
+	if n, e := f.persistHooks.write("intent", tmp.Name(), tmp, data); e != nil {
+		return e
+	} else if n != len(data) {
+		return io.ErrShortWrite
 	}
 	flush := f.persistHooks.syncFile
 	if flush == nil {
-		flush = syncFile
+		flush = func(file *os.File) error { return f.persistHooks.durableFile(file, "G2") }
 	}
 	if err = flush(tmp); err != nil {
 		return err
@@ -89,12 +92,13 @@ func (f *Folder) syncIntentDir() error {
 	defer d.Close()
 	flush := f.persistHooks.syncDir
 	if flush == nil {
-		flush = syncDir
+		flush = func(file *os.File) error { return f.persistHooks.fsyncOnly(file, "intent-dir") }
 	}
 	return flush(d)
 }
 
-// recoverIntent requires scanMu, before Scan/network service; Open integration belongs to the commit coordinator.
+// recoverIntent runs exclusively at startup, before Scan/network service.
+// Startup does not hold scanMu while hashing recovery targets.
 func (f *Folder) recoverIntent() error {
 	data, err := os.ReadFile(f.intentPath())
 	if errors.Is(err, os.ErrNotExist) {
@@ -116,13 +120,17 @@ func (f *Folder) recoverIntent() error {
 	if j.Binding != f.binding {
 		return f.blockRoot("recovery_ambiguous", "intent binding differs")
 	}
-	data, err = os.ReadFile(f.statePath)
-	if err != nil {
-		return err
-	}
 	var p persisted
-	if err = json.Unmarshal(data, &p); err != nil {
-		return err
+	if f.store != nil {
+		p = storePersisted(f.store.state)
+	} else {
+		data, err = os.ReadFile(f.statePath)
+		if err != nil {
+			return err
+		}
+		if err = json.Unmarshal(data, &p); err != nil {
+			return err
+		}
 	}
 	var current *FileInfo
 	for _, fi := range p.Files {
