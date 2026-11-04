@@ -24,10 +24,20 @@ func (f *Folder) Watch(ctx context.Context, onChange func()) error {
 			select {
 			case <-ctx.Done():
 				return
-			case <-es.Events:
-				onChange()
+			case events, ok := <-es.Events:
+				if !ok {
+					return
+				}
+				// FSEvents marks dropped history with MustScanSubDirs, and root
+				// replacement with RootChanged. Every batch requests a full Scan,
+				// so these conditions need no separate recovery path.
+				if len(events) != 0 {
+					onChange()
+				}
 			}
 		}
 	}()
 	return nil
 }
+
+func notifyWatchError(_ error, onChange func()) { onChange() }
