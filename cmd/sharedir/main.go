@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -156,8 +157,24 @@ func cmdRun(home string, args []string) error {
 	fs.Bool("no-tray", true, "устарел: трей теперь выключен по умолчанию")
 	parse(fs, args)
 
-	logger := log.New(os.Stderr, "", log.LstdFlags)
-	log.SetOutput(os.Stderr)
+	var output *app.BoundedLogWriter
+	if runtime.GOOS == "darwin" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		output, err = app.NewBoundedLogWriter(filepath.Join(h, "Library/Logs/sharedir.log"))
+		if err != nil {
+			return err
+		}
+		defer output.Close()
+	}
+	writer := io.Writer(os.Stderr)
+	if output != nil {
+		writer = output
+	}
+	logger := log.New(writer, "", log.LstdFlags)
+	log.SetOutput(writer)
 	d, err := app.New(home, logger)
 	if err != nil {
 		return err
