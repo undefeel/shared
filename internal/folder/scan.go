@@ -8,48 +8,12 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path"
 	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
 	"golang.org/x/text/unicode/norm"
 )
-
-const (
-	tmpPrefix  = ".sharedir-tmp-"
-	ignoreFile = ".sharedirignore"
-)
-
-// Служебный мусор ОС, который синхронизировать бессмысленно.
-var builtinIgnore = []string{
-	".DS_Store", "._*", ".Spotlight-V100", ".Trashes", ".fseventsd",
-	".TemporaryItems", ".localized", "Thumbs.db", "desktop.ini", tmpPrefix + "*",
-}
-
-// Ignored проверяет путь (через "/") по шаблонам: шаблон сопоставляется и с
-// именем файла, и с полным путём, и с каждым родительским каталогом.
-func (f *Folder) Ignored(name string) bool {
-	f.mu.Lock()
-	patterns := append([]string(nil), f.ignore...)
-	f.mu.Unlock()
-	return matchIgnore(patterns, name)
-}
-
-func matchIgnore(patterns []string, name string) bool {
-	for p := name; p != "." && p != ""; p = path.Dir(p) {
-		base := path.Base(p)
-		for _, pat := range patterns {
-			if ok, _ := path.Match(pat, base); ok {
-				return true
-			}
-			if ok, _ := path.Match(pat, p); ok {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 type scanIO struct {
 	openDir      func(*rootFS, string) (*os.File, error)
