@@ -174,6 +174,7 @@ type Folder struct {
 	lastScan  time.Time
 	ignore    []string
 	hashCache map[string]scanHashCache
+	stability *stabilityTracker
 }
 
 type persistHooks struct {
@@ -358,6 +359,9 @@ func (f *Folder) saveLocked() error {
 	f.mu.Lock()
 	p := persisted{Generation: f.generation, Clock: f.clock, Files: make([]*FileInfo, 0, len(f.files))}
 	for _, fi := range f.files {
+		if ignoredWith(f.ignore, fi.Name) {
+			continue
+		}
 		c := *fi
 		c.Version = fi.Version.Copy()
 		p.Files = append(p.Files, &c)

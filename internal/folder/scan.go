@@ -23,6 +23,8 @@ type scanIO struct {
 	beforeCommit func()
 }
 
+var ErrScanPending = errors.New("scan pending: files are not stable")
+
 func (f *Folder) rootScanIO() scanIO {
 	return scanIO{func(r *rootFS, p string) (*os.File, error) { return r.openDir(p, false) },
 		func(d *os.File) ([]os.DirEntry, error) { return d.ReadDir(-1) },
@@ -84,7 +86,7 @@ func fileMode(mode uint32) os.FileMode {
 }
 
 func readIgnore(ioops scanIO, r *rootFS) ([]string, error) {
-	patterns := append([]string(nil), builtinIgnore...)
+	var patterns []string
 	file, err := ioops.openRead(r, ignoreFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return patterns, nil
@@ -154,9 +156,120 @@ func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
 
 // scanWith builds a complete candidate before touching published files or clocks.
 func (f *Folder) scanWith(ioops scanIO) error {
+	if err := f.preflightStability(ioops); err != nil {
+		return err
+	}
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	return f.scanLocked(ioops, false)
+}
+
+// preflightStability observes metadata outside scanMu and waits at most once.
+// A separate root descriptor pins the traversal while other scans can proceed.
+func (f *Folder) preflightStability(ioops scanIO) error {
+	f.scanMu.Lock()
+	if err := f.guardRoot(); err != nil {
+		f.scanMu.Unlock()
+		return err
+	}
+	r, err := f.root.openDir(".", false)
+	f.scanMu.Unlock()
+	if err != nil {
+		return err
+	}
+	root := &rootFS{root: r}
+	defer root.Close()
+	patterns, err := readIgnore(ioops, root)
+	if err != nil {
+		return err
+	}
+	probes, err := collectScanProbes(ioops, root, patterns)
+	if err != nil {
+		return err
+	}
+	tracker := f.integrationStability()
+	pending := false
+	for name, meta := range probes {
+		if !tracker.probe(name, meta) {
+			pending = true
+		}
+	}
+	if !pending {
+		return nil
+	}
+	timer := time.NewTimer(time.Second)
+	<-timer.C
+	probes, err = collectScanProbes(ioops, root, patterns)
+	if err != nil {
+		return err
+	}
+	for name, meta := range probes {
+		if !tracker.probe(name, meta) {
+			return ErrScanPending
+		}
+	}
+	return nil
+}
+
+func (f *Folder) integrationStability() *stabilityTracker {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stability == nil {
+		f.stability = newStabilityTracker()
+	}
+	return f.stability
+}
+
+func collectScanProbes(ioops scanIO, r *rootFS, patterns []string) (map[string]scanStat, error) {
+	probes := make(map[string]scanStat)
+	canonical := make(map[string]string)
+	var walk func(string) error
+	walk = func(dir string) error {
+		d, err := ioops.openDir(r, dir)
+		if err != nil {
+			return err
+		}
+		defer d.Close()
+		entries, err := ioops.readDir(d)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			disk := entry.Name()
+			if dir != "." {
+				disk = dir + "/" + disk
+			}
+			name := norm.NFC.String(disk)
+			if !validName(name) {
+				return errors.New("scan: invalid canonical name: " + disk)
+			}
+			if prior, ok := canonical[name]; ok && prior != disk {
+				return errors.New("scan: canonical name collision: " + prior + " and " + disk)
+			}
+			canonical[name] = disk
+			info, meta, err := ioops.info(d, entry)
+			if err != nil {
+				return err
+			}
+			if info == nil || ignoredWith(patterns, name) {
+				continue
+			}
+			if info.IsDir() {
+				if err := walk(disk); err != nil {
+					return err
+				}
+				continue
+			}
+			if info.Mode().IsRegular() {
+				probes[name] = meta
+			}
+		}
+		return nil
+	}
+	if err := walk("."); err != nil {
+		return nil, err
+	}
+	return probes, nil
 }
 
 func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
@@ -254,7 +367,7 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 				}
 				continue
 			}
-			if matchIgnore(patterns, name) {
+			if ignoredWith(patterns, name) {
 				continue
 			}
 			if info.IsDir() {
@@ -268,6 +381,9 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 					return errors.New("scan: indexed file changed type: " + name)
 				}
 				continue
+			}
+			if !f.integrationStability().probe(name, meta) {
+				return ErrScanPending
 			}
 			hash, stable := "", info
 			if entry, ok := cached[disk]; ok && entry.scanStat == meta {
@@ -305,7 +421,15 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 	if ioops.beforeCommit != nil {
 		ioops.beforeCommit()
 	}
-	return f.commitScan(candidate, patterns, newCache, allowEmpty)
+	if err := f.commitScan(candidate, patterns, newCache, allowEmpty); err != nil {
+		return err
+	}
+	present := make(map[string]struct{}, len(candidate))
+	for name := range candidate {
+		present[name] = struct{}{}
+	}
+	f.integrationStability().reconcile(present)
+	return nil
 }
 
 func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache, allowEmpty bool) error {
@@ -325,7 +449,14 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	}
 	// Decide against the same current files snapshot used to build next. Release
 	// both locks before blockRoot persists the latch through saveMu.
-	if !allowEmpty && len(found) == 0 && len(f.files) != 0 {
+	visibleExisting := false
+	for name, fi := range f.files {
+		if fi.Deleted || !ignoredWith(patterns, name) {
+			visibleExisting = true
+			break
+		}
+	}
+	if !allowEmpty && len(found) == 0 && visibleExisting {
 		f.mu.Unlock()
 		f.saveMu.Unlock()
 		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
@@ -362,7 +493,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		next[name] = fi
 	}
 	for name, fi := range f.files {
-		if fi.Deleted || found[name] != nil || matchIgnore(patterns, name) {
+		if fi.Deleted || found[name] != nil || ignoredWith(patterns, name) {
 			continue
 		}
 		v := fi.Version.Copy()
@@ -372,6 +503,9 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		dirty = true
 	}
 	var p persisted
+	if !equalStrings(f.ignore, patterns) {
+		dirty = true
+	}
 	if dirty {
 		p = persisted{Generation: f.generation + 1, Clock: clock, Files: make([]*FileInfo, 0, len(next))}
 		for _, fi := range next {
@@ -383,7 +517,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	f.mu.Unlock()
 	publish := func() {
 		f.files, f.clock, f.ignore, f.hashCache = next, clock, append([]string(nil), patterns...), hashCache
-		if changed > 0 {
+		if changed > 0 || !equalStrings(f.ignore, patterns) {
 			f.notify()
 		}
 		f.lastScan = time.Now()
@@ -403,8 +537,29 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	return nil
 }
 
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ScanGeneration rejects events queued by a canceled watcher generation.
 func (f *Folder) ScanGeneration(ctx context.Context, generation uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if generation != f.ConfirmedGeneration() {
+		return errors.New("stale watcher generation")
+	}
+	if err := f.preflightStability(f.rootScanIO()); err != nil {
+		return err
+	}
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	if err := ctx.Err(); err != nil {
