@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run by a LEAD worker (sol) on an L3 task: delegates implementation to a terra (or luna) worker in the
+# Run by a LEAD worker (sol) on an L3 task: delegates implementation to a luna (then terra) worker in the
 # current worktree, waits for it and prints its report.
 #
 #   plan/tools/lead.sh <ID> implement            the implementer implements plan/specs/<ID>.plan.md
@@ -16,21 +16,33 @@ ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
 CHUNK_MS=480000   # stay below common 10-minute shell limits
 MAX_FIX=2
 MAX_PARTS=3      # parallel implementers per lead
-# Implementer model: terra (default, gpt-6.1-terra medium: follows a plan over many steps) or luna
-# (gpt-6-luna high: cheap, only small pieces of ~300 lines). Choose with LEAD_IMPL=luna|terra.
-case "${LEAD_IMPL:-terra}" in
+# Implementer model (owner decision 2026-11-05: luna first, terra as escalation):
+#   luna  (default, gpt-6-luna high): cheapest; give it pieces of ~300 lines in 1-3 files.
+#   terra (gpt-6.1-terra medium): escalation when luna gave up or failed on the same piece;
+#         also follows a plan over many steps (pieces up to ~600 lines). Choose with LEAD_IMPL=luna|terra.
+LEAD_IMPL="${LEAD_IMPL:-luna}"
+case "$LEAD_IMPL" in
   terra) IMPL=(--agent codex --model gpt-6.1-terra --effort medium) ;;
   luna)  IMPL=(--agent codex --model gpt-6-luna --effort high) ;;
   *) echo "LEAD_IMPL must be terra or luna" >&2; exit 2 ;;
 esac
 
-MAX_CONT=8       # automatic "continue" nudges per implementer
+MAX_CONT=8       # automatic "continue" nudges per terra implementer; luna gets 3, then escalate to terra
 CONT_MSG="Continue the task from where you stopped. Do not re-read what you already know; keep implementing the remaining items of your plan/part, run the acceptance, commit (parts: do not commit). Send worker_done only when everything is done or on a concrete technical blocker. If you run out of room again, just end your turn: you will be resumed."
 # Implementer ended its turn without worker_done (Orca escalation with stopReason): resume the same session.
 continue_impl() {
-  local ds="$1" f n
+  local ds="$1" f n impl MAX_CONT=$MAX_CONT
+  impl="$(cat "$(git rev-parse --git-dir)/lead-impl-$ds" 2>/dev/null || echo terra)"
+  [[ "$impl" == luna ]] && MAX_CONT=3
   f="$(git rev-parse --git-dir)/lead-cont-$ds"; n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
-  if (( n > MAX_CONT )); then echo "lead: implementer $ds stopped $MAX_CONT times without finishing; review what it committed and continue with a fix round or take over"; return 1; fi
+  if (( n > MAX_CONT )); then
+    if [[ "$impl" == luna ]]; then
+      echo "lead: luna $ds stopped $MAX_CONT times without finishing. ESCALATE to terra: release it (orca orchestration worker-release --dispatch $ds), commit whatever of its work is correct (discard the rest), then run: LEAD_IMPL=terra plan/tools/lead.sh <ID> implement   (terra continues the same plan from the committed state; for a part: LEAD_IMPL=terra plan/tools/lead.sh <ID> part ...)"
+    else
+      echo "lead: implementer $ds stopped $MAX_CONT times without finishing; review what it committed and continue with a fix round or take over"
+    fi
+    return 1
+  fi
   echo "$n" >"$f"
   orca orchestration send --to "dispatch:$ds" --subject "Continue ($n/$MAX_CONT)" --body "$CONT_MSG" --json >/dev/null \
     && echo "lead: implementer $ds ended its turn without reporting; sent continue $n/$MAX_CONT"
@@ -165,6 +177,7 @@ out="$(orca orchestration worker-start --spec-file "$S" --task-title "$TITLE" \
         --worktree current "${IMPL[@]}" --json)" || { echo "$out"; exit 1; }
 ds="$(jq -r '.result.dispatchId // .result.dispatch.id // .dispatchId // empty' <<<"$out")"
 [[ -n "$ds" ]] || { echo "$out"; exit 1; }
-echo "lead: started implementer $ds ($TITLE, ${LEAD_IMPL:-terra})"
+echo "$LEAD_IMPL" >"$(git rev-parse --git-dir)/lead-impl-$ds"
+echo "lead: started implementer $ds ($TITLE, $LEAD_IMPL). If luna reports failure or a broken result on this piece, re-run the same piece with LEAD_IMPL=terra."
 if [[ "$MODE" == part ]]; then echo "lead: not waiting (parallel part); later: plan/tools/lead.sh --wait-all <all part dispatches>"; exit 0; fi
 wait_for "$ds"
