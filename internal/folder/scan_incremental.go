@@ -126,7 +126,9 @@ func (f *Folder) scanPathsWith(ctx context.Context, paths []string, ioops scanIO
 		return f.scanStaged(ctx, 0, false, ioops)
 	}
 	// Confirm an apparently empty root with a complete scan before latching.
-	if len(candidate) == 0 && len(indexed) != 0 {
+	// Tombstone-only baselines also require confirmation: a live file can
+	// exist outside the dirty scopes even when the live index is empty.
+	if len(candidate) == 0 && len(b.files) != 0 {
 		return f.scanStaged(ctx, 0, false, ioops)
 	}
 	if ioops.beforeCommit != nil {

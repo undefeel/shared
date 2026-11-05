@@ -253,3 +253,50 @@ func TestIncrementalDirectoryScopeIncludesSubtree(t *testing.T) {
 		t.Fatalf("subtree entry=%+v found=%v", fi, ok)
 	}
 }
+
+func TestIncrementalTombstoneOnlyConfirmsFullScan(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		t.Run(fmt.Sprintf("outside-live=%v", live), func(t *testing.T) {
+			f := rootScanFixture(t)
+			f.integrationStability().interval = time.Millisecond
+			f.mu.Lock()
+			old := f.files["item"]
+			f.files = map[string]*FileInfo{"gone": {Name: "gone", Deleted: true, Version: old.Version.Copy()}}
+			f.mu.Unlock()
+			if err := f.save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(f.Root, "item")); err != nil {
+				t.Fatal(err)
+			}
+			if live {
+				if err := os.WriteFile(filepath.Join(f.Root, "outside"), []byte("live"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _, _ := f.Lookup("gone")
+			err := f.ScanPaths(context.Background(), []string{"unaffected"})
+			if live {
+				if err != nil || f.Blocked() != nil {
+					t.Fatalf("scan=%v blocked=%+v", err, f.Blocked())
+				}
+				if fi, _, ok := f.Lookup("outside"); !ok || fi.Deleted {
+					t.Fatalf("outside=%+v found=%v", fi, ok)
+				}
+				if fi, _, ok := f.Lookup("gone"); !ok || !reflect.DeepEqual(before, fi) {
+					t.Fatalf("tombstone changed: %+v", fi)
+				}
+				if err := f.Scan(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err == nil || f.Blocked() == nil || f.Blocked().Code != "root_empty" {
+					t.Fatalf("scan=%v blocked=%+v", err, f.Blocked())
+				}
+				if fi, _, ok := f.Lookup("gone"); !ok || !reflect.DeepEqual(before, fi) {
+					t.Fatalf("tombstone changed: %+v", fi)
+				}
+			}
+		})
+	}
+}
