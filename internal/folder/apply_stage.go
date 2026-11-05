@@ -33,7 +33,7 @@ func (f *Folder) stageApply(ctx context.Context, st step, fetch Fetcher) (_ *sta
 		}
 	}()
 	if st.act != mergeOnly && st.needsDownload() {
-		s.tmp, err = f.download(ctx, st.r, fetch)
+		s.tmp, err = f.downloadOrReuse(ctx, st.r, fetch)
 		if err != nil {
 			return nil, err
 		}

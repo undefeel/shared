@@ -243,7 +243,8 @@ func TestDownloadPoolBoundsProducersWhileCommitBlocked(t *testing.T) {
 			t.Fatal("producer did not drain")
 		}
 	}
-	if got := fetched.Load(); got != maxStagedOperations+1 {
+	// The final admitted operation reuses an already published identical body.
+	if got := fetched.Load(); got != maxStagedOperations {
 		t.Fatalf("total fetches=%d", got)
 	}
 }

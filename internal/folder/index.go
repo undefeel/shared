@@ -166,14 +166,15 @@ type Folder struct {
 	persistHooks      persistHooks // set before concurrent use, for fault injection
 	waitEntered       func()       // Test barrier, set before concurrent use; nil in production.
 
-	mu        sync.Mutex
-	files     map[string]*FileInfo
-	clock     uint64
-	seq       uint64
-	changed   chan struct{}
-	lastScan  time.Time
-	ignore    []string
-	hashCache map[string]scanHashCache
+	mu           sync.Mutex
+	files        map[string]*FileInfo
+	clock        uint64
+	seq          uint64
+	changed      chan struct{}
+	lastScan     time.Time
+	ignore       []string
+	hashCache    map[string]scanHashCache
+	contentNames map[string]map[string]struct{}
 }
 
 type persistHooks struct {
@@ -339,6 +340,7 @@ func (f *Folder) tick(v Vector) uint64 {
 
 // notify отмечает изменение индекса и будит ожидающих. Вызывать под mu.
 func (f *Folder) notify() {
+	f.rebuildContentNames()
 	f.seq++
 	close(f.changed)
 	f.changed = make(chan struct{})
@@ -670,4 +672,16 @@ func (h *persistHooks) fullSyncDevicesWithOps(files []*os.File, phase string, op
 		seen[dev] = true
 	}
 	return nil
+}
+
+func (f *Folder) rebuildContentNames() {
+	f.contentNames = make(map[string]map[string]struct{})
+	for name, fi := range f.files {
+		if fi != nil && !fi.Deleted && fi.Hash != "" {
+			if f.contentNames[fi.Hash] == nil {
+				f.contentNames[fi.Hash] = make(map[string]struct{})
+			}
+			f.contentNames[fi.Hash][name] = struct{}{}
+		}
+	}
 }
