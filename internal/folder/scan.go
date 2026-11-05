@@ -162,6 +162,10 @@ func (f *Folder) scanWith(ioops scanIO) error {
 // preflightStability observes metadata outside scanMu and waits at most once.
 // A separate root descriptor pins the traversal while other scans can proceed.
 func (f *Folder) preflightStability(ctx context.Context, ioops scanIO) error {
+	return f.preflightScopes(ctx, ioops, nil)
+}
+
+func (f *Folder) preflightScopes(ctx context.Context, ioops scanIO, scopes []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -201,12 +205,14 @@ func (f *Folder) preflightStability(ctx context.Context, ioops scanIO) error {
 	if err != nil {
 		return err
 	}
-	probes, err := collectScanProbes(ioops, root, patterns)
+	probes, err := collectScopedProbes(ioops, root, patterns, scopes)
 	if err != nil {
 		return latch(err)
 	}
 	tracker := f.integrationStability()
-	tracker.forgetAbsent(probes)
+	if scopes == nil {
+		tracker.forgetAbsent(probes)
+	}
 	pending := false
 	for name, meta := range probes {
 		if !tracker.probe(name, meta) {
@@ -226,7 +232,7 @@ func (f *Folder) preflightStability(ctx context.Context, ioops scanIO) error {
 		return ctx.Err()
 	case <-timer.C:
 	}
-	probes, err = collectScanProbes(ioops, root, patterns)
+	probes, err = collectScopedProbes(ioops, root, patterns, scopes)
 	if err != nil {
 		return latch(err)
 	}
@@ -254,6 +260,10 @@ func (f *Folder) integrationStability() *stabilityTracker {
 type rootProbeError struct{ error }
 
 func collectScanProbes(ioops scanIO, r *rootFS, patterns []string) (map[string]scanStat, error) {
+	return collectScopedProbes(ioops, r, patterns, nil)
+}
+
+func collectScopedProbes(ioops scanIO, r *rootFS, patterns []string, scopes []string) (map[string]scanStat, error) {
 	probes := make(map[string]scanStat)
 	canonical := make(map[string]string)
 	var walk func(string) error
@@ -294,12 +304,15 @@ func collectScanProbes(ioops scanIO, r *rootFS, patterns []string) (map[string]s
 				continue
 			}
 			if info.IsDir() {
+				if !scopeRelevant(scopes, name) {
+					continue
+				}
 				if err := walk(disk); err != nil {
 					return err
 				}
 				continue
 			}
-			if info.Mode().IsRegular() {
+			if info.Mode().IsRegular() && scopeCovered(scopes, name) {
 				probes[name] = meta
 			}
 		}
@@ -313,6 +326,10 @@ func collectScanProbes(ioops scanIO, r *rootFS, patterns []string) (map[string]s
 
 // buildScan constructs a private candidate without holding the live folder locks.
 func (f *Folder) buildScan(ctx context.Context, ioops scanIO, r *rootFS, indexed map[string]bool, allowEmpty bool, scanPath *string) (map[string]*FileInfo, []string, map[string]scanHashCache, map[string]scanStat, error) {
+	return f.buildScopedScan(ctx, ioops, r, indexed, allowEmpty, scanPath, nil, nil)
+}
+
+func (f *Folder) buildScopedScan(ctx context.Context, ioops scanIO, r *rootFS, indexed map[string]bool, allowEmpty bool, scanPath *string, scopes []string, baseline *scanBaseline) (map[string]*FileInfo, []string, map[string]scanHashCache, map[string]scanStat, error) {
 	*scanPath = ignoreFile
 	ignoreBefore, ignoreErr := scanStatAt(r, ignoreFile)
 	if ignoreErr != nil && !errors.Is(ignoreErr, os.ErrNotExist) {
@@ -330,6 +347,37 @@ func (f *Folder) buildScan(ctx context.Context, ioops scanIO, r *rootFS, indexed
 	newCache := map[string]scanHashCache{}
 	canonicalDisk := map[string]string{}
 	observed := map[string]scanStat{}
+	if baseline != nil {
+		for name, fi := range baseline.files {
+			if !fi.Deleted {
+				disk := fi.Disk
+				if disk == "" {
+					disk = name
+				}
+				canonicalDisk[name] = disk
+				canonicalParent, diskParent := name, disk
+				for {
+					ci, di := strings.LastIndex(canonicalParent, "/"), strings.LastIndex(diskParent, "/")
+					if ci < 0 || di < 0 {
+						break
+					}
+					canonicalParent, diskParent = canonicalParent[:ci], diskParent[:di]
+					if prior, ok := canonicalDisk[canonicalParent]; ok && prior != diskParent {
+						return nil, nil, nil, nil, errors.New("scan: canonical name collision: " + prior + " and " + diskParent)
+					}
+					canonicalDisk[canonicalParent] = diskParent
+				}
+				if !scopeCovered(scopes, name) && !ignoredWith(baseline.ignore, name) {
+					candidate[name] = fi
+				}
+			}
+		}
+		for disk, c := range baseline.cache {
+			if !scopeCovered(scopes, norm.NFC.String(disk)) {
+				newCache[disk] = c
+			}
+		}
+	}
 	var walk func(string) error
 	walk = func(dir string) error {
 		if err := ctx.Err(); err != nil {
@@ -391,9 +439,15 @@ func (f *Folder) buildScan(ctx context.Context, ioops scanIO, r *rootFS, indexed
 				continue
 			}
 			if info.IsDir() {
+				if !scopeRelevant(scopes, name) {
+					continue
+				}
 				if err := walk(disk); err != nil {
 					return err
 				}
+				continue
+			}
+			if !scopeCovered(scopes, name) {
 				continue
 			}
 			if !info.Mode().IsRegular() {
@@ -406,21 +460,30 @@ func (f *Folder) buildScan(ctx context.Context, ioops scanIO, r *rootFS, indexed
 				return ErrScanPending
 			}
 			hash, stable := "", info
-			file, err := ioops.openRead(r, disk)
-			if err != nil {
-				return err
+			cached, cacheHit := scanHashCache{}, false
+			if baseline != nil {
+				cached, cacheHit = baseline.cache[disk]
+				cacheHit = cacheHit && cached.scanStat == meta
 			}
-			var stableMeta scanStat
-			hash, stable, stableMeta, err = stableHash(file)
-			closeErr := file.Close()
-			if err != nil {
-				return err
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-			if stableMeta != meta {
-				return errors.New("scan: entry changed before hashing: " + disk)
+			if cacheHit {
+				hash = cached.hash
+			} else {
+				file, err := ioops.openRead(r, disk)
+				if err != nil {
+					return err
+				}
+				var stableMeta scanStat
+				hash, stable, stableMeta, err = stableHash(file)
+				closeErr := file.Close()
+				if err != nil {
+					return err
+				}
+				if closeErr != nil {
+					return closeErr
+				}
+				if stableMeta != meta {
+					return ErrScanPending
+				}
 			}
 			newCache[disk] = scanHashCache{scanStat: meta, hash: hash}
 			fi := &FileInfo{Name: name, Size: stable.Size(), ModTime: stable.ModTime().UnixNano(), Exec: stable.Mode().Perm()&0100 != 0, Hash: hash}
