@@ -41,21 +41,17 @@ func testDeltaCall(t *testing.T, f *folder.Folder, req folder.DeltaRequest) *htt
 func readDeltaTestHeader(t *testing.T, r *bytes.Reader) deltaHeader {
 	t.Helper()
 	var n uint32
-	if err := binary.Read(r, binary.BigEndian, &n); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, binary.Read(r, binary.BigEndian, &n))
 	b := make([]byte, n)
 	if _, err := io.ReadFull(r, b); err != nil {
 		t.Fatal(err)
 	}
 	var h deltaHeader
-	if err := json.Unmarshal(b, &h); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, json.Unmarshal(b, &h))
 	return h
 }
 func TestDeltaServer(t *testing.T) {
-	for _, tc := range []struct {
+	cases := []struct {
 		name         string
 		base, target []byte
 		status       string
@@ -66,31 +62,26 @@ func TestDeltaServer(t *testing.T) {
 		{"grow", bytes.Repeat([]byte{1}, 2*folder.DeltaBlockSize), bytes.Repeat([]byte{1}, 3*folder.DeltaBlockSize), "ok", 1},
 		{"seventy", bytes.Repeat([]byte{1}, 10*folder.DeltaBlockSize), append(bytes.Repeat([]byte{1}, 3*folder.DeltaBlockSize), bytes.Repeat([]byte{2}, 7*folder.DeltaBlockSize)...), "full_required", 0},
 		{"above", bytes.Repeat([]byte{1}, 4*folder.DeltaBlockSize), bytes.Repeat([]byte{2}, 4*folder.DeltaBlockSize), "full_required", 0},
-	} {
+	}
+	f, _ := fileFixture(t)
+	for _, tc := range cases {
+		writeTestFile(t, filepath.Join(f.Root, tc.name), tc.target, 0600)
+	}
+	target := bytes.Repeat([]byte{1}, 4*folder.DeltaBlockSize)
+	writeTestFile(t, filepath.Join(f.Root, "malformed"), target, 0600)
+	mustScan(t, f)
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _ := fileFixture(t)
-			if err := os.WriteFile(filepath.Join(f.Root, "a"), tc.target, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.Scan(); err != nil {
-				t.Fatal(err)
-			}
-			fi, _, _ := f.Lookup("a")
-			req := folder.DeltaRequest{Protocol: 2, Name: "a", TargetHash: fi.Hash, TargetSize: int64(len(tc.target)), BaseHash: deltaHash(tc.base), BaseSize: int64(len(tc.base)), BlockSize: folder.DeltaBlockSize, Blocks: signatures(tc.base)}
+			fi, _, _ := f.Lookup(tc.name)
+			req := folder.DeltaRequest{Protocol: 2, Name: tc.name, TargetHash: fi.Hash, TargetSize: int64(len(tc.target)), BaseHash: deltaHash(tc.base), BaseSize: int64(len(tc.base)), BlockSize: folder.DeltaBlockSize, Blocks: signatures(tc.base)}
 			w := testDeltaCall(t, f, req)
-			if w.Code != 200 {
-				t.Fatalf("status %d: %s", w.Code, w.Body.String())
-			}
+			requireEqualf(t, w.Code, 200, "status %d: %s", w.Code, w.Body.String())
 			r := bytes.NewReader(w.Body.Bytes())
 			magic := make([]byte, 8)
 			io.ReadFull(r, magic)
-			if string(magic) != deltaMagic {
-				t.Fatal("magic")
-			}
+			requireEqual(t, string(magic), deltaMagic, "magic")
 			h := readDeltaTestHeader(t, r)
-			if h.Status != tc.status {
-				t.Fatalf("status %s", h.Status)
-			}
+			requireEqualf(t, h.Status, tc.status, "status %s", h.Status)
 			if h.Status == "ok" {
 				for i := 0; i < tc.blocks; i++ {
 					b := readDeltaTestHeader(t, r)
@@ -114,17 +105,9 @@ func TestDeltaServer(t *testing.T) {
 			if h = readDeltaTestHeader(t, r); h.Status != "version_changed" {
 				t.Fatal(h)
 			}
-			req.BlockSize = 1
-			if w = testDeltaCall(t, f, req); w.Code != 400 {
-				t.Fatal(w.Code)
-			}
-			req.BlockSize = folder.DeltaBlockSize
-			req.Blocks = []string{strings.Repeat("z", 64)}
-			if w = testDeltaCall(t, f, req); w.Code != 400 {
-				t.Fatal(w.Code)
-			}
 		})
 	}
+	t.Run("RejectsMalformedAndMutation", func(t *testing.T) { testDeltaServerRejectsMalformedAndMutation(t, f, target) })
 }
 
 type deltaMutatingWriter struct {
@@ -141,25 +124,23 @@ func (w *deltaMutatingWriter) Write(p []byte) (int, error) {
 	}
 	return n, e
 }
-func TestDeltaServerRejectsMalformedAndMutation(t *testing.T) {
-	f, _ := fileFixture(t)
-	target := bytes.Repeat([]byte{1}, 4*folder.DeltaBlockSize)
-	if e := os.WriteFile(filepath.Join(f.Root, "a"), target, 0600); e != nil {
-		t.Fatal(e)
-	}
-	if e := f.Scan(); e != nil {
-		t.Fatal(e)
-	}
-	fi, _, _ := f.Lookup("a")
+func testDeltaServerRejectsMalformedAndMutation(t *testing.T, f *folder.Folder, target []byte) {
+	fi, _, _ := f.Lookup("malformed")
 	base := bytes.Repeat([]byte{1}, len(target))
 	base[0] = 2
-	req := folder.DeltaRequest{Protocol: 2, Name: "a", TargetHash: fi.Hash, TargetSize: fi.Size, BaseHash: deltaHash(base), BaseSize: int64(len(base)), BlockSize: folder.DeltaBlockSize, Blocks: signatures(base)}
-	bad := req
-	bad.Blocks = bad.Blocks[:3]
-	if w := testDeltaCall(t, f, bad); w.Code != 400 {
-		t.Fatalf("count=%d", w.Code)
+	req := folder.DeltaRequest{Protocol: 2, Name: "malformed", TargetHash: fi.Hash, TargetSize: fi.Size, BaseHash: deltaHash(base), BaseSize: int64(len(base)), BlockSize: folder.DeltaBlockSize, Blocks: signatures(base)}
+	badSize, badHash, badCount := req, req, req
+	badSize.BlockSize = 1
+	badHash.Blocks = []string{strings.Repeat("z", 64)}
+	badCount.Blocks = badCount.Blocks[:3]
+	for _, tc := range []struct {
+		name string
+		req  folder.DeltaRequest
+	}{{"block size", badSize}, {"block hash", badHash}, {"count", badCount}} {
+		w := testDeltaCall(t, f, tc.req)
+		requireEqualf(t, w.Code, 400, "%s: status=%d", tc.name, w.Code)
 	}
-	bad = req
+	bad := req
 	bad.TargetHash = deltaHash([]byte("stale"))
 	w := testDeltaCall(t, f, bad)
 	r := bytes.NewReader(w.Body.Bytes())
@@ -173,7 +154,7 @@ func TestDeltaServerRejectsMalformedAndMutation(t *testing.T) {
 	request.Header.Set(ProtocolHeader, "2")
 	rec := httptest.NewRecorder()
 	mw := &deltaMutatingWriter{batchWriter: &batchWriter{ResponseRecorder: rec}, mutate: func() {
-		if e := os.WriteFile(filepath.Join(f.Root, "a"), bytes.Repeat([]byte{3}, len(target)), 0600); e != nil {
+		if e := os.WriteFile(filepath.Join(f.Root, "malformed"), bytes.Repeat([]byte{3}, len(target)), 0600); e != nil {
 			t.Error(e)
 		}
 	}}
@@ -181,17 +162,11 @@ func TestDeltaServerRejectsMalformedAndMutation(t *testing.T) {
 	r = bytes.NewReader(rec.Body.Bytes())
 	io.ReadFull(r, magic[:])
 	h := readDeltaTestHeader(t, r)
-	if h.Status != "ok" {
-		t.Fatal(h)
-	}
-	if r.Len() != 0 {
-		t.Fatal("mutated target emitted a complete block or end")
-	}
+	requireEqual(t, h.Status, "ok", h)
+	requireEqual(t, r.Len(), 0, "mutated target emitted a complete block or end")
 	oversized := httptest.NewRequest("POST", "/delta", strings.NewReader(strings.Repeat(" ", 5<<20)+"{}"))
 	oversized.Header.Set(ProtocolHeader, "2")
 	rec = httptest.NewRecorder()
 	(&Server{Folder: f}).delta(&batchWriter{ResponseRecorder: rec}, oversized)
-	if rec.Code != 400 {
-		t.Fatal(rec.Code)
-	}
+	requireEqual(t, rec.Code, 400, rec.Code)
 }

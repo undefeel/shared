@@ -57,54 +57,25 @@ func TestLaunchdPlist(t *testing.T) {
 }
 
 func TestSystemdUnit(t *testing.T) {
-	exe := "/путь с пробелом/sharedir"
-	home := "/home/путь с пробелом"
-
-	unit, err := systemdUnit(exe, home)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	expectedExec := `ExecStart="/путь с пробелом/sharedir" run`
-	if !strings.Contains(unit, expectedExec) {
-		t.Errorf("expected unit to contain %q, got:\n%s", expectedExec, unit)
-	}
-
-	expectedEnv := `Environment="SHAREDIR_HOME=/home/путь с пробелом"`
-	if !strings.Contains(unit, expectedEnv) {
-		t.Errorf("expected unit to contain %q, got:\n%s", expectedEnv, unit)
-	}
-
-	// Escaping check
-	exeEsc := `/path "with quotes" and \slash and %percent/sharedir`
-	homeEsc := `/home "user" %dir`
-	unitEsc, err := systemdUnit(exeEsc, homeEsc)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expectedExecEsc := `ExecStart="/path \"with quotes\" and \\slash and %%percent/sharedir" run`
-	if !strings.Contains(unitEsc, expectedExecEsc) {
-		t.Errorf("expected unit to contain %q, got:\n%s", expectedExecEsc, unitEsc)
-	}
-	expectedEnvEsc := `Environment="SHAREDIR_HOME=/home \"user\" %%dir"`
-	if !strings.Contains(unitEsc, expectedEnvEsc) {
-		t.Errorf("expected unit to contain %q, got:\n%s", expectedEnvEsc, unitEsc)
-	}
-
-	// Newline test
-	for _, badExe := range []string{"/path\nwith/newline", "/path\rwith/return"} {
-		if _, err := systemdUnit(badExe, "/home/test"); err == nil {
-			t.Errorf("expected error for newline in exe %q, got nil", badExe)
-		} else if !strings.Contains(err.Error(), "путь содержит перевод строки") {
-			t.Errorf("expected 'путь содержит перевод строки' error, got %v", err)
+	for _, tc := range []struct{ exe, home, exec, env string }{
+		{"/путь с пробелом/sharedir", "/home/путь с пробелом", `ExecStart="/путь с пробелом/sharedir" run`, `Environment="SHAREDIR_HOME=/home/путь с пробелом"`},
+		{`/path "with quotes" and \slash and %percent/sharedir`, `/home "user" %dir`, `ExecStart="/path \"with quotes\" and \\slash and %%percent/sharedir" run`, `Environment="SHAREDIR_HOME=/home \"user\" %%dir"`},
+	} {
+		unit, err := systemdUnit(tc.exe, tc.home)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, want := range []string{tc.exec, tc.env} {
+			if !strings.Contains(unit, want) {
+				t.Errorf("expected unit to contain %q, got:\n%s", want, unit)
+			}
 		}
 	}
-
-	for _, badHome := range []string{"/home\ntest", "/home\rtest"} {
-		if _, err := systemdUnit("/bin/sharedir", badHome); err == nil {
-			t.Errorf("expected error for newline in home %q, got nil", badHome)
-		} else if !strings.Contains(err.Error(), "путь содержит перевод строки") {
-			t.Errorf("expected 'путь содержит перевод строки' error, got %v", err)
+	for _, bad := range []string{"/path\nwith/newline", "/path\rwith/return"} {
+		for _, tc := range []struct{ exe, home string }{{bad, "/home/test"}, {"/bin/sharedir", bad}} {
+			if _, err := systemdUnit(tc.exe, tc.home); err == nil || !strings.Contains(err.Error(), "путь содержит перевод строки") {
+				t.Errorf("expected newline error for %q %q, got %v", tc.exe, tc.home, err)
+			}
 		}
 	}
 }

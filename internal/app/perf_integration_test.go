@@ -35,13 +35,9 @@ func perfDaemon(t testing.TB, base, tag string, measure *folder.PersistenceMeasu
 	logger := log.New(io.Discard, "", 0)
 	home := filepath.Join(base, tag)
 	root := filepath.Join(home, "root")
-	if err := os.MkdirAll(root, 0700); err != nil {
-		t.Fatal(err)
-	}
+	mustMkdirAll(t, root, 0700)
 	cfg := &config.Config{Name: tag, Folder: root, DownloadConcurrency: 6}
-	if err := cfg.Save(home); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, cfg.Save(home))
 	d, err := newWithFolderFactory(home, logger, func(root, state, device string, l *log.Logger) (*folder.Folder, error) {
 		f, e := folder.Open(root, state, device, l)
 		if e == nil && measure != nil {
@@ -49,13 +45,9 @@ func perfDaemon(t testing.TB, base, tag string, measure *folder.PersistenceMeasu
 		}
 		return f, e
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	d.folder, err = d.openFolder(root, filepath.Join(home, "index.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	d.folder.SetDownloadConcurrency(6)
 	t.Cleanup(func() {
 		if e := d.folder.Close(); e != nil {
@@ -93,9 +85,7 @@ func perfClient(t testing.TB, local, remote *Daemon) *transport.Client {
 func perfTransfer(t testing.TB, ctx context.Context, dst, remote *Daemon, client *transport.Client, addr string, baseline bool) (*peerQueue, *transport.IndexResponse) {
 	t.Helper()
 	idx, err := client.IndexSince(ctx, addr, "", 0, "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	q := newPeerQueue()
 	if !q.accept(remote.ID.ID, idx.StoreEpoch, idx.Cursor, false, idx.Files) {
 		if baseline {
@@ -127,17 +117,11 @@ func perfVerify(t testing.TB, dest *Daemon, expected []folder.FileInfo, byName m
 			t.Fatalf("metadata mismatch %s", want.Name)
 		}
 		body, e := os.ReadFile(filepath.Join(dest.folder.Root, fi.Name))
-		if e != nil {
-			t.Fatal(e)
-		}
+		requireNoError(t, e)
 		hash := sha256.Sum256(body)
-		if hex.EncodeToString(hash[:]) != want.Hash {
-			t.Fatalf("disk hash mismatch %s", want.Name)
-		}
+		requireEqualf(t, hex.EncodeToString(hash[:]), want.Hash, "disk hash mismatch %s", want.Name)
 		st, e := os.Stat(filepath.Join(dest.folder.Root, fi.Name))
-		if e != nil {
-			t.Fatal(e)
-		}
+		requireNoError(t, e)
 		if (st.Mode()&0111 != 0) != want.Exec {
 			t.Fatalf("disk Exec mismatch %s", want.Name)
 		}
@@ -149,9 +133,7 @@ func perfPopulate(t testing.TB, source *Daemon, n int) {
 	for i := 0; i < n; i++ {
 		// 4*4*4 leaf directories, depth four including filename.
 		dir := filepath.Join(source.folder.Root, fmt.Sprint(i%4), fmt.Sprint((i/4)%4), fmt.Sprint((i/16)%4))
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
+		mustMkdirAll(t, dir, 0700)
 		body := make([]byte, 11<<10)
 		for off := 0; off < len(body); off += 32 {
 			var seed [16]byte
@@ -164,24 +146,33 @@ func perfPopulate(t testing.TB, source *Daemon, n int) {
 		if i%3 == 0 {
 			mode = 0755
 		}
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)), body, mode); err != nil {
-			t.Fatal(err)
-		}
+		writeTestFile(t, filepath.Join(dir, fmt.Sprintf("f%05d", i)), body, mode)
 	}
 }
 
-func perfTrial(t testing.TB, n int) perfResult {
+func perfTrialMode(t testing.TB, n int, reuse bool) perfResult {
 	t.Helper()
 	base := t.TempDir()
 	var measure folder.PersistenceMeasurement
 	source, dest := perfDaemon(t, base, "source", nil), perfDaemon(t, base, "receiver", &measure)
 	perfPopulate(t, source, n)
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
+	if reuse {
+		for i := 0; i < n; i++ {
+			dir := filepath.Join(source.folder.Root, fmt.Sprint(i%4), fmt.Sprint((i/4)%4), fmt.Sprint((i/16)%4))
+			body, e := os.ReadFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)))
+			requireNoError(t, e)
+			writeTestFile(t, filepath.Join(dest.folder.Root, fmt.Sprintf("donor%05d", i)), body, 0600)
+		}
+		mustScan(t, dest.folder)
 	}
+	mustScan(t, source.folder)
 	expected, _, _ := source.folder.DurableState()
 	var h2, authenticated atomic.Bool
+	var bodies atomic.Int64
 	srv := perfServer(t, source, dest, func(r *http.Request) {
+		if reuse && (r.URL.Path == "/file" || r.URL.Path == "/files") {
+			bodies.Add(1)
+		}
 		if r.ProtoMajor == 2 {
 			h2.Store(true)
 		}
@@ -192,6 +183,11 @@ func perfTrial(t testing.TB, n int) perfResult {
 	client := perfClient(t, dest, source)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+	var setupBytes map[string]uint64
+	var setupGroups uint64
+	if reuse {
+		setupBytes, setupGroups = measure.Snapshot()
+	}
 	before := dest.folder.PersistenceStats()
 	start := time.Now()
 	addr := strings.TrimPrefix(srv.URL, "https://")
@@ -201,9 +197,12 @@ func perfTrial(t testing.TB, n int) perfResult {
 	for _, fi := range got {
 		byName[fi.Name] = fi
 	}
-	if len(got) != n {
-		t.Fatalf("files=%d want=%d", len(got), n)
+	wantCount := n
+	if reuse {
+		requireEqualf(t, bodies.Load(), 0, "body requests=%d", bodies.Load())
+		wantCount = 2 * n
 	}
+	requireEqualf(t, len(got), wantCount, "files=%d want=%d", len(got), wantCount)
 	perfVerify(t, dest, expected, byName)
 	elapsed := time.Since(start)
 	if !h2.Load() || !authenticated.Load() {
@@ -213,6 +212,12 @@ func perfTrial(t testing.TB, n int) perfResult {
 		t.Fatal("durable cursor unsettled")
 	}
 	bytes, groups := measure.Snapshot()
+	if reuse {
+		groups -= setupGroups
+		for kind, n := range setupBytes {
+			bytes[kind] -= n
+		}
+	}
 	after := dest.folder.PersistenceStats()
 	result := perfResult{elapsed: elapsed, groups: groups, flush: folder.PersistenceCounters{Bytes: after.Bytes - before.Bytes, Fsync: after.Fsync - before.Fsync, Fullfsync: after.Fullfsync - before.Fullfsync, Barrierfsync: after.Barrierfsync - before.Barrierfsync}}
 	for kind, b := range bytes {
@@ -223,10 +228,13 @@ func perfTrial(t testing.TB, n int) perfResult {
 		}
 	}
 	fmt.Printf("Perf n=%d time=%s files/s=%.1f index=%d intent=%d fsync=%d FULLFSYNC=%d BARRIERFSYNC=%d G=%d mean=%.2f\n", n, elapsed, float64(n)/elapsed.Seconds(), result.index, result.intent, result.flush.Fsync, result.flush.Fullfsync, result.flush.Barrierfsync, groups, float64(n)/float64(groups))
+	if reuse && result.index+result.intent != result.flush.Bytes {
+		t.Fatal("probe byte accounting mismatch")
+	}
 	if groups == 0 || float64(n)/float64(groups) < 32 {
 		t.Errorf("pipeline mean group size below 32: files=%d groups=%d", n, groups)
 	}
-	if result.index+result.intent != result.flush.Bytes {
+	if !reuse && result.index+result.intent != result.flush.Bytes {
 		t.Errorf("probe byte accounting mismatch")
 	}
 	if result.intent > 4<<20 {
@@ -238,16 +246,18 @@ func perfTrial(t testing.TB, n int) perfResult {
 	if result.flush.Fullfsync > 3*groups+12 {
 		t.Errorf("FULLFSYNC=%d >3G+12 G=%d", result.flush.Fullfsync, groups)
 	}
-	a := dest.folder.PersistenceStats()
-	if err := dest.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	b := dest.folder.PersistenceStats()
-	if a != b {
-		t.Errorf("no-op Scan wrote/flushed: before=%+v after=%+v", a, b)
+	if !reuse {
+		a := dest.folder.PersistenceStats()
+		mustScan(t, dest.folder)
+		b := dest.folder.PersistenceStats()
+		if a != b {
+			t.Errorf("no-op Scan wrote/flushed: before=%+v after=%+v", a, b)
+		}
 	}
 	return result
 }
+
+func perfTrial(t testing.TB, n int) perfResult { return perfTrialMode(t, n, false) }
 
 func TestPerf(t *testing.T) {
 	if os.Getenv("SHAREDIR_PERF") != "1" {
@@ -292,101 +302,7 @@ func BenchmarkPerf(b *testing.B) {
 	}
 }
 
-func perfReuseTrial(t testing.TB, n int) perfResult {
-	t.Helper()
-	base := t.TempDir()
-	var measure folder.PersistenceMeasurement
-	source, dest := perfDaemon(t, base, "source", nil), perfDaemon(t, base, "receiver", &measure)
-	perfPopulate(t, source, n)
-	for i := 0; i < n; i++ {
-		dir := filepath.Join(source.folder.Root, fmt.Sprint(i%4), fmt.Sprint((i/4)%4), fmt.Sprint((i/16)%4))
-		body, e := os.ReadFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)))
-		if e != nil {
-			t.Fatal(e)
-		}
-		if e = os.WriteFile(filepath.Join(dest.folder.Root, fmt.Sprintf("donor%05d", i)), body, 0600); e != nil {
-			t.Fatal(e)
-		}
-	}
-	if e := dest.folder.Scan(); e != nil {
-		t.Fatal(e)
-	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	expected, _, _ := source.folder.DurableState()
-	var h2, authenticated atomic.Bool
-	var bodies atomic.Int64
-	srv := perfServer(t, source, dest, func(r *http.Request) {
-		if r.URL.Path == "/file" || r.URL.Path == "/files" {
-			bodies.Add(1)
-		}
-		if r.ProtoMajor == 2 {
-			h2.Store(true)
-		}
-		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-			authenticated.Store(true)
-		}
-	})
-	client := perfClient(t, dest, source)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	setupBytes, setupGroups := measure.Snapshot()
-	before := dest.folder.PersistenceStats()
-	start := time.Now()
-	addr := strings.TrimPrefix(srv.URL, "https://")
-	queue, idx := perfTransfer(t, ctx, dest, source, client, addr, true)
-	got, _, _ := dest.folder.DurableState()
-	byName := make(map[string]folder.FileInfo, len(got))
-	for _, fi := range got {
-		byName[fi.Name] = fi
-	}
-	if bodies.Load() != 0 {
-		t.Fatalf("body requests=%d", bodies.Load())
-	}
-	if len(got) != 2*n {
-		t.Fatalf("files=%d want=%d", len(got), n)
-	}
-	perfVerify(t, dest, expected, byName)
-	elapsed := time.Since(start)
-	if !h2.Load() || !authenticated.Load() {
-		t.Fatal("authenticated HTTP/2 not observed")
-	}
-	if _, cursor, ok := queue.cursor(source.ID.ID); !ok || cursor != idx.Cursor {
-		t.Fatal("durable cursor unsettled")
-	}
-	bytes, groups := measure.Snapshot()
-	groups -= setupGroups
-	for kind, n := range setupBytes {
-		bytes[kind] -= n
-	}
-	after := dest.folder.PersistenceStats()
-	result := perfResult{elapsed: elapsed, groups: groups, flush: folder.PersistenceCounters{Bytes: after.Bytes - before.Bytes, Fsync: after.Fsync - before.Fsync, Fullfsync: after.Fullfsync - before.Fullfsync, Barrierfsync: after.Barrierfsync - before.Barrierfsync}}
-	for kind, b := range bytes {
-		if kind == "intent" {
-			result.intent += b
-		} else {
-			result.index += b
-		}
-	}
-	fmt.Printf("Perf n=%d time=%s files/s=%.1f index=%d intent=%d fsync=%d FULLFSYNC=%d BARRIERFSYNC=%d G=%d mean=%.2f\n", n, elapsed, float64(n)/elapsed.Seconds(), result.index, result.intent, result.flush.Fsync, result.flush.Fullfsync, result.flush.Barrierfsync, groups, float64(n)/float64(groups))
-	if result.index+result.intent != result.flush.Bytes {
-		t.Fatal("probe byte accounting mismatch")
-	}
-	if groups == 0 || float64(n)/float64(groups) < 32 {
-		t.Errorf("pipeline mean group size below 32: files=%d groups=%d", n, groups)
-	}
-	if result.intent > 4<<20 {
-		t.Errorf("intent bytes %d >4MiB", result.intent)
-	}
-	if result.index > 4<<20 {
-		t.Errorf("index bytes %d > 4 MiB", result.index)
-	}
-	if result.flush.Fullfsync > 3*groups+12 {
-		t.Errorf("FULLFSYNC=%d >3G+12 G=%d", result.flush.Fullfsync, groups)
-	}
-	return result
-}
+func perfReuseTrial(t testing.TB, n int) perfResult { return perfTrialMode(t, n, true) }
 
 func TestPerfContentReuse(t *testing.T) {
 	if os.Getenv("SHAREDIR_PERF") != "1" {
@@ -397,16 +313,10 @@ func TestPerfContentReuse(t *testing.T) {
 
 func TestNoOpScanWrites(t *testing.T) {
 	d := perfDaemon(t, t.TempDir(), "source", nil)
-	if err := os.WriteFile(filepath.Join(d.folder.Root, "file"), []byte("content"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(d.folder.Root, "file"), []byte("content"), 0600)
+	mustScan(t, d.folder)
 	before := d.folder.PersistenceStats()
-	if err := d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	mustScan(t, d.folder)
 	if after := d.folder.PersistenceStats(); before != after {
 		t.Errorf("no-op Scan wrote/flushed: before=%+v after=%+v", before, after)
 	}
@@ -424,13 +334,9 @@ func TestWatchScheduleHarness(t *testing.T) {
 	}
 	for i := 0; i < 2092; i++ {
 		name := filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i))
-		if err := os.WriteFile(name, []byte(fmt.Sprintf("baseline-%d", i)), 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeTestFile(t, name, []byte(fmt.Sprintf("baseline-%d", i)), 0600)
 	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	mustScan(t, source.folder)
 	sourceServer := perfServer(t, source, dest, nil)
 	destServer := perfServer(t, dest, source, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -469,13 +375,9 @@ func TestWatchScheduleHarness(t *testing.T) {
 	}
 baselineReady:
 	for i := 0; i < 32; i++ {
-		if err := os.WriteFile(filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i)), []byte(fmt.Sprintf("incoming burst %d", i)), 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeTestFile(t, filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i)), []byte(fmt.Sprintf("incoming burst %d", i)), 0600)
 	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	mustScan(t, source.folder)
 	perfTransfer(t, ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"), false)
 	ownDeadline := time.NewTimer(2 * time.Second)
 	defer ownDeadline.Stop()
@@ -485,9 +387,7 @@ baselineReady:
 	case <-ownDeadline.C:
 	}
 	// A local receiver edit must produce an incremental scope.
-	if err := os.WriteFile(filepath.Join(dest.folder.Root, "f00042"), []byte("receiver edit"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(dest.folder.Root, "f00042"), []byte("receiver edit"), 0600)
 	select {
 	case b := <-batches:
 		if b.FullRequired || b.RootChanged || len(b.Paths) == 0 {
@@ -498,11 +398,5 @@ baselineReady:
 	}
 	// Pull the receiver’s durable change back to the source and verify bytes.
 	perfTransfer(t, ctx, source, dest, perfClient(t, source, dest), strings.TrimPrefix(destServer.URL, "https://"), false)
-	got, err := os.ReadFile(filepath.Join(source.folder.Root, "f00042"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "receiver edit" {
-		t.Fatalf("reverse propagation = %q", got)
-	}
+	requireFileContents(t, filepath.Join(source.folder.Root, "f00042"), []byte("receiver edit"), "reverse propagation")
 }

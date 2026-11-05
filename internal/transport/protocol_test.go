@@ -22,17 +22,13 @@ func TestRequireProtocolRejectsV1AndMissingVersion(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
-			if w.Code != http.StatusUpgradeRequired {
-				t.Fatalf("status=%d, want 426", w.Code)
-			}
+			requireEqualf(t, w.Code, http.StatusUpgradeRequired, "status=%d, want 426", w.Code)
 			var got struct {
 				Code     string `json:"code"`
 				Expected int    `json:"expected"`
 				Received string `json:"received"`
 			}
-			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-				t.Fatal(err)
-			}
+			requireNoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 			if got.Code != "protocol_incompatible" || got.Expected != 2 || got.Received != version {
 				t.Fatalf("unexpected error response: %+v", got)
 			}
@@ -61,28 +57,18 @@ func TestDecodeHelloRejectsBadJSON(t *testing.T) {
 
 func TestDecodeHelloAndCertifiedPeerIdentity(t *testing.T) {
 	hello, err := DecodeHello(strings.NewReader(`{"protocol":2,"storeEpoch":"store","peerSetEpoch":"peers","features":["files"],"limits":{"files":64}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	if hello.Protocol != 2 || hello.StoreEpoch != "store" || hello.PeerSetEpoch != "peers" || len(hello.Features) != 1 || hello.Limits["files"] != 64 {
 		t.Fatalf("decoded hello: %+v", hello)
 	}
 
 	id, err := identity.LoadOrCreate(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	cert, err := x509.ParseCertificate(id.Cert.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	got, err := CertifiedPeerID([]*x509.Certificate{cert})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != id.ID {
-		t.Fatalf("certified identity=%q, want %q", got, id.ID)
-	}
+	requireNoError(t, err)
+	requireEqualf(t, got, id.ID, "certified identity=%q, want %q", got, id.ID)
 	if _, err := CertifiedPeerID(nil); err == nil {
 		t.Fatal("missing certificate accepted")
 	}

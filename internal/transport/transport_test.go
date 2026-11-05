@@ -30,9 +30,7 @@ func TestFetcherSizes(t *testing.T) {
 			defer s.Close()
 			c, addr := clientFor(s)
 			err := c.Fetcher(addr)(context.Background(), folder.FileInfo{Size: size}, io.Discard)
-			if (err == nil) != (size == 3) {
-				t.Fatalf("size %d: %v", size, err)
-			}
+			requireEqualf(t, (err == nil), (size == 3), "size %d: %v", size, err)
 		})
 	}
 }
@@ -47,31 +45,6 @@ func TestIdleBody(t *testing.T) {
 		t.Fatal("expected idle timeout")
 	}
 }
-func TestIndexLimits(t *testing.T) {
-	for _, body := range []string{
-		strings.Repeat(" ", 101),
-		`{"seq":1,"files":[{"name":"` + strings.Repeat("a", 4097) + `"}]}`,
-		`{"seq":1,"files":[{"version":{` + strings.Join(func() []string {
-			var a []string
-			for i := 0; i < 65; i++ {
-				a = append(a, "\""+string(rune('A'+i))+"\":1")
-			}
-			return a
-		}(), ",") + `}}]}`,
-	} {
-		s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
-		c, addr := clientFor(s)
-		c.IndexLimit = 100
-		if len(body) > 101 {
-			c.IndexLimit = 10000
-		}
-		if _, err := c.Index(context.Background(), addr, 0); err == nil {
-			t.Fatal("expected invalid index")
-		}
-		s.Close()
-	}
-}
-
 func indexClient(body string, limit int64) (*Client, string, func()) {
 	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 	c, addr := clientFor(s)
@@ -92,9 +65,7 @@ func TestIndexStreamingRecords(t *testing.T) {
 	c, addr, closeServer := indexClient(body.String(), int64(body.Len()+1))
 	defer closeServer()
 	out, err := c.Index(context.Background(), addr, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	if out.Seq != 77 || len(out.Files) != 10000 || out.Files[9999].Name != "file-9999" || out.Files[9999].Size != 9999 || out.Files[9999].Version["peer"] != 9999 {
 		t.Fatalf("unexpected decoded index: seq=%d files=%d last=%+v", out.Seq, len(out.Files), out.Files[len(out.Files)-1])
 	}
@@ -109,6 +80,13 @@ func TestIndexStreamingRejectsLimitAndMalformedRecords(t *testing.T) {
 		{"body limit", `{"seq":1,"files":[]}` + strings.Repeat(" ", 100), 20, "index exceeds size limit"},
 		{"long name", `{"seq":1,"files":[{"name":"ok"},{"name":"` + strings.Repeat("x", 4097) + `"},{"name":"unread"}]}`, 10000, "invalid index record"},
 		{"bad JSON", `{"seq":1,"files":[`, 100, ""},
+		{"too many vector entries", `{"seq":1,"files":[{"version":{` + strings.Join(func() []string {
+			var keys []string
+			for i := 0; i < 65; i++ {
+				keys = append(keys, fmt.Sprintf("\"%c\":1", 'A'+i))
+			}
+			return keys
+		}(), ",") + `}}]}`, 10000, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, addr, closeServer := indexClient(tc.body, tc.limit)
@@ -146,39 +124,11 @@ func TestIndexDoesNotCopyRawBody(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	out, err := c.Index(context.Background(), addr, 0)
 	runtime.ReadMemStats(&after)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(out.Files) != count {
-		t.Fatalf("got %d records", len(out.Files))
-	}
+	requireNoError(t, err)
+	requireEqualf(t, len(out.Files), count, "got %d records", len(out.Files))
 	allocated := after.TotalAlloc - before.TotalAlloc
 	if allocated > uint64(body.Len())*17/10 {
 		t.Fatalf("allocated %d bytes for %d-byte index; likely copied the raw body", allocated, body.Len())
-	}
-}
-func TestRequestRevocation(t *testing.T) {
-	var allowed atomic.Bool
-	allowed.Store(true)
-	s := &Server{Allowed: func(string) bool { return allowed.Load() }, Paused: func() bool { return true }}
-	cert := &x509.Certificate{Raw: []byte("peer")}
-	h := readyHandler(s)
-	request := func() int {
-		r := v2Request("GET", "https://peer/index", nil)
-		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if !allowed.Load() && w.Header().Get("Connection") != "close" {
-			t.Fatal("connection not closed")
-		}
-		return w.Code
-	}
-	if request() != 503 {
-		t.Fatal("initial permission")
-	}
-	allowed.Store(false)
-	if request() != 403 {
-		t.Fatal("revoked permission")
 	}
 }
 func TestHandshakeTimeoutAndLimit(t *testing.T) {
@@ -189,9 +139,7 @@ func TestHandshakeTimeoutAndLimit(t *testing.T) {
 	s.StartTLS()
 	defer s.Close()
 	c, err := net.Dial("tcp", s.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	defer c.Close()
 	// Wait until the first socket has been admitted, without depending on scheduling.
 	deadline := time.Now().Add(time.Second)
@@ -208,9 +156,7 @@ func TestHandshakeTimeoutAndLimit(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	extra, err := net.Dial("tcp", s.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	defer extra.Close()
 	extra.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err = extra.Read(make([]byte, 1)); err == nil {
@@ -331,15 +277,25 @@ func TestDirectPerIPAndSharedConnectionLimit(t *testing.T) {
 	if _, err := relayLn.Accept(); err == nil {
 		t.Fatal("shared total limit not enforced")
 	}
-	if g.count != 18 {
-		t.Fatalf("total count=%d, want 18", g.count)
-	}
+	requireEqualf(t, g.count, 18, "total count=%d, want 18", g.count)
 	for _, c := range acceptedDirect {
 		c.Close()
 	}
 	for _, c := range acceptedRelay {
 		c.Close()
 	}
+}
+
+func revocationClient(t *testing.T, s *httptest.Server) *http.Client {
+	t.Helper()
+	s.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+	s.StartTLS()
+	t.Cleanup(s.Close)
+	cfg := s.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	cfg.Certificates = s.TLS.Certificates
+	c := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+	t.Cleanup(c.CloseIdleConnections)
+	return c
 }
 
 func TestRevokeTransfer(t *testing.T) {
@@ -354,17 +310,9 @@ func TestRevokeTransfer(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	s.Config.ConnState = g.State
-	s.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
-	s.StartTLS()
-	defer s.Close()
-	cfg := s.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	cfg.Certificates = s.TLS.Certificates
-	c := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
-	defer c.CloseIdleConnections()
+	c := revocationClient(t, s)
 	resp, err := c.Get(s.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	defer resp.Body.Close()
 	<-started
 	allowed.Store(false)
@@ -378,15 +326,9 @@ func TestRevokeTransfer(t *testing.T) {
 func TestKeepAliveRevocation(t *testing.T) {
 	var allowed atomic.Bool
 	allowed.Store(true)
-	handler := (&Server{Allowed: func(string) bool { return allowed.Load() }, Paused: func() bool { return true }}).Handler()
+	server := &Server{Allowed: func(string) bool { return allowed.Load() }, Paused: func() bool { return true }}
+	handler := server.Handler()
 	s := httptest.NewUnstartedServer(handler)
-	s.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
-	s.StartTLS()
-	defer s.Close()
-	cfg := s.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	cfg.Certificates = s.TLS.Certificates
-	c := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
-	defer c.CloseIdleConnections()
 	var remote string
 	original := s.Config.Handler
 	s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -394,16 +336,13 @@ func TestKeepAliveRevocation(t *testing.T) {
 		w.Header().Set("X-Test-Remote", r.RemoteAddr)
 		original.ServeHTTP(w, r)
 	})
+	c := revocationClient(t, s)
 	for i, want := range []int{503, 403} {
 		resp, err := c.Get(s.URL + "/index")
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireNoError(t, err)
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != want {
-			t.Fatalf("got %d want %d", resp.StatusCode, want)
-		}
+		requireEqualf(t, resp.StatusCode, want, "got %d want %d", resp.StatusCode, want)
 		if i == 0 {
 			remote = resp.Header.Get("X-Test-Remote")
 			allowed.Store(false)
@@ -411,13 +350,20 @@ func TestKeepAliveRevocation(t *testing.T) {
 			t.Fatal("connection was not reused")
 		}
 	}
+	// The direct handler also instructs a rejected peer to close the connection.
+	r := v2Request("GET", "https://peer/index", nil)
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: []byte("peer")}}}
+	w := httptest.NewRecorder()
+	readyHandler(server).ServeHTTP(w, r)
+	if w.Code != 403 || w.Header().Get("Connection") != "close" {
+		t.Fatalf("revoked: status=%d connection=%q", w.Code, w.Header().Get("Connection"))
+	}
+
 }
 
 func TestLongPollRevocation(t *testing.T) {
 	f, err := folder.Open(t.TempDir(), filepath.Join(t.TempDir(), "state"), "self", log.New(io.Discard, "", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	_, seq := f.Snapshot()
 	var calls atomic.Int32
 	s := &Server{Folder: f, State: testState{f}, PollTimeout: time.Millisecond, Allowed: func(string) bool { return calls.Add(1) == 1 }}
@@ -425,7 +371,5 @@ func TestLongPollRevocation(t *testing.T) {
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{Raw: []byte("peer")}}}
 	w := httptest.NewRecorder()
 	readyHandler(s).ServeHTTP(w, r)
-	if w.Code != 403 {
-		t.Fatalf("long-poll returned %d", w.Code)
-	}
+	requireEqualf(t, w.Code, 403, "long-poll returned %d", w.Code)
 }

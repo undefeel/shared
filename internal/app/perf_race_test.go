@@ -15,9 +15,7 @@ import (
 
 func TestConcurrentConfirmDrainsDownload(t *testing.T) {
 	d := folderDaemon(t)
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, d.ConfirmFolder(d.folder.Blocked().Token, "reset"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan struct{})
@@ -39,15 +37,9 @@ func TestConcurrentConfirmDrainsDownload(t *testing.T) {
 		t.Fatal("download did not start")
 	}
 	path := filepath.Join(d.folder.Root, "local")
-	if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, path, []byte("keep"), 0600)
+	mustScan(t, d.folder)
+	requireNoError(t, os.Remove(path))
 	if err := d.folder.Scan(); err == nil {
 		t.Fatal("missing latch")
 	}
@@ -69,26 +61,16 @@ func TestConcurrentConfirmDrainsDownload(t *testing.T) {
 			t.Fatal("confirmation did not finish")
 		}
 	}
-	if successes != 1 {
-		t.Fatalf("successful confirmations: %d", successes)
-	}
+	requireEqualf(t, successes, 1, "successful confirmations: %d", successes)
 	select {
 	case n := <-downloaded:
-		if n != 0 {
-			t.Fatalf("stale download applied %d files", n)
-		}
+		requireEqualf(t, n, 0, "stale download applied %d files", n)
 	case <-time.After(5 * time.Second):
 		t.Fatal("download not drained")
 	}
-	if _, err := os.Stat(filepath.Join(d.folder.Root, "incoming")); !os.IsNotExist(err) {
-		t.Fatalf("stale download exists: %v", err)
-	}
-	if err := os.WriteFile(path, []byte("new generation"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	requireMissingFile(t, filepath.Join(d.folder.Root, "incoming"), "stale download exists")
+	writeTestFile(t, path, []byte("new generation"), 0600)
+	mustScan(t, d.folder)
 	if err := d.ConfirmFolder(token, "reset"); err == nil {
 		t.Fatal("stale token accepted")
 	}

@@ -21,53 +21,48 @@ import (
 	"sharedir/internal/transport"
 )
 
+func testOpenFolder(t *testing.T, root, state, device string) *folder.Folder {
+	t.Helper()
+	for _, dir := range []string{root, filepath.Dir(state)} {
+		mustMkdirAll(t, dir, 0700)
+	}
+	f, err := folder.Open(root, state, device, log.New(io.Discard, "", 0))
+	requireNoError(t, err)
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+func testIdentity(t *testing.T, path string) *identity.Identity {
+	t.Helper()
+	mustMkdirAll(t, path, 0700)
+	id, err := identity.LoadOrCreate(path)
+	requireNoError(t, err)
+	return id
+}
+
+func testTLSServer(t *testing.T, handler http.Handler, id *identity.Identity) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{id.Cert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
+}
+
 func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 	base := t.TempDir()
-	openFolder := func(tag string) *folder.Folder {
-		t.Helper()
-		root := filepath.Join(base, tag, "root")
-		state := filepath.Join(base, tag, "state", "index.json")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Dir(state), 0700); err != nil {
-			t.Fatal(err)
-		}
-		f, err := folder.Open(root, state, tag, log.New(io.Discard, "", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = f.Close() })
-		return f
+	open := func(tag string) *folder.Folder {
+		return testOpenFolder(t, filepath.Join(base, tag, "root"), filepath.Join(base, tag, "state", "index.json"), tag)
 	}
-	source, destination := openFolder("source"), openFolder("destination")
-	serverHome, clientHome := filepath.Join(base, "server-id"), filepath.Join(base, "client-id")
-	if err := os.MkdirAll(serverHome, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(clientHome, 0700); err != nil {
-		t.Fatal(err)
-	}
-	serverID, err := identity.LoadOrCreate(serverHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientID, err := identity.LoadOrCreate(clientHome)
-	if err != nil {
-		t.Fatal(err)
-	}
+	source, destination := open("source"), open("destination")
+	serverID := testIdentity(t, filepath.Join(base, "server-id"))
+	clientID := testIdentity(t, filepath.Join(base, "client-id"))
 	for i := 0; i < 3; i++ {
-		if err := os.WriteFile(filepath.Join(source.Root, fmt.Sprintf("small-%d", i)), []byte(strings.Repeat("s", 1024+i)), 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeTestFile(t, filepath.Join(source.Root, fmt.Sprintf("small-%d", i)), []byte(strings.Repeat("s", 1024+i)), 0600)
 	}
 	largeBody := strings.Repeat("large-body-", 40000)
-	if err := os.WriteFile(filepath.Join(source.Root, "large"), []byte(largeBody), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(source.Root, "large"), []byte(largeBody), 0600)
+	mustScan(t, source)
 	api := (&transport.Server{Folder: source, State: folderPeerState{source}}).Handler()
 	var batches, singles, namedRefreshes, fullIndexes atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -86,10 +81,7 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 		}
 		api.ServeHTTP(w, r)
 	})
-	server := httptest.NewUnstartedServer(handler)
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{serverID.Cert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13}
-	server.StartTLS()
-	defer server.Close()
+	server := testTLSServer(t, handler, serverID)
 	addr := strings.TrimPrefix(server.URL, "https://")
 	client := transport.NewClient(clientID, serverID.ID, 0, nil)
 	defer client.Close()
@@ -105,15 +97,9 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 	// Delete one batch-sized and one single-file record after the index
 	// snapshot. Both unavailable paths must refresh by exact name and apply the
 	// returned tombstones before the accepted cursor can settle.
-	if err := os.Remove(filepath.Join(source.Root, "small-0")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(source.Root, "large")); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, os.Remove(filepath.Join(source.Root, "small-0")))
+	requireNoError(t, os.Remove(filepath.Join(source.Root, "large")))
+	mustScan(t, source)
 	due := queue.due(serverID.ID, time.Now(), 64)
 	d := &Daemon{folder: destination}
 	destination.SetDownloadConcurrency(2)
@@ -128,9 +114,7 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 		t.Fatalf("transport paths: /files=%d /file=%d", batches.Load(), singles.Load())
 	}
 	due = queue.due(serverID.ID, time.Now(), 64)
-	if len(due) != 2 {
-		t.Fatalf("retry queue=%#v", due)
-	}
+	requireEqualf(t, len(due), 2, "retry queue=%#v", due)
 	got, failed = d.applyPeerDue(context.Background(), client, addr, serverID.ID, clientID.Short(), epoch, queue.activeCursor(serverID.ID), due, queue, nil)
 	if got != 2 || failed != 0 {
 		t.Fatalf("retry applied=%d failed=%d", got, failed)
@@ -143,65 +127,34 @@ func TestV2PeerPipelineUsesBatchAndSingleFileStreams(t *testing.T) {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(destination.Root, fi.Name))
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireNoError(t, err)
 		wantSize := fi.Size
 		if fi.Name == "large" {
 			wantSize = int64(len(largeBody))
 		}
-		if int64(len(data)) != wantSize {
-			t.Fatalf("%s size=%d want %d", fi.Name, len(data), wantSize)
-		}
+		requireEqualf(t, int64(len(data)), wantSize, "%s size=%d want %d", fi.Name, len(data), wantSize)
 	}
 	if _, appliedCursor, ok := queue.cursor(serverID.ID); !ok || appliedCursor != cursor {
 		t.Fatalf("queue cursor=%d/%v", appliedCursor, ok)
 	}
 	for _, name := range []string{"small-0", "large"} {
-		if _, err := os.Stat(filepath.Join(destination.Root, name)); !os.IsNotExist(err) {
-			t.Fatalf("deleted record %q remains: %v", name, err)
-		}
+		requireMissingFile(t, filepath.Join(destination.Root, name), "deleted record remains")
 	}
 }
 
 func TestRunPeerRetriesOnlyFailedBodyWithoutBaselineRefetch(t *testing.T) {
 	base := t.TempDir()
 	open := func(tag string) *folder.Folder {
-		root, state := filepath.Join(base, tag, "root"), filepath.Join(base, tag, "state", "index.json")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Dir(state), 0700); err != nil {
-			t.Fatal(err)
-		}
-		f, err := folder.Open(root, state, tag, log.New(io.Discard, "", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = f.Close() })
-		return f
+		return testOpenFolder(t, filepath.Join(base, tag, "root"), filepath.Join(base, tag, "state", "index.json"), tag)
 	}
 	source, destination := open("source"), open("destination")
-	serverHome, clientHome := filepath.Join(base, "server-id"), filepath.Join(base, "client-id")
-	_ = os.MkdirAll(serverHome, 0700)
-	_ = os.MkdirAll(clientHome, 0700)
-	serverID, err := identity.LoadOrCreate(serverHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientID, err := identity.LoadOrCreate(clientHome)
-	if err != nil {
-		t.Fatal(err)
-	}
+	serverID := testIdentity(t, filepath.Join(base, "server-id"))
+	clientID := testIdentity(t, filepath.Join(base, "client-id"))
 	body := strings.Repeat("z", 300<<10)
 	for _, name := range []string{"bad", "good-a", "good-b"} {
-		if err := os.WriteFile(filepath.Join(source.Root, name), []byte(body+name), 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeTestFile(t, filepath.Join(source.Root, name), []byte(body+name), 0600)
 	}
-	if err := source.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	mustScan(t, source)
 	var bad, badRetry, goodA, goodB, baseline, indexes atomic.Int32
 	api := (&transport.Server{Folder: source, State: folderPeerState{source}}).Handler()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -226,12 +179,18 @@ func TestRunPeerRetriesOnlyFailedBodyWithoutBaselineRefetch(t *testing.T) {
 		}
 		api.ServeHTTP(w, r)
 	})
-	server := httptest.NewUnstartedServer(handler)
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{serverID.Cert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13}
-	server.StartTLS()
-	defer server.Close()
+	server := testTLSServer(t, handler, serverID)
 	addr := strings.TrimPrefix(server.URL, "https://")
-	second := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	retryGate := make(chan struct{})
+	retryWaiting := make(chan struct{}, 1)
+	defer func() {
+		select {
+		case <-retryGate:
+		default:
+			close(retryGate)
+		}
+	}()
+	second := testTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/index" {
 			indexes.Add(1)
 			if r.URL.Query().Get("epoch") == "" {
@@ -240,21 +199,42 @@ func TestRunPeerRetriesOnlyFailedBodyWithoutBaselineRefetch(t *testing.T) {
 		}
 		if r.URL.Path == "/file" && r.URL.Query().Get("name") == "bad" {
 			badRetry.Add(1)
+			select {
+			case retryWaiting <- struct{}{}:
+			default:
+			}
+			select {
+			case <-retryGate:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		api.ServeHTTP(w, r)
-	}))
-	second.TLS = &tls.Config{Certificates: []tls.Certificate{serverID.Cert}, ClientAuth: tls.RequireAnyClientCert, MinVersion: tls.VersionTLS13}
-	second.StartTLS()
-	defer second.Close()
+	}), serverID)
 	secondAddr := strings.TrimPrefix(second.URL, "https://")
 	cfg := &config.Config{Folder: destination.Root, Port: 0, Peers: []config.Peer{{ID: serverID.ID, Name: "remote", Addrs: []string{addr, secondAddr}}}}
 	d := &Daemon{Home: base, ID: clientID, cfg: cfg, folder: destination, Log: log.New(io.Discard, "", 0), act: loadActivity(filepath.Join(base, "activity.json"))}
 	destination.SetDownloadConcurrency(1)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	pr := &peerRunner{st: PeerStatus{ID: serverID.ID, Name: "remote"}}
 	done := make(chan struct{})
 	go func() { defer close(done); d.runPeer(ctx, pr) }()
+	defer func() { cancel(); <-done }()
 	deadline := time.Now().Add(15 * time.Second)
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-retryWaiting:
+		if fi, _, ok := destination.Lookup("bad"); ok && fi.Deleted {
+			t.Fatal("transient body failure created a tombstone")
+		}
+		close(retryGate)
+	case <-timer.C:
+		cancel()
+		<-done
+		t.Fatal("retry did not start")
+	}
 	for time.Now().Before(deadline) {
 		if bad.Load() == 1 && badRetry.Load() == 1 && goodA.Load() == 1 && goodB.Load() == 1 && baseline.Load() == 1 && indexes.Load() >= 2 {
 			break
@@ -271,9 +251,6 @@ func TestRunPeerRetriesOnlyFailedBodyWithoutBaselineRefetch(t *testing.T) {
 		t.Fatalf("requests bad=%d retry-address=%d good-a=%d good-b=%d baseline=%d total-index=%d", bad.Load(), badRetry.Load(), goodA.Load(), goodB.Load(), baseline.Load(), indexes.Load())
 	}
 	for _, name := range []string{"bad", "good-a", "good-b"} {
-		got, err := os.ReadFile(filepath.Join(destination.Root, name))
-		if err != nil || string(got) != body+name {
-			t.Fatalf("%s body not durably applied: err=%v bytes=%d", name, err, len(got))
-		}
+		requireFileContents(t, filepath.Join(destination.Root, name), []byte(body+name), "body not durably applied")
 	}
 }

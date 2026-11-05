@@ -86,9 +86,7 @@ func TestScanDeadlineIgnoresTrafficAndSwitchesHealth(t *testing.T) {
 	d.set(now, true)
 	first := d.at
 	d.set(now.Add(time.Minute), true)
-	if d.at != first {
-		t.Fatal("traffic reset periodic deadline")
-	}
+	requireEqual(t, d.at, first, "traffic reset periodic deadline")
 	if d.due(first.Add(-time.Nanosecond)) || !d.due(first) {
 		t.Fatal("healthy deadline mismatch")
 	}

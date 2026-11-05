@@ -76,9 +76,7 @@ func TestFetchDeltaValidation(t *testing.T) {
 				return nil
 			})
 			success := mode == "identity" || mode == "gzip"
-			if success != (err == nil) {
-				t.Fatalf("err=%v calls=%d", err, calls)
-			}
+			requireEqualf(t, success, (err == nil), "err=%v calls=%d", err, calls)
 			if success && calls != 1 {
 				t.Fatalf("calls=%d", calls)
 			}
