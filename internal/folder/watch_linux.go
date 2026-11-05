@@ -3,10 +3,8 @@ package folder
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -30,34 +28,7 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 			return nil, nil, fmt.Errorf("watch parent: %w", err)
 		}
 	}
-	addTree := func(start string) error {
-		return filepath.WalkDir(start, func(p string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if d == nil {
-				return fmt.Errorf("watch: missing entry %s", p)
-			}
-			rel, _ := filepath.Rel(root, p)
-			if rel != "." && f.Ignored(strings.ReplaceAll(rel, string(filepath.Separator), "/")) {
-				if d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			st, e := os.Lstat(p)
-			if e != nil {
-				return e
-			}
-			if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-				return nil
-			}
-			return w.Add(p)
-		})
-	}
+	addTree := func(start string) error { return f.addWatchTree(root, start, w.Add) }
 	if err = addTree(root); err != nil {
 		w.Close()
 		stop()
@@ -67,7 +38,7 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 		defer close(done)
 		defer w.Close()
 		full := func(rootChanged bool) {
-			emit(WatchBatch{FullRequired: true, RootChanged: rootChanged, Generation: gen})
+			emit(watchLossBatch(gen, rootChanged))
 		}
 		for {
 			select {
@@ -107,21 +78,11 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 					full(false)
 					continue
 				}
-				paths := []string{rel}
-				renamed := []string(nil)
-				renameFull := false
 				if ev.Has(fsnotify.Rename) {
-					renamed = append(renamed, rel)
-					renameFull = true // fsnotify does not pair old and new names.
-					p := filepath.ToSlash(filepath.Dir(rel))
-					if p == "." {
-						p = ""
-					}
-					if p != "" {
-						paths = append(paths, p)
-					}
+					emit(watchRenameBatch(rel, gen))
+				} else {
+					emit(WatchBatch{Paths: []string{rel}, Generation: gen})
 				}
-				emit(WatchBatch{Paths: paths, RenamePaths: renamed, RenameFull: renameFull, FullRequired: renameFull, Generation: gen})
 			case e, ok := <-w.Errors:
 				if watchCtx.Err() != nil {
 					return

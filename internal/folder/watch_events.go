@@ -3,6 +3,9 @@ package folder
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -69,4 +72,44 @@ func filepathRel(root, name string) (string, error) { return filepath.Rel(root, 
 // Watch preserves the original callback API for older callers.
 func (f *Folder) Watch(ctx context.Context, onChange func()) (func(), <-chan struct{}, error) {
 	return f.WatchPaths(ctx, func(WatchBatch) { onChange() })
+}
+
+func (f *Folder) addWatchTree(root, start string, add func(string) error) error {
+	return filepath.WalkDir(start, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d == nil {
+			return fmt.Errorf("watch: missing entry %s", p)
+		}
+		rel, _ := filepath.Rel(root, p)
+		if rel != "." && f.Ignored(strings.ReplaceAll(rel, string(filepath.Separator), "/")) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		st, e := os.Lstat(p)
+		if e != nil {
+			return e
+		}
+		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		return add(p)
+	})
+}
+
+func watchLossBatch(gen uint64, root bool) WatchBatch {
+	return WatchBatch{FullRequired: true, RootChanged: root, Generation: gen}
+}
+func watchRenameBatch(rel string, gen uint64) WatchBatch {
+	paths := []string{rel}
+	if parent := path.Dir(rel); parent != "." {
+		paths = append(paths, parent)
+	}
+	return WatchBatch{Paths: paths, RenamePaths: []string{rel}, RenameFull: true, FullRequired: true, Generation: gen}
 }

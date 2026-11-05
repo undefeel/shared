@@ -80,3 +80,21 @@ func TestFilterWatchBatchMixedRootAndStaleGeneration(t *testing.T) {
 		t.Fatalf("canceled context suppressed path: %+v", got)
 	}
 }
+
+func TestOwnRenameAndIndependentFull(t *testing.T) {
+	f, g := committedOwnEvents(t)
+	defer f.Close()
+	b := f.FilterWatchBatch(context.Background(), watchRenameBatch("a", g.ConfirmedGeneration))
+	if b.FullRequired || len(b.Paths) != 0 || len(b.RenamePaths) != 0 {
+		t.Fatalf("own rename dirty: %+v", b)
+	}
+	b = watchRenameBatch("a", g.ConfirmedGeneration)
+	b.RenameFull = false
+	if got := f.FilterWatchBatch(context.Background(), b); !got.FullRequired {
+		t.Fatal("hard full suppressed")
+	}
+	b = f.FilterWatchBatch(context.Background(), watchRenameBatch("unknown", g.ConfirmedGeneration))
+	if !b.FullRequired {
+		t.Fatal("unknown rename lost")
+	}
+}

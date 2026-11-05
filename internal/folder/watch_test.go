@@ -200,3 +200,44 @@ func TestRelativeWatchEventScopesRootAndOutsidePaths(t *testing.T) {
 		t.Fatalf("outside event = (%q,%v,%v)", rel, inTree, rootEvent)
 	}
 }
+
+func TestWatchTreeInstallsParentFirstAndPropagatesErrors(t *testing.T) {
+	f := watchFixture(t)
+	child := filepath.Join(f.Root, "child")
+	if err := os.Mkdir(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var installed []string
+	sentinel := errors.New("watch Add failed")
+	err := f.addWatchTree(f.Root, f.Root, func(p string) error {
+		installed = append(installed, p)
+		if p == child {
+			return sentinel
+		}
+		return nil
+	})
+	if !errors.Is(err, sentinel) || len(installed) != 2 || installed[0] != f.Root {
+		t.Fatalf("order=%v err=%v", installed, err)
+	}
+	if err := f.addWatchTree(f.Root, filepath.Join(f.Root, "missing"), func(string) error { return nil }); err == nil {
+		t.Fatal("walk error swallowed")
+	}
+}
+
+func TestWatchLossAndRenameScopes(t *testing.T) {
+	for _, cause := range []string{"overflow", "dropped", "addTree", "stream close"} {
+		t.Run(cause, func(t *testing.T) {
+			b := watchLossBatch(9, false)
+			if !b.FullRequired || b.Generation != 9 {
+				t.Fatalf("loss=%+v", b)
+			}
+		})
+	}
+	b := watchRenameBatch("old/file", 9)
+	if len(b.Paths) != 2 || b.Paths[1] != "old" || !b.FullRequired {
+		t.Fatalf("rename=%+v", b)
+	}
+	if !watchLossBatch(9, true).RootChanged {
+		t.Fatal("root flag lost")
+	}
+}

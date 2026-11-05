@@ -294,11 +294,13 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 		qmu.Unlock()
 		if deadline.due(now) {
 			b.FullRequired = true
+			b.RenameFull = false
 			b.Generation = generation
 			deadline.advance(now)
 		}
 		if !retryAt.IsZero() && !now.Before(retryAt) {
 			b.FullRequired = true
+			b.RenameFull = false
 			b.Generation = generation
 			retryAt = time.Time{}
 		}

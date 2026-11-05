@@ -52,6 +52,10 @@ func (q *scanQueue) merge(b folder.WatchBatch) {
 				}
 				q.paths[p] = struct{}{}
 			}
+			if len(q.paths)+len(q.renames) > maxWatchPaths {
+				q.paths, q.renames = nil, nil
+				q.renameFull, q.full = false, true
+			}
 			q.generation = b.Generation
 			return
 		}

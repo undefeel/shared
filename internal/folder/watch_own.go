@@ -102,6 +102,10 @@ func (f *Folder) FilterWatchBatch(ctx context.Context, b WatchBatch) WatchBatch 
 		if hashErr != nil || after != fp.stat || hash != fp.hash {
 			return false
 		}
+		// The hashed descriptor must still name the event target.
+		if current, err := scanStatAt(root, name); err != nil || current != fp.stat {
+			return false
+		}
 		f.saveMu.Lock()
 		f.mu.Lock()
 		cur := f.files[fp.info.Name]

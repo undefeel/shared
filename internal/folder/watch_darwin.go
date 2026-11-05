@@ -23,7 +23,7 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 	go func() {
 		defer close(done)
 		defer es.Stop()
-		full := func(root bool) { emit(WatchBatch{FullRequired: true, RootChanged: root, Generation: gen}) }
+		full := func(root bool) { emit(watchLossBatch(gen, root)) }
 		for {
 			select {
 			case <-watchCtx.Done():
@@ -37,7 +37,7 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 				}
 				for _, e := range events {
 					flags := e.Flags
-					if flags&(fsevents.MustScanSubDirs|fsevents.UserDropped|fsevents.KernelDropped|fsevents.EventIDsWrapped) != 0 {
+					if darwinWatchLoss(flags) {
 						full(false)
 						continue
 					}
@@ -62,18 +62,11 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 					if f.Ignored(rel) {
 						continue
 					}
-					paths := []string{rel}
-					renamed := []string(nil)
-					renameFull := false
 					if flags&fsevents.ItemRenamed != 0 {
-						renamed = append(renamed, rel)
-						p := filepath.ToSlash(filepath.Dir(rel))
-						if p != "." {
-							paths = append(paths, p)
-						}
-						renameFull = true // FSEvents does not pair old and new names.
+						emit(watchRenameBatch(rel, gen))
+					} else {
+						emit(WatchBatch{Paths: []string{rel}, Generation: gen})
 					}
-					emit(WatchBatch{Paths: paths, RenamePaths: renamed, RenameFull: renameFull, FullRequired: renameFull, Generation: gen})
 				}
 			}
 		}
@@ -82,3 +75,7 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 }
 
 func notifyWatchError(_ error, onChange func()) { onChange() }
+
+func darwinWatchLoss(flags fsevents.EventFlags) bool {
+	return flags&(fsevents.MustScanSubDirs|fsevents.UserDropped|fsevents.KernelDropped|fsevents.EventIDsWrapped) != 0
+}

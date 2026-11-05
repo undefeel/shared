@@ -528,6 +528,8 @@ func TestWatchScheduleHarness(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	sourceClient := clientFor(dest, source)
+	transfer(ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"))
 	batches := make(chan folder.WatchBatch, 32)
 	dest.watchScanObserver = func(b folder.WatchBatch) {
 		select {
@@ -559,7 +561,15 @@ func TestWatchScheduleHarness(t *testing.T) {
 		}
 	}
 baselineReady:
-	transfer(ctx, dest, source, clientFor(dest, source), strings.TrimPrefix(sourceServer.URL, "https://"))
+	for i := 0; i < 32; i++ {
+		if err := os.WriteFile(filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i)), []byte(fmt.Sprintf("incoming burst %d", i)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := source.folder.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	transfer(ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"))
 	ownDeadline := time.NewTimer(2 * time.Second)
 	defer ownDeadline.Stop()
 	select {

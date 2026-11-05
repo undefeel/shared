@@ -91,12 +91,18 @@ func (f *Folder) scanPathsWith(ctx context.Context, paths []string, ioops scanIO
 }
 
 func (f *Folder) scanPathsWithGeneration(ctx context.Context, paths []string, ioops scanIO, expected *uint64) (result error) {
+	full := func() error {
+		if expected != nil {
+			return f.scanStaged(ctx, *expected, true, ioops)
+		}
+		return f.scanStaged(ctx, 0, false, ioops)
+	}
 	scopes, err := normalizeScopes(paths)
 	if err != nil {
 		return err
 	}
 	if scopes == nil {
-		return f.scanStaged(ctx, 0, false, ioops)
+		return full()
 	}
 	scanPath := ""
 	defer func() { f.recordScanResult(result, scanPath) }()
@@ -138,13 +144,13 @@ func (f *Folder) scanPathsWithGeneration(ctx context.Context, paths []string, io
 		return err
 	}
 	if !equalStrings(patterns, b.ignore) {
-		return f.scanStaged(ctx, 0, false, ioops)
+		return full()
 	}
 	// Confirm an apparently empty root with a complete scan before latching.
 	// Tombstone-only baselines also require confirmation: a live file can
 	// exist outside the dirty scopes even when the live index is empty.
 	if len(candidate) == 0 && len(b.files) != 0 {
-		return f.scanStaged(ctx, 0, false, ioops)
+		return full()
 	}
 	if ioops.beforeCommit != nil {
 		ioops.beforeCommit()
