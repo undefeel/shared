@@ -2,8 +2,8 @@
 # Run by a LEAD worker (sol) on an L3 task: delegates implementation to a terra (or luna) worker in the
 # current worktree, waits for it and prints its report.
 #
-#   plan/tools/lead.sh <ID> implement            luna implements plan/specs/<ID>.plan.md
-#   plan/tools/lead.sh <ID> fix <N> <notes.md>   luna fixes round N (N = 1 or 2) from your review notes
+#   plan/tools/lead.sh <ID> implement            the implementer implements plan/specs/<ID>.plan.md
+#   plan/tools/lead.sh <ID> fix <N> <notes.md>   the implementer fixes round N (N = 1 or 2) from your review notes
 #   plan/tools/lead.sh --wait <dispatch>         keep waiting for an already started implementer
 #   plan/tools/lead.sh <ID> part <name> <part.md> start a PARALLEL implementer for one plan part (no wait);
 #                                                 parts must own disjoint files; the implementer does not commit
