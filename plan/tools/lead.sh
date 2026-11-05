@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run by a LEAD worker (sol) on an L3 task: delegates implementation to a luna worker in the
+# Run by a LEAD worker (sol) on an L3 task: delegates implementation to a terra (or luna) worker in the
 # current worktree, waits for it and prints its report.
 #
 #   plan/tools/lead.sh <ID> implement            luna implements plan/specs/<ID>.plan.md
@@ -16,6 +16,13 @@ ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"
 CHUNK_MS=480000   # stay below common 10-minute shell limits
 MAX_FIX=2
 MAX_PARTS=3      # parallel implementers per lead
+# Implementer model: terra (default, gpt-6.1-terra medium: follows a plan over many steps) or luna
+# (gpt-6-luna high: cheap, only small pieces of ~300 lines). Choose with LEAD_IMPL=luna|terra.
+case "${LEAD_IMPL:-terra}" in
+  terra) IMPL=(--agent codex --model gpt-6.1-terra --effort medium) ;;
+  luna)  IMPL=(--agent codex --model gpt-6-luna --effort high) ;;
+  *) echo "LEAD_IMPL must be terra or luna" >&2; exit 2 ;;
+esac
 
 MAX_CONT=8       # automatic "continue" nudges per implementer
 CONT_MSG="Continue the task from where you stopped. Do not re-read what you already know; keep implementing the remaining items of your plan/part, run the acceptance, commit (parts: do not commit). Send worker_done only when everything is done or on a concrete technical blocker. If you run out of room again, just end your turn: you will be resumed."
@@ -155,9 +162,9 @@ $(if [[ "$MODE" == part ]]; then echo "Run go vet and the tests of your own pack
 SPEC
 
 out="$(orca orchestration worker-start --spec-file "$S" --task-title "$TITLE" \
-        --worktree current --agent codex --model gpt-6-luna --effort high --json)" || { echo "$out"; exit 1; }
+        --worktree current "${IMPL[@]}" --json)" || { echo "$out"; exit 1; }
 ds="$(jq -r '.result.dispatchId // .result.dispatch.id // .dispatchId // empty' <<<"$out")"
 [[ -n "$ds" ]] || { echo "$out"; exit 1; }
-echo "lead: started implementer $ds ($TITLE)"
+echo "lead: started implementer $ds ($TITLE, ${LEAD_IMPL:-terra})"
 if [[ "$MODE" == part ]]; then echo "lead: not waiting (parallel part); later: plan/tools/lead.sh --wait-all <all part dispatches>"; exit 0; fi
 wait_for "$ds"
