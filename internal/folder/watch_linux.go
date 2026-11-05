@@ -108,19 +108,20 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 					continue
 				}
 				paths := []string{rel}
+				renamed := []string(nil)
+				renameFull := false
 				if ev.Has(fsnotify.Rename) {
+					renamed = append(renamed, rel)
+					renameFull = true // fsnotify does not pair old and new names.
 					p := filepath.ToSlash(filepath.Dir(rel))
 					if p == "." {
 						p = ""
 					}
 					if p != "" {
 						paths = append(paths, p)
-					} else {
-						full(false)
-						continue
 					}
 				}
-				emit(WatchBatch{Paths: paths, Generation: gen})
+				emit(WatchBatch{Paths: paths, RenamePaths: renamed, RenameFull: renameFull, FullRequired: renameFull, Generation: gen})
 			case e, ok := <-w.Errors:
 				if watchCtx.Err() != nil {
 					return

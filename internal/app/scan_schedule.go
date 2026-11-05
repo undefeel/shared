@@ -24,14 +24,27 @@ type scanQueue struct {
 }
 
 func (q *scanQueue) merge(b folder.WatchBatch) {
+	if q.full || q.root {
+		q.root = q.root || b.RootChanged
+		q.generation = b.Generation
+		return
+	}
 	if b.FullRequired || b.RootChanged {
-		if b.RenameFull {
+		// An ambiguous rename carries useful candidates for own-write filtering,
+		// but it must not downgrade an independent hard-full/root request.
+		if b.RenameFull && !b.RootChanged && !q.full && !q.root {
 			q.renameFull = true
 			for _, p := range b.RenamePaths {
 				if q.renames == nil {
 					q.renames = make(map[string]struct{})
 				}
 				q.renames[p] = struct{}{}
+				if len(q.renames) > maxWatchPaths {
+					q.paths, q.renames = nil, nil
+					q.renameFull, q.full = false, true
+					q.generation = b.Generation
+					return
+				}
 			}
 			for _, p := range b.Paths {
 				if q.paths == nil {
@@ -46,6 +59,8 @@ func (q *scanQueue) merge(b folder.WatchBatch) {
 		q.root = q.root || b.RootChanged
 		q.generation = b.Generation
 		q.paths = nil
+		q.renames = nil
+		q.renameFull = false
 		return
 	}
 	if q.full || q.root {
@@ -67,12 +82,28 @@ func (q *scanQueue) merge(b folder.WatchBatch) {
 			q.renames = make(map[string]struct{})
 		}
 		q.renames[p] = struct{}{}
+		if len(q.renames) > maxWatchPaths {
+			q.paths = nil
+			q.renames = nil
+			q.renameFull = false
+			q.full = true
+			break
+		}
+	}
+	if b.RenameFull {
+		q.renameFull = true
+	}
+	if len(q.paths)+len(q.renames) > maxWatchPaths {
+		q.paths = nil
+		q.renames = nil
+		q.renameFull = false
+		q.full = true
 	}
 	q.generation = b.Generation
 }
 
 func (q *scanQueue) drain() folder.WatchBatch {
-	b := folder.WatchBatch{FullRequired: q.full, RootChanged: q.root, RenameFull: q.renameFull, Generation: q.generation}
+	b := folder.WatchBatch{FullRequired: q.full || q.renameFull, RootChanged: q.root, RenameFull: q.renameFull && !q.full && !q.root, Generation: q.generation}
 	for p := range q.paths {
 		b.Paths = append(b.Paths, p)
 	}

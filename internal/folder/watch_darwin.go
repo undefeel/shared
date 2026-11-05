@@ -70,9 +70,8 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 						p := filepath.ToSlash(filepath.Dir(rel))
 						if p != "." {
 							paths = append(paths, p)
-						} else {
-							renameFull = true
 						}
+						renameFull = true // FSEvents does not pair old and new names.
 					}
 					emit(WatchBatch{Paths: paths, RenamePaths: renamed, RenameFull: renameFull, FullRequired: renameFull, Generation: gen})
 				}
