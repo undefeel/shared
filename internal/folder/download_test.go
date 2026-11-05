@@ -47,44 +47,53 @@ func assertDownloadFailedCleanly(t *testing.T, n *node, r FileInfo, fetch Fetche
 	}
 }
 
-func TestDownloadRejectsNegativeSize(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("", -1)
-	assertDownloadFailedCleanly(t, n, r, func(context.Context, FileInfo, io.Writer) error {
-		t.Fatal("invalid size reached Fetcher")
-		return nil
-	})
-}
-
-func TestDownloadAcceptsZeroSize(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("", 0)
-	_, failed := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, bodyFetch(""), nil)
-	if failed != 0 {
-		t.Fatalf("failed = %d, want 0", failed)
+func TestDownloadSizesAndFailures(t *testing.T) {
+	cases := []struct {
+		name, hashBody, body string
+		size                 int64
+		kind                 string
+	}{
+		{"negative", "", "", -1, "negative"},
+		{"zero", "", "", 0, "success"},
+		{"short", "four", "four", 5, "body"},
+		{"oversize", "four", "four", 3, "oversize"},
+		{"max_int64", "", "", int64(^uint64(0) >> 1), "max"},
+		{"hash", "else", "body", 4, "body"},
+		{"fetch", "body", "", 4, "fetch"},
 	}
-	if b, err := os.ReadFile(filepath.Join(n.f.Root, r.Name)); err != nil || len(b) != 0 {
-		t.Fatalf("downloaded body=%q, err=%v", b, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := applySeed(t)
+			defer n.f.Close()
+			r := downloadRecord(tc.hashBody, tc.size)
+			fetch := bodyFetch(tc.body)
+			switch tc.kind {
+			case "negative":
+				fetch = func(context.Context, FileInfo, io.Writer) error { t.Fatal("invalid size reached Fetcher"); return nil }
+			case "oversize":
+				fetch = func(_ context.Context, _ FileInfo, w io.Writer) error { _, _ = io.WriteString(w, tc.body); return nil }
+			case "fetch":
+				fetch = func(context.Context, FileInfo, io.Writer) error { return errors.New("fetch failed") }
+			}
+			if tc.kind == "success" {
+				_, failed := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, fetch, nil)
+				if failed != 0 {
+					t.Fatalf("failed = %d, want 0", failed)
+				}
+				if b, err := os.ReadFile(filepath.Join(n.f.Root, r.Name)); err != nil || len(b) != 0 {
+					t.Fatalf("downloaded body=%q, err=%v", b, err)
+				}
+			} else if tc.kind == "max" {
+				p := &planRecorder{}
+				assertDownloadFailedCleanly(t, n, r, fetch, p)
+				if p.files != 1 || p.bytes != r.Size {
+					t.Fatalf("plan = (%d files, %d bytes), want (1, %d)", p.files, p.bytes, r.Size)
+				}
+			} else {
+				assertDownloadFailedCleanly(t, n, r, fetch)
+			}
+		})
 	}
-}
-
-func TestDownloadRejectsShortBody(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("four", 5)
-	assertDownloadFailedCleanly(t, n, r, bodyFetch("four"))
-}
-
-func TestDownloadRejectsSizePlusOne(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("four", 3)
-	assertDownloadFailedCleanly(t, n, r, func(_ context.Context, _ FileInfo, w io.Writer) error {
-		_, _ = io.WriteString(w, "four") // Ignore the counting writer's overflow error.
-		return nil
-	})
 }
 
 type planRecorder struct {
@@ -94,19 +103,6 @@ type planRecorder struct {
 
 func (p *planRecorder) Plan(files int, bytes int64) { p.files, p.bytes = files, bytes }
 func (*planRecorder) Done(FileInfo, Event, int64)   {}
-
-func TestDownloadMaxInt64DoesNotOverflow(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("", int64(^uint64(0)>>1))
-	p := &planRecorder{}
-	assertDownloadFailedCleanly(t, n, r, bodyFetch(""), p)
-	// A declared maximum size is representable in planning and fails as a short
-	// body without an overflowing Size+1 calculation.
-	if p.files != 1 || p.bytes != r.Size {
-		t.Fatalf("plan = (%d files, %d bytes), want (1, %d)", p.files, p.bytes, r.Size)
-	}
-}
 
 func TestDownloadSyncFailureCleansTemp(t *testing.T) {
 	n := applySeed(t)
@@ -119,22 +115,6 @@ func TestDownloadSyncFailureCleansTemp(t *testing.T) {
 		return nil
 	}})
 	assertDownloadFailedCleanly(t, n, r, bodyFetch("body"))
-}
-
-func TestDownloadRejectsHashMismatch(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("else", 4)
-	assertDownloadFailedCleanly(t, n, r, bodyFetch("body"))
-}
-
-func TestDownloadFetchFailureCleansTemp(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := downloadRecord("body", 4)
-	assertDownloadFailedCleanly(t, n, r, func(context.Context, FileInfo, io.Writer) error {
-		return errors.New("fetch failed")
-	})
 }
 
 func TestDownloadCloseFailureCleansTemp(t *testing.T) {

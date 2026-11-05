@@ -122,7 +122,7 @@ func TestEndlessWriterAndOverflowProgress(t *testing.T) {
 }
 
 func TestUnstableScanPreservesWholeIndex(t *testing.T) {
-	n := newNode(t, "A")
+	n := newDefaultNode(t, "A")
 	defer n.f.Close()
 	n.write(t, "item", "old", time.Now())
 	if err := n.f.Scan(); err != nil {
@@ -175,7 +175,7 @@ func TestUnstableScanPreservesWholeIndex(t *testing.T) {
 }
 
 func TestStabilityWaitCancellation(t *testing.T) {
-	n := newNode(t, "A")
+	n := newDefaultNode(t, "A")
 	defer n.f.Close()
 	n.write(t, "item", "x", time.Now())
 	ctx, cancel := context.WithCancel(context.Background())

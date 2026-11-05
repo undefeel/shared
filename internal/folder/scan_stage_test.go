@@ -94,7 +94,8 @@ func TestStagedScanConcurrentApply(t *testing.T) {
 	assertBody(t, n, "new")
 }
 
-func TestStagedScanCloseWaitsForLease(t *testing.T) {
+func stagedScanLease(t *testing.T) (*Folder, chan struct{}, chan error) {
+	t.Helper()
 	f := rootScanFixture(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	ops := f.rootScanIO()
@@ -113,6 +114,11 @@ func TestStagedScanCloseWaitsForLease(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("scan did not reach hash")
 	}
+	return f, release, done
+}
+
+func TestStagedScanCloseWaitsForLease(t *testing.T) {
+	f, release, done := stagedScanLease(t)
 	closed := make(chan error, 1)
 	go func() { closed <- f.Close() }()
 	select {
@@ -138,24 +144,7 @@ func TestStagedScanCloseWaitsForLease(t *testing.T) {
 }
 
 func TestStagedScanRebindWaitsForLease(t *testing.T) {
-	f := rootScanFixture(t)
-	entered, release := make(chan struct{}), make(chan struct{})
-	ops := f.rootScanIO()
-	base := ops.openRead
-	ops.openRead = func(r *rootFS, p string) (*os.File, error) {
-		if p == "item" {
-			close(entered)
-			<-release
-		}
-		return base(r, p)
-	}
-	done := make(chan error, 1)
-	go func() { done <- f.scanWith(ops) }()
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("scan did not reach hash")
-	}
+	f, release, done := stagedScanLease(t)
 	other := t.TempDir()
 	if err := os.WriteFile(filepath.Join(other, "other"), []byte("other"), 0600); err != nil {
 		close(release)

@@ -14,6 +14,7 @@ func rootStateFixture(t *testing.T) *Folder {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	t.Cleanup(func() { f.Close() })
 	return f
 }
@@ -34,6 +35,7 @@ func TestLegacyNonemptyRequiresConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	defer f.Close()
 	if f.Blocked() == nil || f.clock != 7 || f.files["a"].Version["me"] != 7 {
 		t.Fatal("migration lost state or trusted legacy")
@@ -56,6 +58,7 @@ func TestMissingIndexedRootNotCreated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(g)
 	defer g.Close()
 	if g.Blocked() == nil {
 		t.Fatal("missing latch")
@@ -64,35 +67,30 @@ func TestMissingIndexedRootNotCreated(t *testing.T) {
 		t.Fatal("root recreated")
 	}
 }
-func TestRootSymlinkChange(t *testing.T) {
-	f := rootStateFixture(t)
-	if err := os.Rename(f.Root, f.Root+"-old"); err != nil {
-		t.Fatal(err)
+func TestRootIdentityChange(t *testing.T) {
+	for _, change := range []string{"symlink", "path", "device", "inode"} {
+		t.Run(change, func(t *testing.T) {
+			f := rootStateFixture(t)
+			switch change {
+			case "symlink", "inode":
+				if err := os.Rename(f.Root, f.Root+"-old"); err != nil {
+					t.Fatal(err)
+				}
+				if change == "symlink" {
+					if err := os.Symlink(f.Root+"-old", f.Root); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Mkdir(f.Root, 0755); err != nil {
+					t.Fatal(err)
+				}
+			case "path":
+				f.Root = t.TempDir()
+			case "device":
+				f.binding.Device++
+			}
+			requireRootBlocked(t, f)
+		})
 	}
-	if err := os.Symlink(f.Root+"-old", f.Root); err != nil {
-		t.Fatal(err)
-	}
-	requireRootBlocked(t, f)
-}
-func TestRootPathChange(t *testing.T) {
-	f := rootStateFixture(t)
-	f.Root = t.TempDir()
-	requireRootBlocked(t, f)
-}
-func TestRootDeviceChange(t *testing.T) {
-	f := rootStateFixture(t)
-	f.binding.Device++
-	requireRootBlocked(t, f)
-}
-func TestRootInodeChange(t *testing.T) {
-	f := rootStateFixture(t)
-	if err := os.Rename(f.Root, f.Root+"-old"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(f.Root, 0755); err != nil {
-		t.Fatal(err)
-	}
-	requireRootBlocked(t, f)
 }
 func TestRootLatchSurvivesRestart(t *testing.T) {
 	f := rootStateFixture(t)
@@ -104,6 +102,7 @@ func TestRootLatchSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(g)
 	defer g.Close()
 	if g.Blocked() == nil || g.Blocked().Token != f.Blocked().Token {
 		t.Fatal("latch changed on restart")
@@ -134,6 +133,7 @@ func TestConfirmedGenerationSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(g)
 	defer g.Close()
 	if g.ConfirmedGeneration() != 3 {
 		t.Fatal("confirmed generation lost")

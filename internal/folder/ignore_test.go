@@ -68,6 +68,7 @@ func TestIgnoredRecordsSurviveRestartAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	defer f.Close()
 	check(f)
 	if err := os.Remove(filepath.Join(root, ignoreFile)); err != nil {

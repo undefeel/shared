@@ -19,6 +19,7 @@ func readFixture(t *testing.T) (*Folder, string, FileInfo) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	t.Cleanup(func() { f.Close() })
 	if err := f.Scan(); err != nil {
 		t.Fatal(err)
@@ -26,45 +27,40 @@ func readFixture(t *testing.T) (*Folder, string, FileInfo) {
 	fi, _, _ := f.Lookup("a")
 	return f, p, fi
 }
-func TestOpenVersionSymlinkOutside(t *testing.T) {
-	f, p, fi := readFixture(t)
-	outside := filepath.Join(t.TempDir(), "secret")
-	if err := os.WriteFile(outside, []byte("secret"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(p); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, p); err != nil {
-		t.Fatal(err)
-	}
-	if _, fd, err := f.OpenVersion("a", fi.Hash); err == nil {
-		fd.Close()
-		t.Fatal("followed symlink")
-	}
-}
-func TestOpenVersionChangedHash(t *testing.T) {
-	f, p, fi := readFixture(t)
-	if err := os.WriteFile(p, []byte("xyz"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, fd, err := f.OpenVersion("a", fi.Hash); err == nil {
-		fd.Close()
-		t.Fatal("served changed bytes")
-	}
-}
-func TestOpenVersionReplacedInode(t *testing.T) {
-	f, p, fi := readFixture(t)
-	replacement := filepath.Join(f.Root, "replacement")
-	if err := os.WriteFile(replacement, []byte("xyz"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(replacement, p); err != nil {
-		t.Fatal(err)
-	}
-	if _, fd, err := f.OpenVersion("a", fi.Hash); err == nil {
-		fd.Close()
-		t.Fatal("served replacement")
+func TestOpenVersionRejectsChangedFile(t *testing.T) {
+	for _, change := range []string{"symlink", "hash", "inode"} {
+		t.Run(change, func(t *testing.T) {
+			f, p, fi := readFixture(t)
+			switch change {
+			case "symlink":
+				outside := filepath.Join(t.TempDir(), "secret")
+				if err := os.WriteFile(outside, []byte("secret"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(p); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, p); err != nil {
+					t.Fatal(err)
+				}
+			case "hash":
+				if err := os.WriteFile(p, []byte("xyz"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "inode":
+				replacement := filepath.Join(f.Root, "replacement")
+				if err := os.WriteFile(replacement, []byte("xyz"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(replacement, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, fd, err := f.OpenVersion("a", fi.Hash); err == nil {
+				fd.Close()
+				t.Fatalf("served %s change", change)
+			}
+		})
 	}
 }
 func TestUnblockDoesNotReviveOldFD(t *testing.T) {

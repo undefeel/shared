@@ -24,6 +24,7 @@ func TestRecoveryProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	defer f.Close()
 	if mode == "restart" {
 		fmt.Println("ready")
@@ -83,6 +84,7 @@ func crashIntegration(t *testing.T, phase string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	if err = os.WriteFile(filepath.Join(f.Root, "x"), []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +99,7 @@ func crashIntegration(t *testing.T, phase string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	defer f.Close()
 	if f.Blocked() != nil {
 		t.Fatal(f.Blocked())
@@ -128,10 +131,12 @@ func crashIntegration(t *testing.T, phase string) {
 		t.Fatal(err)
 	}
 }
-func TestCrashAfterIntentIntegration(t *testing.T)                    { crashIntegration(t, "1") }
-func TestCrashAfterCaptureIntegration(t *testing.T)                   { crashIntegration(t, "2") }
-func TestCrashAfterInstallIntegration(t *testing.T)                   { crashIntegration(t, "3") }
-func TestCrashAfterIndexBeforeCaptureCleanupIntegration(t *testing.T) { crashIntegration(t, "4") }
+func TestCrashRecoveryIntegration(t *testing.T) {
+	for _, checkpoint := range []string{"1", "2", "3", "4"} {
+		t.Run(checkpoint, func(t *testing.T) { crashIntegration(t, checkpoint) })
+	}
+}
+
 func TestWatcherScanApplySaveIntegration(t *testing.T) {
 	f := watchFixture(t)
 	events := make(chan struct{}, 1)
