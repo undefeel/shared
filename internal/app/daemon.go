@@ -573,7 +573,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 	queue := newPeerQueue()
 	addr := ""
 	attempt := 0
-	var incompatibleLogged bool
+	reconnect := newReconnectLog(d.Log, id)
 	var ackIndex *transport.IndexResponse
 	var ackDeletions []folder.FileInfo
 	var refreshBaseline bool
@@ -582,6 +582,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		if addr == "" {
 			cands := d.addrs(id)
 			if len(cands) == 0 {
+				reconnect.failure(time.Now(), "offline")
 				pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = false, "", StateNotFound })
 				d.changed()
 				sleepCtx(ctx, 3*time.Second)
@@ -671,11 +672,12 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		toLAN := err != nil && pollCtx.Err() != nil && ctx.Err() == nil
 		stopPoll()
 		if toLAN {
-			d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", pr.name())
+			d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", reconnect.peer)
 			addr, attempt = "", 0
 			continue
 		}
 		if errors.Is(err, transport.ErrPeerPaused) {
+			reconnect.recovered(time.Now())
 			pr.set(func(s *PeerStatus) { s.Connected, s.Addr, s.State = true, addr, StatePeerPaused })
 			d.changed()
 			sleepCtx(ctx, 5*time.Second)
@@ -688,26 +690,19 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			var protocolErr *transport.ProtocolError
 			if errors.As(err, &protocolErr) {
 				pr.mu.Lock()
-				first := !incompatibleLogged || pr.st.State != StateIncompatible || pr.st.ReceivedProtocol != protocolErr.Received
 				pr.st.Connected, pr.st.Syncing, pr.st.Progress, pr.st.State = false, false, nil, StateIncompatible
 				pr.st.ErrorCode, pr.st.ErrorMessage = "protocol_incompatible", protocolErr.Error()
 				pr.st.ExpectedProtocol, pr.st.ReceivedProtocol = protocolErr.Expected, protocolErr.Received
 				pr.mu.Unlock()
-				if first {
-					d.Log.Printf("%s: %v", pr.name(), protocolErr)
-				}
-				incompatibleLogged = true
+				reconnect.failure(time.Now(), "protocol_incompatible")
 				d.changed()
 				sleepCtx(ctx, 60*time.Second)
 				continue
 			}
 			pr.mu.Lock()
-			wasConnected := pr.st.Connected
 			pr.st.Connected, pr.st.Syncing, pr.st.Progress, pr.st.State = false, false, nil, StateOffline
 			pr.mu.Unlock()
-			if wasConnected {
-				d.Log.Printf("%s: соединение потеряно: %v", pr.name(), err)
-			}
+			reconnect.failure(time.Now(), "network")
 			d.changed()
 			addr = ""
 			sleepCtx(ctx, 3*time.Second)
@@ -715,14 +710,13 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		}
 
 		pr.mu.Lock()
-		if !pr.st.Connected || pr.st.Addr != addr {
-			d.Log.Printf("%s: подключено к %s", pr.st.Name, addr)
-		}
 		pr.st.Connected, pr.st.Addr = true, addr
 		pr.st.ErrorCode, pr.st.ErrorMessage, pr.st.ReceivedProtocol = "", "", ""
 		pr.st.ExpectedProtocol = 0
 		pr.mu.Unlock()
-		incompatibleLogged = false
+		if polling {
+			reconnect.recovered(time.Now())
+		}
 
 		if polling && idx != nil {
 			refreshBaseline = false
@@ -786,7 +780,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		// Вернулись домой: пир снова виден в LAN — уходим с relay на прямую связь.
 		if addr == transport.RelayHost && d.disc != nil {
 			if _, ok := d.disc.Lookup(id); ok {
-				d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", pr.name())
+				d.Log.Printf("%s: пир в локальной сети, переключаюсь с relay напрямую", reconnect.peer)
 				addr, attempt = "", 0
 			}
 		}
