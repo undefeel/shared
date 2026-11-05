@@ -157,6 +157,7 @@ func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
 // scanWith builds a complete candidate before touching published files or clocks.
 func (f *Folder) scanWith(ioops scanIO) error {
 	if err := f.preflightStability(ioops); err != nil {
+		f.recordScanResult(err)
 		return err
 	}
 	f.scanMu.Lock()
@@ -168,13 +169,18 @@ func (f *Folder) scanWith(ioops scanIO) error {
 // A separate root descriptor pins the traversal while other scans can proceed.
 func (f *Folder) preflightStability(ioops scanIO) error {
 	f.scanMu.Lock()
+	if f.root == nil {
+		f.scanMu.Unlock()
+		return errors.New("scan: root unavailable")
+	}
 	if err := f.guardRoot(); err != nil {
 		f.scanMu.Unlock()
 		return err
 	}
-	r, err := f.root.openDir(".", false)
+	r, err := ioops.openDir(f.root, ".")
 	f.scanMu.Unlock()
 	if err != nil {
+		f.blockRoot("root_unavailable", err.Error())
 		return err
 	}
 	root := &rootFS{root: r}
@@ -382,7 +388,7 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 				}
 				continue
 			}
-			if !f.integrationStability().probe(name, meta) {
+			if !allowEmpty && !f.integrationStability().probe(name, meta) {
 				return ErrScanPending
 			}
 			hash, stable := "", info
@@ -450,8 +456,8 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	// Decide against the same current files snapshot used to build next. Release
 	// both locks before blockRoot persists the latch through saveMu.
 	visibleExisting := false
-	for name, fi := range f.files {
-		if !fi.Deleted && !ignoredWith(patterns, name) {
+	for name := range f.files {
+		if !ignoredWith(patterns, name) {
 			visibleExisting = true
 			break
 		}
@@ -550,6 +556,21 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
+func (f *Folder) recordScanResult(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		f.scanError = nil
+		return
+	}
+	var root *RootError
+	if errors.As(err, &root) {
+		return
+	}
+	now := time.Now()
+	f.scanError = &ScanError{Message: err.Error(), Path: f.Root, Time: now}
+}
+
 // ScanGeneration rejects events queued by a canceled watcher generation.
 func (f *Folder) ScanGeneration(ctx context.Context, generation uint64) error {
 	if err := ctx.Err(); err != nil {
@@ -559,6 +580,7 @@ func (f *Folder) ScanGeneration(ctx context.Context, generation uint64) error {
 		return errors.New("stale watcher generation")
 	}
 	if err := f.preflightStability(f.rootScanIO()); err != nil {
+		f.recordScanResult(err)
 		return err
 	}
 	f.scanMu.Lock()

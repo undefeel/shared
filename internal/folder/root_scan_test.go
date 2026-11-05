@@ -191,12 +191,21 @@ func TestScanRemovingLastFileBlocks(t *testing.T) {
 	assertRootEmptyBlocked(t, f)
 }
 
-func TestScanIgnoreAllBlocksEmptyCandidate(t *testing.T) {
+func TestScanIgnoreAllLeavesRecordsAndPublishesEmptyView(t *testing.T) {
 	f := rootScanFixture(t)
 	if err := os.WriteFile(filepath.Join(f.Root, ignoreFile), []byte("*\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	assertRootEmptyBlocked(t, f)
+	if err := f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	fi, _, ok := f.Lookup("item")
+	if !ok || fi.Deleted {
+		t.Fatalf("ignored record changed: %+v %v", fi, ok)
+	}
+	if got, _ := f.Snapshot(); len(got) != 0 {
+		t.Fatalf("snapshot=%+v", got)
+	}
 }
 
 func TestScanNonemptyDoesNotClearRootLatch(t *testing.T) {

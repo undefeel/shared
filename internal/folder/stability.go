@@ -22,6 +22,7 @@ type stabilityTracker struct {
 	now              func() time.Time
 	interval         time.Duration
 	probes           map[string]stabilityProbe
+	ready            map[string]scanStat
 	fullRescanNeeded bool
 }
 
@@ -30,6 +31,7 @@ func newStabilityTracker() *stabilityTracker {
 		now:      time.Now,
 		interval: time.Second,
 		probes:   make(map[string]stabilityProbe),
+		ready:    make(map[string]scanStat),
 	}
 }
 
@@ -43,6 +45,9 @@ func (s *stabilityTracker) initLocked() {
 	if s.probes == nil {
 		s.probes = make(map[string]stabilityProbe)
 	}
+	if s.ready == nil {
+		s.ready = make(map[string]scanStat)
+	}
 }
 
 // probe returns true once name has had identical metadata for interval.
@@ -53,11 +58,17 @@ func (s *stabilityTracker) probe(name string, stat scanStat) bool {
 	defer s.mu.Unlock()
 	s.initLocked()
 	now := s.now()
+	if oldStat, ok := s.ready[name]; ok {
+		if oldStat == stat {
+			return true
+		}
+		delete(s.ready, name)
+	}
 	if old, ok := s.probes[name]; ok {
 		if old.stat == stat {
 			if old.ready || !now.Before(old.deadline) {
-				old.ready = true
-				s.probes[name] = old
+				delete(s.probes, name)
+				s.ready[name] = stat
 				return true
 			}
 			return false
@@ -66,19 +77,8 @@ func (s *stabilityTracker) probe(name string, stat scanStat) bool {
 		return false
 	}
 	if len(s.probes) >= maxStabilityProbes {
-		// Evict completed evidence first. Pending writers must retain their
-		// first observation so repeated scans cannot make them appear stable.
-		for key, p := range s.probes {
-			if p.ready {
-				delete(s.probes, key)
-				s.fullRescanNeeded = true
-				break
-			}
-		}
-		if len(s.probes) >= maxStabilityProbes {
-			s.fullRescanNeeded = true
-			return false
-		}
+		s.fullRescanNeeded = true
+		return false
 	}
 	s.probes[name] = stabilityProbe{stat: stat, deadline: now.Add(s.interval)}
 	return false
@@ -88,11 +88,7 @@ func (s *stabilityTracker) pending() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
-	for _, p := range s.probes {
-		if !p.ready {
-			n++
-		}
-	}
+	n = len(s.probes)
 	return n
 }
 
@@ -111,6 +107,11 @@ func (s *stabilityTracker) reconcile(present map[string]struct{}) {
 	for name := range s.probes {
 		if _, ok := present[name]; !ok {
 			delete(s.probes, name)
+		}
+	}
+	for name := range s.ready {
+		if _, ok := present[name]; !ok {
+			delete(s.ready, name)
 		}
 	}
 	s.fullRescanNeeded = false

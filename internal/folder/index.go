@@ -244,6 +244,13 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 	if err = f.initRoot(nil); err == nil {
 		err = f.recoverApplyIntent()
 	}
+	if err == nil && f.root != nil {
+		var rules []string
+		rules, err = readIgnore(f.rootScanIO(), f.root)
+		if err == nil {
+			f.ignore = rules
+		}
+	}
 	if err != nil {
 		f.Close()
 		return nil, err
