@@ -19,7 +19,7 @@
 ## Задачи
 | ID | Задача | Уровень | Исполнитель | Статус | task_id | dispatch |
 |---|---|---|---|---|---|---|
-| 05-01 | Чистка и ускорение тестов `internal/folder` | L3 | sol-ведущий + terra | in_progress | task_5c1f06b95065 | |
-| 05-02 | Чистка и ускорение тестов `internal/app` и `internal/transport`; TestPerf только с SHAREDIR_PERF=1 | L3 | sol-ведущий + terra | in_progress | task_d64756766166 | |
+| 05-01 | Чистка и ускорение тестов `internal/folder` | L3 | sol-ведущий + terra | in_progress | task_5c1f06b95065 | ctx_5e1a13138c3b |
+| 05-02 | Чистка и ускорение тестов `internal/app` и `internal/transport`; TestPerf только с SHAREDIR_PERF=1 | L3 | sol-ведущий + terra | in_progress | task_d64756766166 | ctx_f3a42988277b |
 
 Задачи независимы (файлы не пересекаются), идут параллельно. Тратят только лимиты Codex; Claude — лишь на мерж.
