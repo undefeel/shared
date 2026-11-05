@@ -359,9 +359,6 @@ func (f *Folder) saveLocked() error {
 	f.mu.Lock()
 	p := persisted{Generation: f.generation, Clock: f.clock, Files: make([]*FileInfo, 0, len(f.files))}
 	for _, fi := range f.files {
-		if ignoredWith(f.ignore, fi.Name) {
-			continue
-		}
 		c := *fi
 		c.Version = fi.Version.Copy()
 		p.Files = append(p.Files, &c)
@@ -497,6 +494,9 @@ func (f *Folder) Snapshot() ([]FileInfo, uint64) {
 	defer f.mu.Unlock()
 	out := make([]FileInfo, 0, len(f.files))
 	for _, fi := range f.files {
+		if ignoredWith(f.ignore, fi.Name) {
+			continue
+		}
 		c := *fi
 		c.Disk = ""
 		c.Version = fi.Version.Copy()

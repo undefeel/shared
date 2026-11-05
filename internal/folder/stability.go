@@ -52,9 +52,6 @@ func (s *stabilityTracker) probe(name string, stat scanStat) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initLocked()
-	if s.fullRescanNeeded {
-		return false
-	}
 	now := s.now()
 	if old, ok := s.probes[name]; ok {
 		if old.stat == stat {
@@ -69,8 +66,19 @@ func (s *stabilityTracker) probe(name string, stat scanStat) bool {
 		return false
 	}
 	if len(s.probes) >= maxStabilityProbes {
-		s.fullRescanNeeded = true
-		return false
+		// Evict completed evidence first. Pending writers must retain their
+		// first observation so repeated scans cannot make them appear stable.
+		for key, p := range s.probes {
+			if p.ready {
+				delete(s.probes, key)
+				s.fullRescanNeeded = true
+				break
+			}
+		}
+		if len(s.probes) >= maxStabilityProbes {
+			s.fullRescanNeeded = true
+			return false
+		}
 	}
 	s.probes[name] = stabilityProbe{stat: stat, deadline: now.Add(s.interval)}
 	return false
@@ -109,6 +117,8 @@ func (s *stabilityTracker) reconcile(present map[string]struct{}) {
 }
 
 func (f *Folder) stabilityState() *stabilityTracker {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.stability == nil {
 		f.stability = newStabilityTracker()
 	}
@@ -118,14 +128,20 @@ func (f *Folder) stabilityState() *stabilityTracker {
 // PendingStability reports the number of observed files still inside their
 // stability window.
 func (f *Folder) PendingStability() int {
-	if f.stability == nil {
+	f.mu.Lock()
+	s := f.stability
+	f.mu.Unlock()
+	if s == nil {
 		return 0
 	}
-	return f.stability.pending()
+	return s.pending()
 }
 
 // StabilityFullRescanNeeded reports whether probe capacity overflowed and a
 // successful full scan must reconcile the retained evidence.
 func (f *Folder) StabilityFullRescanNeeded() bool {
-	return f.stability != nil && f.stability.needsFullRescan()
+	f.mu.Lock()
+	s := f.stability
+	f.mu.Unlock()
+	return s != nil && s.needsFullRescan()
 }

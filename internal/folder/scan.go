@@ -451,7 +451,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	// both locks before blockRoot persists the latch through saveMu.
 	visibleExisting := false
 	for name, fi := range f.files {
-		if fi.Deleted || !ignoredWith(patterns, name) {
+		if !fi.Deleted && !ignoredWith(patterns, name) {
 			visibleExisting = true
 			break
 		}
@@ -503,7 +503,8 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		dirty = true
 	}
 	var p persisted
-	if !equalStrings(f.ignore, patterns) {
+	ignoreChanged := !equalStrings(f.ignore, patterns)
+	if ignoreChanged {
 		dirty = true
 	}
 	if dirty {
@@ -517,7 +518,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	f.mu.Unlock()
 	publish := func() {
 		f.files, f.clock, f.ignore, f.hashCache = next, clock, append([]string(nil), patterns...), hashCache
-		if changed > 0 || !equalStrings(f.ignore, patterns) {
+		if changed > 0 || ignoreChanged {
 			f.notify()
 		}
 		f.lastScan = time.Now()
