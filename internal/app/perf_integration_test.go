@@ -441,3 +441,161 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 }
 
 func TestPerfContentReuse(t *testing.T) { _ = perfReuseTrial(t, 200) }
+
+// TestWatchScheduleHarness verifies a real incoming group burst is suppressed by
+// the receiver scheduler, then checks that a receiver-side edit is scanned
+// incrementally and propagated back to the original sender.
+func TestWatchScheduleHarness(t *testing.T) {
+	base := t.TempDir()
+	logger := log.New(io.Discard, "", 0)
+	openDaemon := func(tag string) *Daemon {
+		home := filepath.Join(base, tag)
+		root := filepath.Join(home, "root")
+		if err := os.MkdirAll(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.Config{Name: tag, Folder: root, DownloadConcurrency: 6}
+		if err := cfg.Save(home); err != nil {
+			t.Fatal(err)
+		}
+		d, err := newWithFolderFactory(home, logger, func(root, state, device string, l *log.Logger) (*folder.Folder, error) {
+			return folder.Open(root, state, device, l)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.folder, err = d.openFolder(root, filepath.Join(home, "index.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.folder.SetDownloadConcurrency(6)
+		d.act = &activity{}
+		d.peers = map[string]*peerRunner{}
+		t.Cleanup(func() {
+			if e := d.folder.Close(); e != nil {
+				t.Error(e)
+			}
+		})
+		return d
+	}
+	source, dest := openDaemon("source"), openDaemon("receiver")
+	for i := 0; i < 2092; i++ {
+		name := filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i))
+		if err := os.WriteFile(name, []byte(fmt.Sprintf("baseline-%d", i)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := source.folder.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	serve := func(owner, peer *Daemon) *httptest.Server {
+		allowed := func(id string) bool { return id == peer.ID.ID }
+		handler := (&transport.Server{Folder: owner.folder, State: folderPeerState{owner.folder}, Allowed: allowed}).Handler()
+		srv := httptest.NewUnstartedServer(handler)
+		srv.EnableHTTP2 = true
+		srv.TLS = transport.ServerTLS(owner.ID, allowed, nil)
+		srv.StartTLS()
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	sourceServer := serve(source, dest)
+	destServer := serve(dest, source)
+	clientFor := func(local, remote *Daemon) *transport.Client {
+		c := transport.NewClient(local.ID, remote.ID.ID, 0, nil)
+		c.LocalHello = func() transport.Hello { return folderPeerState{local.folder}.Hello() }
+		t.Cleanup(c.Close)
+		return c
+	}
+	transfer := func(ctx context.Context, dst, remote *Daemon, client *transport.Client, addr string) {
+		idx, err := client.IndexSince(ctx, addr, "", 0, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := newPeerQueue()
+		if !q.accept(remote.ID.ID, idx.StoreEpoch, idx.Cursor, false, idx.Files) {
+			t.Fatal("queue rejected index")
+		}
+		for {
+			due := q.due(remote.ID.ID, time.Now(), 64)
+			if len(due) == 0 {
+				break
+			}
+			_, failed := dst.applyPeerDue(ctx, client, addr, remote.ID.ID, remote.ID.Short(), idx.StoreEpoch, idx.Cursor, due, q, nil)
+			if failed != 0 {
+				t.Fatalf("transfer failures: %d", failed)
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	sourceClient := clientFor(dest, source)
+	transfer(ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"))
+	batches := make(chan folder.WatchBatch, 32)
+	dest.watchScanObserver = func(b folder.WatchBatch) {
+		select {
+		case batches <- b:
+		default:
+		}
+	}
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	watchDone := make(chan struct{})
+	go func() { defer close(watchDone); dest.watchLoop(watchCtx) }()
+	defer func() { stopWatch(); <-watchDone }()
+	// Drain delayed watcher baseline batches before measuring the incoming burst.
+	quiet := time.NewTimer(time.Second)
+	defer quiet.Stop()
+	for {
+		select {
+		case <-batches:
+			if !quiet.Stop() {
+				select {
+				case <-quiet.C:
+				default:
+				}
+			}
+			quiet.Reset(time.Second)
+		case <-quiet.C:
+			goto baselineReady
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+baselineReady:
+	for i := 0; i < 32; i++ {
+		if err := os.WriteFile(filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i)), []byte(fmt.Sprintf("incoming burst %d", i)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := source.folder.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	transfer(ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"))
+	ownDeadline := time.NewTimer(2 * time.Second)
+	defer ownDeadline.Stop()
+	select {
+	case b := <-batches:
+		t.Fatalf("incoming own-write burst scheduled a scan: %+v", b)
+	case <-ownDeadline.C:
+	}
+	// A local receiver edit must produce an incremental scope.
+	if err := os.WriteFile(filepath.Join(dest.folder.Root, "f00042"), []byte("receiver edit"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case b := <-batches:
+		if b.FullRequired || b.RootChanged || len(b.Paths) == 0 {
+			t.Fatalf("receiver edit was not incremental: %+v", b)
+		}
+	case <-ctx.Done():
+		t.Fatal("receiver edit was not scanned")
+	}
+	// Pull the receiver’s durable change back to the source and verify bytes.
+	transfer(ctx, source, dest, clientFor(source, dest), strings.TrimPrefix(destServer.URL, "https://"))
+	got, err := os.ReadFile(filepath.Join(source.folder.Root, "f00042"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "receiver edit" {
+		t.Fatalf("reverse propagation = %q", got)
+	}
+}

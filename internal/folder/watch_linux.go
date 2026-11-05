@@ -2,71 +2,98 @@ package folder
 
 import (
 	"context"
-	"io/fs"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// Watch вызывает onChange при изменениях в дереве. stop отменяет подписку,
-// done закрывается после фактического закрытия fsnotify watcher. inotify не
-// умеет рекурсию, поэтому подписываемся на каждый каталог, включая новые.
-func (f *Folder) Watch(ctx context.Context, onChange func()) (func(), <-chan struct{}, error) {
+// WatchPaths emits relative dirty scopes. A failed recursive watch is unhealthy:
+// emit a full batch and close so the scheduler can switch to polling.
+func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(), <-chan struct{}, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, nil, err
 	}
 	watchCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
+	gen := f.ConfirmedGeneration()
 	root := filepath.Clean(f.Root)
-	// Watching the parent catches rename/remove/replacement of the root itself;
-	// the root watch remains pinned to the original inode.
-	if parent := filepath.Dir(root); parent != root {
-		if err := w.Add(parent); err != nil {
-			f.log.Printf("вотчер: %v", err)
+	parent := filepath.Dir(root)
+	if parent != root {
+		if err = w.Add(parent); err != nil {
+			w.Close()
+			stop()
+			return nil, nil, fmt.Errorf("watch parent: %w", err)
 		}
 	}
-	addTree := func(root string) {
-		filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			// WalkDir does not follow symlinks, but an event path may name one.
-			// Lstat the root and every candidate before subscribing.
-			if err != nil || d == nil || !d.IsDir() {
-				return nil
-			}
-			info, err := os.Lstat(p)
-			if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-				if err := w.Add(p); err != nil {
-					f.log.Printf("вотчер: %v", err)
-				}
-			}
-			return nil
-		})
+	addTree := func(start string) error { return f.addWatchTree(root, start, w.Add) }
+	if err = addTree(root); err != nil {
+		w.Close()
+		stop()
+		return nil, nil, fmt.Errorf("watch tree: %w", err)
 	}
-	addTree(f.Root)
 	go func() {
 		defer close(done)
 		defer w.Close()
+		full := func(rootChanged bool) {
+			emit(watchLossBatch(gen, rootChanged))
+		}
 		for {
 			select {
 			case <-watchCtx.Done():
 				return
 			case ev, ok := <-w.Events:
 				if !ok {
+					if watchCtx.Err() == nil {
+						full(false)
+					}
 					return
+				}
+				if filepath.Clean(ev.Name) == root {
+					// chmod/attribute notifications on the watched directory are
+					// ordinary metadata changes; only removal or rename means the
+					// root binding may have changed.
+					if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+						full(true)
+					} else {
+						full(false)
+					}
+					continue
 				}
 				if ev.Has(fsnotify.Create) {
-					if st, err := os.Lstat(ev.Name); err == nil && st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
-						addTree(ev.Name)
+					if st, e := os.Lstat(ev.Name); e == nil && st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
+						if e = addTree(ev.Name); e != nil {
+							full(false)
+							return
+						}
 					}
 				}
-				onChange()
-			case err, ok := <-w.Errors:
+				rel, ok := f.normalizeWatchPath(ev.Name)
 				if !ok {
+					continue
+				}
+				if rel == "" {
+					full(false)
+					continue
+				}
+				if ev.Has(fsnotify.Rename) {
+					emit(watchRenameBatch(rel, gen))
+				} else {
+					emit(WatchBatch{Paths: []string{rel}, Generation: gen})
+				}
+			case e, ok := <-w.Errors:
+				if watchCtx.Err() != nil {
 					return
 				}
-				f.log.Printf("вотчер: %v", err)
-				notifyWatchError(err, onChange) // overflow просит daemon сделать полный Scan
+				if !ok {
+					full(false)
+					return
+				}
+				f.log.Printf("watch: %v", e)
+				full(false)
+				return
 			}
 		}
 	}()

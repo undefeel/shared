@@ -171,3 +171,73 @@ func TestWatchOverflowRequestsFullScan(t *testing.T) {
 		t.Fatal("overflow did not result in a full Scan")
 	}
 }
+
+func TestScanWatchBatchFencesGenerationAndEmptyPaths(t *testing.T) {
+	f := watchFixture(t)
+	gen := f.ConfirmedGeneration()
+	if err := f.ScanWatchBatch(context.Background(), WatchBatch{Generation: gen}); err != nil {
+		t.Fatalf("empty watcher batch should be a no-op: %v", err)
+	}
+	f.scanMu.Lock()
+	f.mu.Lock()
+	f.confirmedGeneration++
+	f.mu.Unlock()
+	f.scanMu.Unlock()
+	if err := f.ScanWatchBatch(context.Background(), WatchBatch{Paths: []string{"changed"}, Generation: gen}); !errors.Is(err, ErrStaleWatchGeneration) {
+		t.Fatalf("stale batch error = %v", err)
+	}
+}
+
+func TestRelativeWatchEventScopesRootAndOutsidePaths(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "private", "var", "sync")
+	if rel, inTree, rootEvent := relativeWatchEvent(root, root); rel != "" || !inTree || !rootEvent {
+		t.Fatalf("root event = (%q,%v,%v)", rel, inTree, rootEvent)
+	}
+	if rel, inTree, rootEvent := relativeWatchEvent(root, filepath.Join(root, "dir", "file")); rel != "dir/file" || !inTree || rootEvent {
+		t.Fatalf("file event = (%q,%v,%v)", rel, inTree, rootEvent)
+	}
+	if rel, inTree, rootEvent := relativeWatchEvent(root, filepath.Join(filepath.Dir(root), "other", "file")); rel != "" || inTree || rootEvent {
+		t.Fatalf("outside event = (%q,%v,%v)", rel, inTree, rootEvent)
+	}
+}
+
+func TestWatchTreeInstallsParentFirstAndPropagatesErrors(t *testing.T) {
+	f := watchFixture(t)
+	child := filepath.Join(f.Root, "child")
+	if err := os.Mkdir(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var installed []string
+	sentinel := errors.New("watch Add failed")
+	err := f.addWatchTree(f.Root, f.Root, func(p string) error {
+		installed = append(installed, p)
+		if p == child {
+			return sentinel
+		}
+		return nil
+	})
+	if !errors.Is(err, sentinel) || len(installed) != 2 || installed[0] != f.Root {
+		t.Fatalf("order=%v err=%v", installed, err)
+	}
+	if err := f.addWatchTree(f.Root, filepath.Join(f.Root, "missing"), func(string) error { return nil }); err == nil {
+		t.Fatal("walk error swallowed")
+	}
+}
+
+func TestWatchLossAndRenameScopes(t *testing.T) {
+	for _, cause := range []string{"overflow", "dropped", "addTree", "stream close"} {
+		t.Run(cause, func(t *testing.T) {
+			b := watchLossBatch(9, false)
+			if !b.FullRequired || b.Generation != 9 {
+				t.Fatalf("loss=%+v", b)
+			}
+		})
+	}
+	b := watchRenameBatch("old/file", 9)
+	if len(b.Paths) != 2 || b.Paths[1] != "old" || !b.FullRequired {
+		t.Fatalf("rename=%+v", b)
+	}
+	if !watchLossBatch(9, true).RootChanged {
+		t.Fatal("root flag lost")
+	}
+}
