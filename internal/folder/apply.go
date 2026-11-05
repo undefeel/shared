@@ -285,6 +285,16 @@ func (f *Folder) applyOne(ctx context.Context, peer string, generation uint64, s
 			return fetch(ctx, fi, w)
 		})
 	}
+	if delta, ok := ctx.Value(deltaFetcherKey{}).(DeltaFetcher); ok && delta != nil && !streamReserved {
+		ctx = WithDeltaFetcher(ctx, func(ctx context.Context, req DeltaRequest, emit func(DeltaBlock) error) error {
+			release, err := f.acquireDownload(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			return delta(ctx, req, emit)
+		})
+	}
 	prepared, err := f.stageApply(ctx, st, limited)
 	if err != nil {
 		return st, err

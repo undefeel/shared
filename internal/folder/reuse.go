@@ -113,6 +113,11 @@ func (f *Folder) downloadOrReuseWith(ctx context.Context, fi FileInfo, fetch Fet
 			return "", err
 		}
 	}
+	if name, ok, err := f.downloadDelta(ctx, fi); err != nil {
+		return "", err
+	} else if ok {
+		return name, nil
+	}
 	return f.download(ctx, fi, fetch)
 }
 
