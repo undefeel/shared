@@ -17,6 +17,18 @@ CHUNK_MS=480000   # stay below common 10-minute shell limits
 MAX_FIX=2
 MAX_PARTS=3      # parallel implementers per lead
 
+MAX_CONT=8       # automatic "continue" nudges per implementer
+CONT_MSG="Continue the task from where you stopped. Do not re-read what you already know; keep implementing the remaining items of your plan/part, run the acceptance, commit (parts: do not commit). Send worker_done only when everything is done or on a concrete technical blocker. If you run out of room again, just end your turn: you will be resumed."
+# Implementer ended its turn without worker_done (Orca escalation with stopReason): resume the same session.
+continue_impl() {
+  local ds="$1" f n
+  f="$(git rev-parse --git-dir)/lead-cont-$ds"; n=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 ))
+  if (( n > MAX_CONT )); then echo "lead: implementer $ds stopped $MAX_CONT times without finishing; review what it committed and continue with a fix round or take over"; return 1; fi
+  echo "$n" >"$f"
+  orca orchestration send --to "dispatch:$ds" --subject "Continue ($n/$MAX_CONT)" --body "$CONT_MSG" --json >/dev/null \
+    && echo "lead: implementer $ds ended its turn without reporting; sent continue $n/$MAX_CONT"
+}
+
 wait_for() {
   local ds="$1" deadline=$(( $(date +%s) + CHUNK_MS / 1000 ))
   while :; do
@@ -30,6 +42,10 @@ wait_for() {
              --timeout-ms "$left" --json 2>/dev/null)" || { echo "$out"; exit 1; }
     mine="$(jq -c --arg ds "$ds" '[.result.messages[]? | select((.payload.dispatchId // "") == $ds)]' <<<"$out")"
     if [[ "$(jq 'length' <<<"$mine")" -gt 0 ]]; then
+      if jq -e 'all(.[]; .type == "escalation" and ((.payload.stopReason // "") != ""))' <<<"$mine" >/dev/null; then
+        continue_impl "$ds" || exit 3
+        continue
+      fi
       jq -r '.[] | "── [\(.type)] id=\(.id) \(.subject // "")\n\(.body // "")"' <<<"$mine"
       if jq -e 'any(.[]; .type == "worker_done")' <<<"$mine" >/dev/null; then
         orca orchestration worker-release --dispatch "$ds" --json >/dev/null 2>&1 || true
@@ -52,8 +68,11 @@ if [[ "${1:-}" == "--wait-all" ]]; then
     left=$(( (deadline - $(date +%s)) * 1000 ))
     if (( left <= 0 )); then echo "lead: still running: ${pending[*]}. Do NOT end your turn (nobody will wake you) — re-run now: plan/tools/lead.sh --wait-all ${pending[*]}"; exit 3; fi
     out="$(orca orchestration check --wait --types "worker_done,escalation,question" --timeout-ms "$left" --json 2>/dev/null)" || { echo "$out"; exit 1; }
-    jq -r '.result.messages[]? | "── [\(.type)] id=\(.id) from=\(.payload.dispatchId // "?") \(.subject // "")\n\(.body // "")"' <<<"$out"
-    if jq -e '[.result.messages[]? | select(.type != "worker_done" and .type != "heartbeat")] | length > 0' <<<"$out" >/dev/null; then
+    for sds in $(jq -r '.result.messages[]? | select(.type == "escalation" and ((.payload.stopReason // "") != "")) | .payload.dispatchId // empty' <<<"$out"); do
+      [[ " ${pending[*]} " == *" $sds "* ]] && { continue_impl "$sds" || true; }
+    done
+    jq -r '.result.messages[]? | select(.type != "escalation" or ((.payload.stopReason // "") == "")) | "── [\(.type)] id=\(.id) from=\(.payload.dispatchId // "?") \(.subject // "")\n\(.body // "")"' <<<"$out"
+    if jq -e '[.result.messages[]? | select(.type != "worker_done" and .type != "heartbeat" and ((.payload.stopReason // "") == ""))] | length > 0' <<<"$out" >/dev/null; then
       echo "lead: a question/escalation above needs an answer (orca orchestration reply --id <id> --body ...); then re-run --wait-all with the remaining dispatches"
     fi
     next=()
@@ -124,7 +143,8 @@ $TASK
 ## Constraints
 $(section Constraints)
 - Do NOT run plan/tools/self-review.sh or plan/tools/lead.sh and do not start workers: the lead reviews your work.
-- Finish the whole change in this turn, however large it looks: write the code, run the acceptance, commit. Reporting "not implemented" or failed without a concrete technical blocker is not acceptable; if something truly blocks you, ask (orchestration ask) naming the exact blocker.
+- You may work over several turns. If you cannot finish in this turn, simply end your turn WITHOUT worker_done (commit finished pieces first, parts leave files uncommitted): the lead automatically resumes you with "continue" and you keep going in the same session. NEVER send worker_done with outcome failed for unfinished work — only for a concrete technical blocker you name.
+- If an existing test contradicts the plan, ask (orchestration ask) instead of stopping.
 - Communicate in English.
 
 ## Ownership
