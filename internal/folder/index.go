@@ -7,6 +7,7 @@ package folder
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -697,4 +698,16 @@ func (f *Folder) rebuildContentNames() {
 			f.contentNames[fi.Hash][name] = struct{}{}
 		}
 	}
+}
+
+// DurableCursor returns the epoch and generation from one durable state.
+func (f *Folder) DurableCursor() (string, uint64) {
+	f.scanMu.Lock()
+	f.saveMu.Lock()
+	f.mu.Lock()
+	epoch, cursor := hex.EncodeToString(f.store.state.StoreID[:]), f.durableGeneration
+	f.mu.Unlock()
+	f.saveMu.Unlock()
+	f.scanMu.Unlock()
+	return epoch, cursor
 }

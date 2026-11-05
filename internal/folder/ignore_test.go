@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -127,4 +128,62 @@ func TestApplyRechecksExclusionAfterDownload(t *testing.T) {
 	if _, _, ok := n.f.Lookup("item"); ok {
 		t.Fatal("excluded target indexed")
 	}
+}
+
+func TestBuiltinIgnoreReference(t *testing.T) {
+	names := []string{"", ".", "/", "#", "##", "#x#", "a/#x#/z", ".hidden/file", "distfile", "x/node_modulesx/y", "x/a.part.txt", "a/../dist/x", "/a/.DS_Store/x"}
+	for _, rule := range builtinIgnore {
+		sample := strings.ReplaceAll(rule, "*", "sample")
+		names = append(names, sample, "a/b/"+sample+"/c", "prefix"+sample+"suffix", ".hidden/"+sample, sample+"x")
+	}
+	users := [][]string{nil, {"custom/*", "a/?", "[", "x/y", "*.go", "#*#"}}
+	for _, user := range users {
+		for _, name := range names {
+			old := append(append([]string(nil), builtinIgnore...), user...)
+			if got, want := ignoredWith(user, name), matchIgnore(old, name); got != want {
+				t.Errorf("name %q user %q: got %v want %v", name, user, got, want)
+			}
+		}
+	}
+}
+
+func BenchmarkIgnore(b *testing.B) {
+	names := []string{"ordinary/deep/path/file.txt", "ordinary/node_modules/package/a", "src/foo.go", "a/b/file.swp"}
+	user := []string{"custom/*", "*.log"}
+	for _, old := range []bool{false, true} {
+		label := "optimized"
+		if old {
+			label = "reference"
+		}
+		b.Run(label, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				name := names[i%len(names)]
+				if old {
+					matchIgnore(append(append([]string(nil), builtinIgnore...), user...), name)
+				} else {
+					ignoredWith(user, name)
+				}
+			}
+		})
+	}
+}
+
+func TestDurableCursorMatchesSnapshot(t *testing.T) {
+	n := newNode(t, "cursor")
+	defer n.f.Close()
+	check := func() {
+		t.Helper()
+		_, epoch, cursor := n.f.DurableState()
+		gotEpoch, gotCursor := n.f.DurableCursor()
+		if epoch != gotEpoch || cursor != gotCursor {
+			t.Fatalf("cursor = %q/%d, snapshot = %q/%d", gotEpoch, gotCursor, epoch, cursor)
+		}
+	}
+	check()
+	n.write(t, "file", "content", time.Now())
+	if err := n.f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	check()
 }

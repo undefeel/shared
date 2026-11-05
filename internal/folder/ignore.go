@@ -28,7 +28,24 @@ func (f *Folder) Ignored(name string) bool {
 
 // ignoredWith applies built-ins and user rules once, independent of Folder state.
 func ignoredWith(user []string, name string) bool {
-	return matchIgnore(append(append([]string(nil), builtinIgnore...), user...), name)
+	return matchBuiltinIgnore(name) || matchIgnore(user, name)
+}
+
+func matchBuiltinIgnore(name string) bool {
+	for p := strings.TrimPrefix(path.Clean(name), "./"); p != "." && p != "" && p != "/"; p = path.Dir(p) {
+		base := path.Base(p)
+		switch base {
+		case ".DS_Store", ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems", ".localized", "Thumbs.db", "desktop.ini", "node_modules", ".venv", "__pycache__", ".next", "dist":
+			return true
+		}
+		if strings.HasPrefix(base, "._") || strings.HasPrefix(base, tmpPrefix) || strings.HasPrefix(base, ".#") || strings.HasPrefix(base, "~$") ||
+			strings.HasSuffix(base, ".swp") || strings.HasSuffix(base, ".swo") || strings.HasSuffix(base, "~") ||
+			strings.HasSuffix(base, ".crdownload") || strings.HasSuffix(base, ".part") || strings.HasSuffix(base, ".download") ||
+			(len(base) >= 2 && strings.HasPrefix(base, "#") && strings.HasSuffix(base, "#")) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchIgnore(patterns []string, name string) bool {
