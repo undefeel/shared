@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"sharedir/internal/folder"
 )
@@ -66,7 +67,10 @@ func (c *Client) FetchDelta(ctx context.Context, addr string, req folder.DeltaRe
 	request.Header.Set(ProtocolHeader, "2")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/x-sharedir-delta;version=2")
-	request.Header.Set("Accept-Encoding", "gzip")
+	request.Header.Set("Accept-Encoding", "identity")
+	if addr == RelayHost || strings.HasPrefix(addr, RelayHost+":") {
+		request.Header.Set("Accept-Encoding", "gzip")
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	request = request.WithContext(ctx)

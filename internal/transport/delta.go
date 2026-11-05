@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"sharedir/internal/folder"
+	"sharedir/internal/identity"
 )
 
 const deltaMagic = "SHDDEL02"
@@ -188,5 +189,7 @@ func (s *Server) delta(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !sameDeltaStat(before, after) || unavailable() || !s.authorizeFrame(r) || r.Context().Err() != nil {
 		return
 	}
-	_ = writeDeltaHeader(out, deltaHeader{End: true, TargetHash: req.TargetHash, TargetSize: req.TargetSize, Frames: len(changed)})
+	if writeDeltaHeader(out, deltaHeader{End: true, TargetHash: req.TargetHash, TargetSize: req.TargetSize, Frames: len(changed)}) == nil && s.OnServed != nil && r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		s.OnServed(identity.IDFromCert(r.TLS.PeerCertificates[0].Raw), fi)
+	}
 }
