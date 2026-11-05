@@ -233,7 +233,7 @@ func (f *Folder) WaitDurable(ctx context.Context, epoch string, cursor uint64, t
 		f.mu.Lock()
 		changed := f.changed
 		f.mu.Unlock()
-		_, currentEpoch, currentCursor := f.DurableState()
+		currentEpoch, currentCursor := f.DurableCursor()
 		if currentEpoch != epoch || currentCursor != cursor {
 			return nil
 		}

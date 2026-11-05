@@ -11,7 +11,7 @@ import (
 type folderPeerState struct{ folder *folder.Folder }
 
 func (s folderPeerState) Hello() transport.Hello {
-	_, epoch, _ := s.folder.DurableState()
+	epoch, _ := s.folder.DurableCursor()
 	// Membership is not durable/modelled until wave C; keep a stable placeholder.
 	return transport.Hello{Protocol: transport.ProtocolVersion, StoreEpoch: epoch, PeerSetEpoch: "membership-v1-placeholder", Features: []string{"files", "gzip"}}
 }
