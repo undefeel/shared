@@ -138,6 +138,8 @@ func kindOf(name string) string {
 }
 
 type Folder struct {
+	ownMu       sync.Mutex
+	ownEvents   map[string]ownFingerprint
 	scanError   *ScanError // mu
 	scanLogTime time.Time  // mu
 

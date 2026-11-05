@@ -15,6 +15,13 @@ func (f *Folder) ScanPaths(ctx context.Context, scopes []string) error {
 	return f.scanPathsWith(ctx, scopes, f.rootScanIO())
 }
 
+// scanPathsGeneration binds an incremental scan to the generation carried by
+// its watcher batch. The expected generation is checked against the snapshot
+// taken under scanMu, closing the precheck/snapshot rebind race.
+func (f *Folder) scanPathsGeneration(ctx context.Context, scopes []string, generation uint64) error {
+	return f.scanPathsWithGeneration(ctx, scopes, f.rootScanIO(), &generation)
+}
+
 func normalizeScopes(scopes []string) ([]string, error) {
 	if len(scopes) == 0 {
 		return nil, nil
@@ -80,6 +87,10 @@ func scopeRelevant(scopes []string, name string) bool {
 }
 
 func (f *Folder) scanPathsWith(ctx context.Context, paths []string, ioops scanIO) (result error) {
+	return f.scanPathsWithGeneration(ctx, paths, ioops, nil)
+}
+
+func (f *Folder) scanPathsWithGeneration(ctx context.Context, paths []string, ioops scanIO, expected *uint64) (result error) {
 	scopes, err := normalizeScopes(paths)
 	if err != nil {
 		return err
@@ -98,6 +109,10 @@ func (f *Folder) scanPathsWith(ctx context.Context, paths []string, ioops scanIO
 	f.scanMu.Unlock()
 	if err != nil {
 		return err
+	}
+	if expected != nil && b.confirmed != *expected {
+		b.root.releaseLease()
+		return ErrStaleWatchGeneration
 	}
 	defer b.root.releaseLease()
 	if err = f.preflightScopes(ctx, ioops, scopes); err != nil {

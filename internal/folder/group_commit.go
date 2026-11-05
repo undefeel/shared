@@ -156,6 +156,7 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 	f.generation = g.Generation
 	publish()
 	f.mu.Unlock()
+	f.registerOwnEvents(g)
 	f.persistHooks.phase(tx, "G5")
 	if e := f.cleanupGroup(&g); e != nil && f.log != nil {
 		f.log.Printf("group cleanup (will retry): %v", e)

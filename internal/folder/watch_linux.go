@@ -2,71 +2,129 @@ package folder
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// Watch вызывает onChange при изменениях в дереве. stop отменяет подписку,
-// done закрывается после фактического закрытия fsnotify watcher. inotify не
-// умеет рекурсию, поэтому подписываемся на каждый каталог, включая новые.
-func (f *Folder) Watch(ctx context.Context, onChange func()) (func(), <-chan struct{}, error) {
+// WatchPaths emits relative dirty scopes. A failed recursive watch is unhealthy:
+// emit a full batch and close so the scheduler can switch to polling.
+func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(), <-chan struct{}, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, nil, err
 	}
 	watchCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
+	gen := f.ConfirmedGeneration()
 	root := filepath.Clean(f.Root)
-	// Watching the parent catches rename/remove/replacement of the root itself;
-	// the root watch remains pinned to the original inode.
-	if parent := filepath.Dir(root); parent != root {
-		if err := w.Add(parent); err != nil {
-			f.log.Printf("вотчер: %v", err)
+	parent := filepath.Dir(root)
+	if parent != root {
+		if err = w.Add(parent); err != nil {
+			w.Close()
+			stop()
+			return nil, nil, fmt.Errorf("watch parent: %w", err)
 		}
 	}
-	addTree := func(root string) {
-		filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			// WalkDir does not follow symlinks, but an event path may name one.
-			// Lstat the root and every candidate before subscribing.
-			if err != nil || d == nil || !d.IsDir() {
+	addTree := func(start string) error {
+		return filepath.WalkDir(start, func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d == nil {
+				return fmt.Errorf("watch: missing entry %s", p)
+			}
+			rel, _ := filepath.Rel(root, p)
+			if rel != "." && f.Ignored(strings.ReplaceAll(rel, string(filepath.Separator), "/")) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
 				return nil
 			}
-			info, err := os.Lstat(p)
-			if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-				if err := w.Add(p); err != nil {
-					f.log.Printf("вотчер: %v", err)
-				}
+			if !d.IsDir() {
+				return nil
 			}
-			return nil
+			st, e := os.Lstat(p)
+			if e != nil {
+				return e
+			}
+			if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+				return nil
+			}
+			return w.Add(p)
 		})
 	}
-	addTree(f.Root)
+	if err = addTree(root); err != nil {
+		w.Close()
+		stop()
+		return nil, nil, fmt.Errorf("watch tree: %w", err)
+	}
 	go func() {
 		defer close(done)
 		defer w.Close()
+		full := func(rootChanged bool) {
+			emit(WatchBatch{FullRequired: true, RootChanged: rootChanged, Generation: gen})
+		}
 		for {
 			select {
 			case <-watchCtx.Done():
 				return
 			case ev, ok := <-w.Events:
 				if !ok {
+					if watchCtx.Err() == nil {
+						full(false)
+					}
 					return
+				}
+				if filepath.Clean(ev.Name) == root {
+					full(true)
+					continue
 				}
 				if ev.Has(fsnotify.Create) {
-					if st, err := os.Lstat(ev.Name); err == nil && st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
-						addTree(ev.Name)
+					if st, e := os.Lstat(ev.Name); e == nil && st.IsDir() && st.Mode()&os.ModeSymlink == 0 {
+						if e = addTree(ev.Name); e != nil {
+							full(false)
+							return
+						}
 					}
 				}
-				onChange()
-			case err, ok := <-w.Errors:
+				rel, ok := f.normalizeWatchPath(ev.Name)
 				if !ok {
+					continue
+				}
+				if rel == "" {
+					full(false)
+					continue
+				}
+				paths := []string{rel}
+				if ev.Has(fsnotify.Rename) {
+					p := filepath.ToSlash(filepath.Dir(rel))
+					if p == "." {
+						p = ""
+					}
+					if p != "" {
+						paths = append(paths, p)
+					} else {
+						full(false)
+						continue
+					}
+				}
+				emit(WatchBatch{Paths: paths, Generation: gen})
+			case e, ok := <-w.Errors:
+				if watchCtx.Err() != nil {
 					return
 				}
-				f.log.Printf("вотчер: %v", err)
-				notifyWatchError(err, onChange) // overflow просит daemon сделать полный Scan
+				if !ok {
+					full(false)
+					return
+				}
+				f.log.Printf("watch: %v", e)
+				full(false)
+				return
 			}
 		}
 	}()

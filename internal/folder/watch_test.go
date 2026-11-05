@@ -171,3 +171,19 @@ func TestWatchOverflowRequestsFullScan(t *testing.T) {
 		t.Fatal("overflow did not result in a full Scan")
 	}
 }
+
+func TestScanWatchBatchFencesGenerationAndEmptyPaths(t *testing.T) {
+	f := watchFixture(t)
+	gen := f.ConfirmedGeneration()
+	if err := f.ScanWatchBatch(context.Background(), WatchBatch{Generation: gen}); err != nil {
+		t.Fatalf("empty watcher batch should be a no-op: %v", err)
+	}
+	f.scanMu.Lock()
+	f.mu.Lock()
+	f.confirmedGeneration++
+	f.mu.Unlock()
+	f.scanMu.Unlock()
+	if err := f.ScanWatchBatch(context.Background(), WatchBatch{Paths: []string{"changed"}, Generation: gen}); !errors.Is(err, ErrStaleWatchGeneration) {
+		t.Fatalf("stale batch error = %v", err)
+	}
+}

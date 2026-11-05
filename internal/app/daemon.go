@@ -23,7 +23,7 @@ import (
 	"sharedir/internal/transport"
 )
 
-const rescanInterval = time.Minute
+const rescanInterval = time.Minute // legacy status retry interval
 
 // Состояния пира. Это коды для UI: текст на нужном языке подставляет клиент.
 const (
@@ -136,6 +136,9 @@ type Daemon struct {
 	relayKick    chan struct{} // смена адреса relay в конфиге
 	// OnChange вызывается при смене статуса (для трея).
 	OnChange func()
+
+	// watchScanObserver is a narrow integration-test hook for scheduled batches.
+	watchScanObserver func(folder.WatchBatch)
 }
 
 func New(home string, logger *log.Logger) (*Daemon, error) {
@@ -225,49 +228,102 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return nil
 }
 
-// watchLoop пересканирует папку по событиям ФС (с задержкой, чтобы пачка
-// изменений дала один скан) и раз в минуту на всякий случай.
+// watchLoop serializes incremental and periodic scans while retaining events received during a scan.
 func (d *Daemon) watchLoop(ctx context.Context) {
 	generation := d.folder.ConfirmedGeneration()
-	trigger := make(chan struct{}, 1)
-	watchStop, watcherDone, err := d.folder.Watch(ctx, func() {
+	wake := make(chan struct{}, 1)
+	var q scanQueue
+	var qmu sync.Mutex
+	watchStop, watcherDone, err := d.folder.WatchPaths(ctx, func(b folder.WatchBatch) {
+		qmu.Lock()
+		q.merge(b)
+		qmu.Unlock()
 		select {
-		case trigger <- struct{}{}:
+		case wake <- struct{}{}:
 		default:
 		}
 	})
-	if err != nil {
-		d.Log.Printf("вотчер не запущен, только периодический скан: %v", err)
+	healthy := err == nil
+	if !healthy {
+		d.Log.Printf("watcher unavailable, periodic scans only: %v", err)
 	} else {
-		defer func() {
-			watchStop()
-			<-watcherDone
-		}()
+		done := watcherDone
+		defer func() { watchStop(); <-done }()
 	}
-	tick := time.NewTicker(rescanInterval)
-	defer tick.Stop()
+	var deadline scanDeadline
+	deadline.set(time.Now(), healthy)
 	flush := time.NewTicker(2 * time.Second)
 	defer flush.Stop()
 	defer d.act.flush()
+	var retryAt time.Time
 	for {
+		delay := time.Until(deadline.at)
+		if !retryAt.IsZero() && time.Until(retryAt) < delay {
+			delay = time.Until(retryAt)
+		}
+		if delay < 0 {
+			delay = 0
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-flush.C:
+			timer.Stop()
 			d.act.flush()
 			continue
-		case <-trigger:
-			time.Sleep(time.Second)
-			select { // события, пришедшие за эту секунду, покрывает тот же скан
-			case <-trigger:
-			default:
-			}
-		case <-tick.C:
+		case <-wake:
+			timer.Stop()
+		case <-watcherDone:
+			timer.Stop()
+			healthy = false
+			watcherDone = nil
+			qmu.Lock()
+			q.merge(folder.WatchBatch{FullRequired: true, Generation: generation})
+			qmu.Unlock()
+			deadline.set(time.Now(), false)
+		case <-timer.C:
 		}
 		if ctx.Err() != nil {
 			return
 		}
-		if err := d.folder.ScanGeneration(ctx, generation); err != nil {
+		now := time.Now()
+		qmu.Lock()
+		b := q.drain()
+		qmu.Unlock()
+		if deadline.due(now) {
+			b.FullRequired = true
+			b.Generation = generation
+			deadline.advance(now)
+		}
+		if !retryAt.IsZero() && !now.Before(retryAt) {
+			b.FullRequired = true
+			b.Generation = generation
+			retryAt = time.Time{}
+		}
+		if !retryAt.IsZero() && now.Before(retryAt) && !b.FullRequired && !b.RootChanged {
+			qmu.Lock()
+			q.merge(b)
+			qmu.Unlock()
+			continue
+		}
+		if len(b.Paths) == 0 && !b.FullRequired && !b.RootChanged {
+			continue
+		}
+		b = d.folder.FilterWatchBatch(ctx, b)
+		if len(b.Paths) == 0 && !b.FullRequired && !b.RootChanged {
+			continue
+		}
+		if d.watchScanObserver != nil {
+			d.watchScanObserver(b)
+		}
+		if err := d.folder.ScanWatchBatch(ctx, b); err != nil {
+			// Preserve the failed scopes for a delayed retry; the timer still forces periodic full work.
+			qmu.Lock()
+			q.merge(b)
+			qmu.Unlock()
+			retryAt = time.Now().Add(watchFallbackInterval)
 			if d.folder.Blocked() != nil {
 				d.mu.Lock()
 				for _, p := range d.peers {
@@ -277,6 +333,8 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 				}
 				d.mu.Unlock()
 			}
+		} else {
+			retryAt = time.Time{}
 		}
 		d.changed()
 	}
