@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func rootScanFixture(t *testing.T) *Folder {
@@ -17,6 +18,7 @@ func rootScanFixture(t *testing.T) *Folder {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = f.Close() })
+	f.integrationStability().interval = time.Millisecond
 	if err := os.WriteFile(filepath.Join(f.Root, "item"), []byte("data"), 0600); err != nil {
 		t.Fatal(err)
 	}

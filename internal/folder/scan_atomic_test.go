@@ -16,6 +16,7 @@ import (
 func atomicScanFixture(t *testing.T) *Folder {
 	t.Helper()
 	f := newNode(t, "scan-test").f
+	f.integrationStability().interval = time.Millisecond
 	if err := os.WriteFile(filepath.Join(f.Root, "old.txt"), []byte("old"), 0600); err != nil {
 		t.Fatal(err)
 	}
