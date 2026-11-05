@@ -61,7 +61,7 @@ func (d *Daemon) applyPeerDue(ctx context.Context, client *transport.Client, add
 	}
 	if len(singles) > 0 {
 		var changed []folder.FileInfo
-		a, f := d.folder.ApplyRemoteResults(ctx, short, singles, client.Fetcher(addr), progress, func(fi folder.FileInfo, err error) {
+		a, f := d.folder.ApplyRemoteResults(folder.WithDeltaFetcher(ctx, client.DeltaFetcher(addr)), short, singles, client.Fetcher(addr), progress, func(fi folder.FileInfo, err error) {
 			qe := queue.activeEpoch(peerID)
 			if err != nil {
 				queue.failed(peerID, qe, fi, time.Now())
