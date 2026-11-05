@@ -68,3 +68,6 @@
 04-31b task_d86e26126f88
 04-70 task_d415e9a579ab
 04-71 task_4de3b88f54fa
+04-72 task_87e8a956313f
+04-73 task_d9a72065ac38
+04-74 task_1d453a944bcc
