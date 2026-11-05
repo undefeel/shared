@@ -6,6 +6,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
@@ -13,7 +14,13 @@ import (
 // rootFS owns its root descriptor. Callers must drain operations before Close.
 // Returned files (including parent handles) belong to the caller. Disk paths may
 // be NFD; canonical peer-name validation belongs at the protocol boundary.
-type rootFS struct{ root *os.File }
+type rootFS struct {
+	root      *os.File
+	leaseMu   sync.Mutex
+	leaseCond *sync.Cond
+	leases    int
+	closing   bool
+}
 
 const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
@@ -22,10 +29,42 @@ func openRootFS(name string) (*rootFS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rootFS{os.NewFile(uintptr(fd), name)}, nil
+	return &rootFS{root: os.NewFile(uintptr(fd), name)}, nil
 }
 
-func (r *rootFS) Close() error { return r.root.Close() }
+// acquireLease prevents Close from releasing the descriptor while a staged scan uses it.
+func (r *rootFS) acquireLease() bool {
+	r.leaseMu.Lock()
+	defer r.leaseMu.Unlock()
+	if r.closing {
+		return false
+	}
+	r.leases++
+	return true
+}
+
+func (r *rootFS) releaseLease() {
+	r.leaseMu.Lock()
+	defer r.leaseMu.Unlock()
+	r.leases--
+	if r.leases == 0 && r.leaseCond != nil {
+		r.leaseCond.Broadcast()
+	}
+}
+
+func (r *rootFS) Close() error {
+	r.leaseMu.Lock()
+	if r.leaseCond == nil {
+		r.leaseCond = sync.NewCond(&r.leaseMu)
+	}
+	r.closing = true
+	for r.leases != 0 {
+		r.leaseCond.Wait()
+	}
+	err := r.root.Close()
+	r.leaseMu.Unlock()
+	return err
+}
 
 func diskName(name string) bool {
 	return name != "" && name != "." && !path.IsAbs(name) && path.Clean(name) == name &&
