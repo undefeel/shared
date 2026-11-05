@@ -576,7 +576,6 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 	var incompatibleLogged bool
 	var ackIndex *transport.IndexResponse
 	var ackDeletions []folder.FileInfo
-	var baselineIgnored bool
 	var refreshBaseline bool
 	var lastCollect time.Time
 	for ctx.Err() == nil {
@@ -597,7 +596,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		if ackIndex != nil {
 			completedEpoch, completedCursor, completed := queue.cursor(id)
 			if completed && completedEpoch == ackIndex.StoreEpoch && completedCursor == ackIndex.Cursor {
-				allCovered := !baselineIgnored
+				allCovered := true
 				covered := make([]transport.AckDeletion, 0, len(ackDeletions))
 				for _, fi := range ackDeletions {
 					if d.folder.CanAcknowledgeDeletion(fi) {
@@ -730,11 +729,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			if !haveCursor || idx.StoreEpoch != epoch || idx.Cursor != since || idx.Reset || len(idx.Files) != 0 {
 				ackIndex = idx
 				ackDeletions = nil
-				baselineIgnored = false
 				for _, fi := range idx.Files {
-					if d.folder.Ignored(fi.Name) {
-						baselineIgnored = true
-					}
 					if fi.Deleted {
 						ackDeletions = append(ackDeletions, fi)
 					}

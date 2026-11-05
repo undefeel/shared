@@ -158,14 +158,22 @@ func TestAckConvergesAfterLossAndOfflineMember(t *testing.T) {
 }
 
 func TestAckRetriesDroppedRequestWithoutRemoteChanges(t *testing.T) {
-	testAckRetry(t, http.StatusServiceUnavailable)
+	testAckRetry(t, http.StatusServiceUnavailable, "")
 }
 
 func TestAckRefreshesStaleBaseline(t *testing.T) {
-	testAckRetry(t, http.StatusConflict)
+	testAckRetry(t, http.StatusConflict, "")
 }
 
-func testAckRetry(t *testing.T, droppedStatus int) {
+func TestAckBaselineAllowsIgnoredLiveFile(t *testing.T) {
+	testAckRetry(t, http.StatusServiceUnavailable, "keep")
+}
+
+func TestAckBaselineRequiresIgnoredDeletionCoverage(t *testing.T) {
+	testAckRetry(t, http.StatusServiceUnavailable, "gone")
+}
+
+func testAckRetry(t *testing.T, droppedStatus int, ignored string) {
 	base := t.TempDir()
 	open := func(name string) *Daemon {
 		home := filepath.Join(base, name)
@@ -188,6 +196,14 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 		return d
 	}
 	source, receiver := open("source"), open("receiver")
+	if ignored != "" {
+		if err := os.WriteFile(filepath.Join(receiver.folder.Root, ".sharedirignore"), []byte(ignored+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := receiver.folder.Scan(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	receiver.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
 	if err := os.WriteFile(filepath.Join(source.folder.Root, "keep"), []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
@@ -213,6 +229,7 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 	}
 	var lost, holdFetch, fetchBlocked atomic.Bool
 	var refreshed atomic.Bool
+	var polls atomic.Int32
 	holdFetch.Store(true)
 	allowed := func(id string) bool { return id == receiver.ID.ID }
 	handler := (&transport.Server{Folder: source.folder, State: folderPeerState{source.folder}, Allowed: allowed, PollTimeout: 200 * time.Millisecond}).Handler()
@@ -221,6 +238,9 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 			fetchBlocked.Store(true)
 			http.Error(w, "retry", 503)
 			return
+		}
+		if r.URL.Path == "/index" {
+			polls.Add(1)
 		}
 		if r.URL.Path == "/index" && lost.Load() && r.URL.Query().Get("epoch") == "" {
 			refreshed.Store(true)
@@ -261,8 +281,23 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 		}
 		t.Fatal("timed out waiting for ACK convergence")
 	}
-	wait(fetchBlocked.Load)
+	if ignored != "keep" {
+		wait(fetchBlocked.Load)
+	}
 	holdFetch.Store(false)
+	if ignored == "gone" {
+		wait(func() bool { return polls.Load() >= 2 })
+		if lost.Load() {
+			t.Fatal("uncovered ignored deletion authorized an ACK")
+		}
+		if n, err := source.folder.CollectTombstones(time.Now()); err != nil || n != 0 {
+			t.Fatalf("uncovered ignored deletion collected: %d %v", n, err)
+		}
+		if _, _, ok := source.folder.Lookup("gone"); !ok {
+			t.Fatal("uncovered ignored deletion disappeared")
+		}
+		return
+	}
 	wait(lost.Load)
 	wait(func() bool { _, _, ok := source.folder.Lookup("gone"); return !ok })
 	if droppedStatus == http.StatusConflict && !refreshed.Load() {
