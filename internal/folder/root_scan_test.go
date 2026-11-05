@@ -2,6 +2,7 @@ package folder
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -132,8 +133,14 @@ func TestScanEmptyDecisionUsesIndexAtCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := f.scanWith(ioops); err == nil {
-		t.Fatal("empty candidate committed despite index becoming nonempty")
+	if err := f.scanWith(ioops); !errors.Is(err, ErrScanPending) {
+		t.Fatalf("scan error = %v, want ErrScanPending", err)
+	}
+	if e := f.Blocked(); e != nil {
+		t.Fatalf("stale scan latched root: %+v", e)
+	}
+	if err := f.Scan(); err == nil {
+		t.Fatal("retry accepted an empty root")
 	}
 	if e := f.Blocked(); e == nil || e.Code != "root_empty" {
 		t.Fatalf("blocked=%+v, want root_empty", e)

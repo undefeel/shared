@@ -2,6 +2,7 @@ package folder
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -81,6 +82,9 @@ func (f *Folder) guardRoot() error { return f.guardRootWithSaveLock(false) }
 func (f *Folder) guardRootWithSaveLock(saveHeld bool) error {
 	if e := f.Blocked(); e != nil {
 		return e
+	}
+	if f.root == nil {
+		return errors.New("scan: root unavailable")
 	}
 	f.mu.Lock()
 	binding := f.binding
@@ -179,12 +183,16 @@ func (f *Folder) initRoot(data []byte) error {
 // Close requires callers to drain watcher and peer operations first.
 func (f *Folder) Close() error {
 	f.DrainApply()
+	f.scanMu.Lock()
+	root := f.root
+	f.root = nil
+	f.scanMu.Unlock()
 	var err error
-	if f.store != nil {
-		err = f.store.close()
+	if root != nil {
+		err = root.Close()
 	}
-	if f.root != nil {
-		return errors.Join(err, f.root.Close())
+	if f.store != nil {
+		err = errors.Join(err, f.store.close())
 	}
 	return err
 }
@@ -223,14 +231,15 @@ func (f *Folder) SetConfiguredRoot(configuredPath string) error {
 func (f *Folder) Confirm(token, action, configuredPath string) error {
 	f.DrainApply()
 	f.scanMu.Lock()
-	defer f.scanMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			f.scanMu.Unlock()
+		}
+	}()
 	blocked := f.Blocked()
 	if blocked == nil || token != blocked.Token {
 		return ErrStaleToken
-	}
-	if f.store != nil {
-		f.saveMu.Lock()
-		defer f.saveMu.Unlock()
 	}
 	if action != "reset" && action != "rebind" {
 		return errors.New("action must be reset or rebind")
@@ -253,7 +262,9 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 	if err != nil {
 		return err
 	}
+	f.saveMu.Lock()
 	f.mu.Lock()
+	baseline := &scanBaseline{root: f.root, generation: f.generation, durable: f.durableGeneration, confirmed: f.confirmedGeneration, clock: f.clock, files: make(map[string]*FileInfo), ignore: append([]string(nil), f.ignore...)}
 	c := &Folder{Root: p, root: r, binding: binding, statePath: f.statePath, me: f.me, log: f.log,
 		confirmedGeneration: f.confirmedGeneration + 1, files: map[string]*FileInfo{}, clock: f.clock,
 		generation: f.generation, durableGeneration: f.durableGeneration, persistHooks: f.persistHooks,
@@ -262,8 +273,50 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 		copy := *v
 		copy.Version = v.Version.Copy()
 		c.files[k] = &copy
+		baseline.files[k] = &copy
 	}
 	f.mu.Unlock()
+	f.saveMu.Unlock()
+	f.scanMu.Unlock()
+	locked = false
+	var candidate map[string]*FileInfo
+	var patterns []string
+	var cache map[string]scanHashCache
+	var observed map[string]scanStat
+	if action == "rebind" {
+		indexed := make(map[string]bool, len(c.files))
+		for name, fi := range c.files {
+			if !fi.Deleted {
+				indexed[name] = true
+			}
+		}
+		scanPath := p
+		candidate, patterns, cache, observed, err = c.buildScan(context.Background(), c.rootScanIO(), r, indexed, true, &scanPath)
+		if err != nil {
+			return err
+		}
+	}
+	f.scanMu.Lock()
+	locked = true
+	blocked = f.Blocked()
+	if blocked == nil || blocked.Token != token || !f.baselineMatches(baseline) {
+		return ErrStaleToken
+	}
+	if action == "rebind" {
+		if err = validateScan(r, observed, baseline.files, candidate, patterns); err != nil {
+			return err
+		}
+	}
+	saveLocked := false
+	if f.store != nil {
+		f.saveMu.Lock()
+		saveLocked = true
+	}
+	defer func() {
+		if saveLocked {
+			f.saveMu.Unlock()
+		}
+	}()
 	if action == "reset" && f.store != nil {
 		c.files = map[string]*FileInfo{}
 		err = f.resetStore(c, token)
@@ -287,7 +340,7 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 		if c.store != nil {
 			c.wireStore()
 		}
-		err = c.scanLocked(c.rootScanIO(), true)
+		err = c.commitScan(candidate, patterns, cache, true)
 		if err == nil {
 			err = c.save()
 		}
@@ -314,6 +367,13 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 	f.notify()
 	f.mu.Unlock()
 	ok = true
+	if saveLocked {
+		f.saveMu.Unlock()
+		saveLocked = false
+	}
+	// Release the live lock before waiting for staged readers of the old root.
+	f.scanMu.Unlock()
+	locked = false
 	if old != nil {
 		_ = old.Close()
 	}
