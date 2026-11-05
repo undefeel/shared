@@ -212,6 +212,7 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 		t.Fatal(err)
 	}
 	var lost, holdFetch, fetchBlocked atomic.Bool
+	var refreshed atomic.Bool
 	holdFetch.Store(true)
 	allowed := func(id string) bool { return id == receiver.ID.ID }
 	handler := (&transport.Server{Folder: source.folder, State: folderPeerState{source.folder}, Allowed: allowed, PollTimeout: 200 * time.Millisecond}).Handler()
@@ -221,7 +222,20 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 			http.Error(w, "retry", 503)
 			return
 		}
+		if r.URL.Path == "/index" && lost.Load() && r.URL.Query().Get("epoch") == "" {
+			refreshed.Store(true)
+		}
 		if r.URL.Path == "/ack" && !lost.Swap(true) {
+			if droppedStatus == http.StatusConflict {
+				_, epoch, cursor := source.folder.DurableState()
+				remoteEpoch, _ := receiver.folder.PeerACKEpoch()
+				if _, err := source.folder.BeginPeerBaseline(receiver.ID.ID, remoteEpoch, epoch, cursor); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				handler.ServeHTTP(w, r)
+				return
+			}
 			http.Error(w, "lost", droppedStatus)
 			return
 		}
@@ -251,4 +265,7 @@ func testAckRetry(t *testing.T, droppedStatus int) {
 	holdFetch.Store(false)
 	wait(lost.Load)
 	wait(func() bool { _, _, ok := source.folder.Lookup("gone"); return !ok })
+	if droppedStatus == http.StatusConflict && !refreshed.Load() {
+		t.Fatal("stale ACK did not request a fresh full baseline")
+	}
 }
