@@ -30,44 +30,122 @@ type perfResult struct {
 	flush                 folder.PersistenceCounters
 }
 
-func perfTrial(t testing.TB, n int) perfResult {
+func perfDaemon(t testing.TB, base, tag string, measure *folder.PersistenceMeasurement) *Daemon {
 	t.Helper()
-	base := t.TempDir()
 	logger := log.New(io.Discard, "", 0)
-	var measure folder.PersistenceMeasurement
-	open := func(tag string, receiver bool) *Daemon {
-		home := filepath.Join(base, tag)
-		root := filepath.Join(home, "root")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		cfg := &config.Config{Name: tag, Folder: root, DownloadConcurrency: 6}
-		if err := cfg.Save(home); err != nil {
-			t.Fatal(err)
-		}
-		d, err := newWithFolderFactory(home, logger, func(root, state, device string, l *log.Logger) (*folder.Folder, error) {
-			f, e := folder.Open(root, state, device, l)
-			if e == nil && receiver {
-				f.SetPersistenceProbe(measure.Probe())
-			}
-			return f, e
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder, err = d.openFolder(root, filepath.Join(home, "index.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder.SetDownloadConcurrency(6)
-		t.Cleanup(func() {
-			if e := d.folder.Close(); e != nil {
-				t.Error(e)
-			}
-		})
-		return d
+	home := filepath.Join(base, tag)
+	root := filepath.Join(home, "root")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
 	}
-	source, dest := open("source", false), open("receiver", true)
+	cfg := &config.Config{Name: tag, Folder: root, DownloadConcurrency: 6}
+	if err := cfg.Save(home); err != nil {
+		t.Fatal(err)
+	}
+	d, err := newWithFolderFactory(home, logger, func(root, state, device string, l *log.Logger) (*folder.Folder, error) {
+		f, e := folder.Open(root, state, device, l)
+		if e == nil && measure != nil {
+			f.SetPersistenceProbe(measure.Probe())
+		}
+		return f, e
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.folder, err = d.openFolder(root, filepath.Join(home, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.folder.SetDownloadConcurrency(6)
+	t.Cleanup(func() {
+		if e := d.folder.Close(); e != nil {
+			t.Error(e)
+		}
+	})
+	return d
+}
+
+func perfServer(t testing.TB, owner, peer *Daemon, observe func(*http.Request)) *httptest.Server {
+	t.Helper()
+	allowed := func(id string) bool { return id == peer.ID.ID }
+	handler := (&transport.Server{Folder: owner.folder, State: folderPeerState{owner.folder}, Allowed: allowed}).Handler()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if observe != nil {
+			observe(r)
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	srv.EnableHTTP2 = true
+	srv.TLS = transport.ServerTLS(owner.ID, allowed, nil)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func perfClient(t testing.TB, local, remote *Daemon) *transport.Client {
+	t.Helper()
+	c := transport.NewClient(local.ID, remote.ID.ID, 0, nil)
+	c.LocalHello = func() transport.Hello { return folderPeerState{local.folder}.Hello() }
+	t.Cleanup(c.Close)
+	return c
+}
+
+func perfTransfer(t testing.TB, ctx context.Context, dst, remote *Daemon, client *transport.Client, addr string, baseline bool) (*peerQueue, *transport.IndexResponse) {
+	t.Helper()
+	idx, err := client.IndexSince(ctx, addr, "", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := newPeerQueue()
+	if !q.accept(remote.ID.ID, idx.StoreEpoch, idx.Cursor, false, idx.Files) {
+		if baseline {
+			t.Fatal("queue rejected baseline")
+		}
+		t.Fatal("queue rejected index")
+	}
+	for {
+		due := q.due(remote.ID.ID, time.Now(), 64)
+		if len(due) == 0 {
+			break
+		}
+		_, failed := dst.applyPeerDue(ctx, client, addr, remote.ID.ID, remote.ID.Short(), idx.StoreEpoch, idx.Cursor, due, q, nil)
+		if failed != 0 {
+			if baseline {
+				t.Fatalf("apply failures=%d", failed)
+			}
+			t.Fatalf("transfer failures: %d", failed)
+		}
+	}
+	return q, idx
+}
+
+func perfVerify(t testing.TB, dest *Daemon, expected []folder.FileInfo, byName map[string]folder.FileInfo) {
+	t.Helper()
+	for _, want := range expected {
+		fi := byName[want.Name]
+		if fi.Hash != want.Hash || fi.Size != want.Size || fi.Exec != want.Exec || !reflect.DeepEqual(fi.Version, want.Version) {
+			t.Fatalf("metadata mismatch %s", want.Name)
+		}
+		body, e := os.ReadFile(filepath.Join(dest.folder.Root, fi.Name))
+		if e != nil {
+			t.Fatal(e)
+		}
+		hash := sha256.Sum256(body)
+		if hex.EncodeToString(hash[:]) != want.Hash {
+			t.Fatalf("disk hash mismatch %s", want.Name)
+		}
+		st, e := os.Stat(filepath.Join(dest.folder.Root, fi.Name))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if (st.Mode()&0111 != 0) != want.Exec {
+			t.Fatalf("disk Exec mismatch %s", want.Name)
+		}
+	}
+}
+
+func perfPopulate(t testing.TB, source *Daemon, n int) {
+	t.Helper()
 	for i := 0; i < n; i++ {
 		// 4*4*4 leaf directories, depth four including filename.
 		dir := filepath.Join(source.folder.Root, fmt.Sprint(i%4), fmt.Sprint((i/4)%4), fmt.Sprint((i/16)%4))
@@ -90,51 +168,34 @@ func perfTrial(t testing.TB, n int) perfResult {
 			t.Fatal(err)
 		}
 	}
+}
+
+func perfTrial(t testing.TB, n int) perfResult {
+	t.Helper()
+	base := t.TempDir()
+	var measure folder.PersistenceMeasurement
+	source, dest := perfDaemon(t, base, "source", nil), perfDaemon(t, base, "receiver", &measure)
+	perfPopulate(t, source, n)
 	if err := source.folder.Scan(); err != nil {
 		t.Fatal(err)
 	}
 	expected, _, _ := source.folder.DurableState()
 	var h2, authenticated atomic.Bool
-	handler := (&transport.Server{Folder: source.folder, State: folderPeerState{source.folder}, Allowed: func(id string) bool { return id == dest.ID.ID }}).Handler()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := perfServer(t, source, dest, func(r *http.Request) {
 		if r.ProtoMajor == 2 {
 			h2.Store(true)
 		}
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			authenticated.Store(true)
 		}
-		handler.ServeHTTP(w, r)
-	}))
-	srv.EnableHTTP2 = true
-	srv.TLS = transport.ServerTLS(source.ID, func(id string) bool { return id == dest.ID.ID }, nil)
-	srv.StartTLS()
-	defer srv.Close()
-	client := transport.NewClient(dest.ID, source.ID.ID, 0, nil)
-	defer client.Close()
-	client.LocalHello = func() transport.Hello { return folderPeerState{dest.folder}.Hello() }
+	})
+	client := perfClient(t, dest, source)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	before := dest.folder.PersistenceStats()
 	start := time.Now()
 	addr := strings.TrimPrefix(srv.URL, "https://")
-	idx, err := client.IndexSince(ctx, addr, "", 0, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	queue := newPeerQueue()
-	if !queue.accept(source.ID.ID, idx.StoreEpoch, idx.Cursor, false, idx.Files) {
-		t.Fatal("queue rejected baseline")
-	}
-	for {
-		due := queue.due(source.ID.ID, time.Now(), 64)
-		if len(due) == 0 {
-			break
-		}
-		_, failed := dest.applyPeerDue(ctx, client, addr, source.ID.ID, source.ID.Short(), idx.StoreEpoch, idx.Cursor, due, queue, nil)
-		if failed != 0 {
-			t.Fatalf("apply failures=%d", failed)
-		}
-	}
+	queue, idx := perfTransfer(t, ctx, dest, source, client, addr, true)
 	got, _, _ := dest.folder.DurableState()
 	byName := make(map[string]folder.FileInfo, len(got))
 	for _, fi := range got {
@@ -143,27 +204,7 @@ func perfTrial(t testing.TB, n int) perfResult {
 	if len(got) != n {
 		t.Fatalf("files=%d want=%d", len(got), n)
 	}
-	for _, want := range expected {
-		fi := byName[want.Name]
-		if fi.Hash != want.Hash || fi.Size != want.Size || fi.Exec != want.Exec || !reflect.DeepEqual(fi.Version, want.Version) {
-			t.Fatalf("metadata mismatch %s", want.Name)
-		}
-		body, e := os.ReadFile(filepath.Join(dest.folder.Root, fi.Name))
-		if e != nil {
-			t.Fatal(e)
-		}
-		hash := sha256.Sum256(body)
-		if hex.EncodeToString(hash[:]) != want.Hash {
-			t.Fatalf("disk hash mismatch %s", want.Name)
-		}
-		st, e := os.Stat(filepath.Join(dest.folder.Root, fi.Name))
-		if e != nil {
-			t.Fatal(e)
-		}
-		if (st.Mode()&0111 != 0) != want.Exec {
-			t.Fatalf("disk Exec mismatch %s", want.Name)
-		}
-	}
+	perfVerify(t, dest, expected, byName)
 	elapsed := time.Since(start)
 	if !h2.Load() || !authenticated.Load() {
 		t.Fatal("authenticated HTTP/2 not observed")
@@ -209,6 +250,9 @@ func perfTrial(t testing.TB, n int) perfResult {
 }
 
 func TestPerf(t *testing.T) {
+	if os.Getenv("SHAREDIR_PERF") != "1" {
+		t.Skip("set SHAREDIR_PERF=1")
+	}
 	runs := 1
 	if os.Getenv("SHAREDIR_PERF") == "1" {
 		runs = 5
@@ -235,6 +279,9 @@ func TestPerf(t *testing.T) {
 
 // BenchmarkPerf runs real flushes; use -benchtime=1x for one complete fixture.
 func BenchmarkPerf(b *testing.B) {
+	if os.Getenv("SHAREDIR_PERF") != "1" {
+		b.Skip("set SHAREDIR_PERF=1")
+	}
 	for i := 0; i < b.N; i++ {
 		r := perfTrial(b, 2092)
 		b.ReportMetric(2092/r.elapsed.Seconds(), "files/s")
@@ -248,63 +295,9 @@ func BenchmarkPerf(b *testing.B) {
 func perfReuseTrial(t testing.TB, n int) perfResult {
 	t.Helper()
 	base := t.TempDir()
-	logger := log.New(io.Discard, "", 0)
 	var measure folder.PersistenceMeasurement
-	open := func(tag string, receiver bool) *Daemon {
-		home := filepath.Join(base, tag)
-		root := filepath.Join(home, "root")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		cfg := &config.Config{Name: tag, Folder: root, DownloadConcurrency: 6}
-		if err := cfg.Save(home); err != nil {
-			t.Fatal(err)
-		}
-		d, err := newWithFolderFactory(home, logger, func(root, state, device string, l *log.Logger) (*folder.Folder, error) {
-			f, e := folder.Open(root, state, device, l)
-			if e == nil && receiver {
-				f.SetPersistenceProbe(measure.Probe())
-			}
-			return f, e
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder, err = d.openFolder(root, filepath.Join(home, "index.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder.SetDownloadConcurrency(6)
-		t.Cleanup(func() {
-			if e := d.folder.Close(); e != nil {
-				t.Error(e)
-			}
-		})
-		return d
-	}
-	source, dest := open("source", false), open("receiver", true)
-	for i := 0; i < n; i++ {
-		// 4*4*4 leaf directories, depth four including filename.
-		dir := filepath.Join(source.folder.Root, fmt.Sprint(i%4), fmt.Sprint((i/4)%4), fmt.Sprint((i/16)%4))
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		body := make([]byte, 11<<10)
-		for off := 0; off < len(body); off += 32 {
-			var seed [16]byte
-			binary.LittleEndian.PutUint64(seed[:8], uint64(i))
-			binary.LittleEndian.PutUint64(seed[8:], uint64(off))
-			hash := sha256.Sum256(seed[:])
-			copy(body[off:], hash[:])
-		}
-		mode := os.FileMode(0644)
-		if i%3 == 0 {
-			mode = 0755
-		}
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)), body, mode); err != nil {
-			t.Fatal(err)
-		}
-	}
+	source, dest := perfDaemon(t, base, "source", nil), perfDaemon(t, base, "receiver", &measure)
+	perfPopulate(t, source, n)
 	for i := 0; i < n; i++ {
 		dir := filepath.Join(source.folder.Root, fmt.Sprint(i%4), fmt.Sprint((i/4)%4), fmt.Sprint((i/16)%4))
 		body, e := os.ReadFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)))
@@ -324,8 +317,7 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 	expected, _, _ := source.folder.DurableState()
 	var h2, authenticated atomic.Bool
 	var bodies atomic.Int64
-	handler := (&transport.Server{Folder: source.folder, State: folderPeerState{source.folder}, Allowed: func(id string) bool { return id == dest.ID.ID }}).Handler()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := perfServer(t, source, dest, func(r *http.Request) {
 		if r.URL.Path == "/file" || r.URL.Path == "/files" {
 			bodies.Add(1)
 		}
@@ -335,39 +327,15 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			authenticated.Store(true)
 		}
-		handler.ServeHTTP(w, r)
-	}))
-	srv.EnableHTTP2 = true
-	srv.TLS = transport.ServerTLS(source.ID, func(id string) bool { return id == dest.ID.ID }, nil)
-	srv.StartTLS()
-	defer srv.Close()
-	client := transport.NewClient(dest.ID, source.ID.ID, 0, nil)
-	defer client.Close()
-	client.LocalHello = func() transport.Hello { return folderPeerState{dest.folder}.Hello() }
+	})
+	client := perfClient(t, dest, source)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	setupBytes, setupGroups := measure.Snapshot()
 	before := dest.folder.PersistenceStats()
 	start := time.Now()
 	addr := strings.TrimPrefix(srv.URL, "https://")
-	idx, err := client.IndexSince(ctx, addr, "", 0, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	queue := newPeerQueue()
-	if !queue.accept(source.ID.ID, idx.StoreEpoch, idx.Cursor, false, idx.Files) {
-		t.Fatal("queue rejected baseline")
-	}
-	for {
-		due := queue.due(source.ID.ID, time.Now(), 64)
-		if len(due) == 0 {
-			break
-		}
-		_, failed := dest.applyPeerDue(ctx, client, addr, source.ID.ID, source.ID.Short(), idx.StoreEpoch, idx.Cursor, due, queue, nil)
-		if failed != 0 {
-			t.Fatalf("apply failures=%d", failed)
-		}
-	}
+	queue, idx := perfTransfer(t, ctx, dest, source, client, addr, true)
 	got, _, _ := dest.folder.DurableState()
 	byName := make(map[string]folder.FileInfo, len(got))
 	for _, fi := range got {
@@ -379,27 +347,7 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 	if len(got) != 2*n {
 		t.Fatalf("files=%d want=%d", len(got), n)
 	}
-	for _, want := range expected {
-		fi := byName[want.Name]
-		if fi.Hash != want.Hash || fi.Size != want.Size || fi.Exec != want.Exec || !reflect.DeepEqual(fi.Version, want.Version) {
-			t.Fatalf("metadata mismatch %s", want.Name)
-		}
-		body, e := os.ReadFile(filepath.Join(dest.folder.Root, fi.Name))
-		if e != nil {
-			t.Fatal(e)
-		}
-		hash := sha256.Sum256(body)
-		if hex.EncodeToString(hash[:]) != want.Hash {
-			t.Fatalf("disk hash mismatch %s", want.Name)
-		}
-		st, e := os.Stat(filepath.Join(dest.folder.Root, fi.Name))
-		if e != nil {
-			t.Fatal(e)
-		}
-		if (st.Mode()&0111 != 0) != want.Exec {
-			t.Fatalf("disk Exec mismatch %s", want.Name)
-		}
-	}
+	perfVerify(t, dest, expected, byName)
 	elapsed := time.Since(start)
 	if !h2.Load() || !authenticated.Load() {
 		t.Fatal("authenticated HTTP/2 not observed")
@@ -440,45 +388,40 @@ func perfReuseTrial(t testing.TB, n int) perfResult {
 	return result
 }
 
-func TestPerfContentReuse(t *testing.T) { _ = perfReuseTrial(t, 200) }
+func TestPerfContentReuse(t *testing.T) {
+	if os.Getenv("SHAREDIR_PERF") != "1" {
+		t.Skip("set SHAREDIR_PERF=1")
+	}
+	_ = perfReuseTrial(t, 200)
+}
+
+func TestNoOpScanWrites(t *testing.T) {
+	d := perfDaemon(t, t.TempDir(), "source", nil)
+	if err := os.WriteFile(filepath.Join(d.folder.Root, "file"), []byte("content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.folder.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	before := d.folder.PersistenceStats()
+	if err := d.folder.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	if after := d.folder.PersistenceStats(); before != after {
+		t.Errorf("no-op Scan wrote/flushed: before=%+v after=%+v", before, after)
+	}
+}
 
 // TestWatchScheduleHarness verifies a real incoming group burst is suppressed by
 // the receiver scheduler, then checks that a receiver-side edit is scanned
 // incrementally and propagated back to the original sender.
 func TestWatchScheduleHarness(t *testing.T) {
 	base := t.TempDir()
-	logger := log.New(io.Discard, "", 0)
-	openDaemon := func(tag string) *Daemon {
-		home := filepath.Join(base, tag)
-		root := filepath.Join(home, "root")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		cfg := &config.Config{Name: tag, Folder: root, DownloadConcurrency: 6}
-		if err := cfg.Save(home); err != nil {
-			t.Fatal(err)
-		}
-		d, err := newWithFolderFactory(home, logger, func(root, state, device string, l *log.Logger) (*folder.Folder, error) {
-			return folder.Open(root, state, device, l)
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder, err = d.openFolder(root, filepath.Join(home, "index.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder.SetDownloadConcurrency(6)
+	source, dest := perfDaemon(t, base, "source", nil), perfDaemon(t, base, "receiver", nil)
+	for _, d := range []*Daemon{source, dest} {
 		d.act = &activity{}
 		d.peers = map[string]*peerRunner{}
-		t.Cleanup(func() {
-			if e := d.folder.Close(); e != nil {
-				t.Error(e)
-			}
-		})
-		return d
 	}
-	source, dest := openDaemon("source"), openDaemon("receiver")
 	for i := 0; i < 2092; i++ {
 		name := filepath.Join(source.folder.Root, fmt.Sprintf("f%05d", i))
 		if err := os.WriteFile(name, []byte(fmt.Sprintf("baseline-%d", i)), 0600); err != nil {
@@ -488,48 +431,12 @@ func TestWatchScheduleHarness(t *testing.T) {
 	if err := source.folder.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	serve := func(owner, peer *Daemon) *httptest.Server {
-		allowed := func(id string) bool { return id == peer.ID.ID }
-		handler := (&transport.Server{Folder: owner.folder, State: folderPeerState{owner.folder}, Allowed: allowed}).Handler()
-		srv := httptest.NewUnstartedServer(handler)
-		srv.EnableHTTP2 = true
-		srv.TLS = transport.ServerTLS(owner.ID, allowed, nil)
-		srv.StartTLS()
-		t.Cleanup(srv.Close)
-		return srv
-	}
-	sourceServer := serve(source, dest)
-	destServer := serve(dest, source)
-	clientFor := func(local, remote *Daemon) *transport.Client {
-		c := transport.NewClient(local.ID, remote.ID.ID, 0, nil)
-		c.LocalHello = func() transport.Hello { return folderPeerState{local.folder}.Hello() }
-		t.Cleanup(c.Close)
-		return c
-	}
-	transfer := func(ctx context.Context, dst, remote *Daemon, client *transport.Client, addr string) {
-		idx, err := client.IndexSince(ctx, addr, "", 0, "")
-		if err != nil {
-			t.Fatal(err)
-		}
-		q := newPeerQueue()
-		if !q.accept(remote.ID.ID, idx.StoreEpoch, idx.Cursor, false, idx.Files) {
-			t.Fatal("queue rejected index")
-		}
-		for {
-			due := q.due(remote.ID.ID, time.Now(), 64)
-			if len(due) == 0 {
-				break
-			}
-			_, failed := dst.applyPeerDue(ctx, client, addr, remote.ID.ID, remote.ID.Short(), idx.StoreEpoch, idx.Cursor, due, q, nil)
-			if failed != 0 {
-				t.Fatalf("transfer failures: %d", failed)
-			}
-		}
-	}
+	sourceServer := perfServer(t, source, dest, nil)
+	destServer := perfServer(t, dest, source, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	sourceClient := clientFor(dest, source)
-	transfer(ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"))
+	sourceClient := perfClient(t, dest, source)
+	perfTransfer(t, ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"), false)
 	batches := make(chan folder.WatchBatch, 32)
 	dest.watchScanObserver = func(b folder.WatchBatch) {
 		select {
@@ -569,7 +476,7 @@ baselineReady:
 	if err := source.folder.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	transfer(ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"))
+	perfTransfer(t, ctx, dest, source, sourceClient, strings.TrimPrefix(sourceServer.URL, "https://"), false)
 	ownDeadline := time.NewTimer(2 * time.Second)
 	defer ownDeadline.Stop()
 	select {
@@ -590,7 +497,7 @@ baselineReady:
 		t.Fatal("receiver edit was not scanned")
 	}
 	// Pull the receiver’s durable change back to the source and verify bytes.
-	transfer(ctx, source, dest, clientFor(source, dest), strings.TrimPrefix(destServer.URL, "https://"))
+	perfTransfer(t, ctx, source, dest, perfClient(t, source, dest), strings.TrimPrefix(destServer.URL, "https://"), false)
 	got, err := os.ReadFile(filepath.Join(source.folder.Root, "f00042"))
 	if err != nil {
 		t.Fatal(err)
