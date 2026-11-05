@@ -15,8 +15,7 @@ import (
 	"time"
 )
 
-func TestBlockedDaemonDoesNotServeIndexIntegration(t *testing.T) {
-	d := folderDaemon(t)
+func testBlockedDaemonDoesNotServeIndexIntegration(t *testing.T, d *Daemon) {
 	h := (&transport.Server{Folder: d.folder}).Handler()
 	for _, path := range []string{"/index", "/file?name=item"} {
 		r := httptest.NewRecorder()
@@ -26,54 +25,57 @@ func TestBlockedDaemonDoesNotServeIndexIntegration(t *testing.T) {
 		}
 	}
 }
-func TestConfirmDuringDownloadIntegration(t *testing.T) {
+func TestConfirmRejectsOldDownload(t *testing.T) {
 	d := folderDaemon(t)
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	started, release := make(chan struct{}), make(chan struct{})
-	result := make(chan int, 1)
-	d.workers.Add(1)
-	d.peers["old"] = &peerRunner{cancel: cancel}
-	go func() {
-		defer d.workers.Done()
-		n, _ := d.folder.ApplyRemote(ctx, "peer", []folder.FileInfo{{Name: "incoming", Size: 3, Hash: fmt.Sprintf("%x", sha256.Sum256([]byte("new"))), Version: folder.Vector{"peer": 1}}}, func(context.Context, folder.FileInfo, io.Writer) error {
-			close(started)
-			<-release
-			return ctx.Err()
-		}, nil)
-		result <- n
-	}()
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("download not started")
-	}
-	if err := os.WriteFile(filepath.Join(d.folder.Root, "local"), []byte("keep"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(d.folder.Root, "local")); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.folder.Scan(); err == nil {
-		t.Fatal("missing latch")
-	}
-	go func() { <-ctx.Done(); close(release) }()
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
-	if n := <-result; n != 0 {
-		t.Fatal("stale download committed", n)
-	}
-	if _, err := os.Stat(filepath.Join(d.folder.Root, "incoming")); !os.IsNotExist(err) {
-		t.Fatal("stale bytes installed", err)
-	}
-	if files, _ := d.folder.Snapshot(); len(files) != 0 {
-		t.Fatal("stale index", files)
+	requireNoError(t, d.ConfirmFolder(d.folder.Blocked().Token, "reset"))
+	for _, tc := range []struct {
+		name        string
+		honorCancel bool
+	}{{"cancelled", true}, {"lateWrite", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(d.ctx)
+			defer cancel()
+			started, release := make(chan struct{}), make(chan struct{})
+			result := make(chan int, 1)
+			content := "incoming"
+			hash := sha256.Sum256([]byte(content))
+			d.workers.Add(1)
+			d.peers["old"] = &peerRunner{cancel: cancel}
+			go func() {
+				defer d.workers.Done()
+				n, _ := d.folder.ApplyRemote(ctx, "peer", []folder.FileInfo{{Name: "incoming", Size: int64(len(content)), Hash: fmt.Sprintf("%x", hash), Version: folder.Vector{"peer": 1}}}, func(ctx context.Context, _ folder.FileInfo, w io.Writer) error {
+					close(started)
+					<-release
+					if tc.honorCancel {
+						return ctx.Err()
+					}
+					_, err := io.WriteString(w, content)
+					return err
+				}, nil)
+				result <- n
+			}()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("download not started")
+			}
+			path := filepath.Join(d.folder.Root, "local")
+			writeTestFile(t, path, []byte("keep"), 0600)
+			mustScan(t, d.folder)
+			requireNoError(t, os.Remove(path))
+			if err := d.folder.Scan(); err == nil {
+				t.Fatal("missing latch")
+			}
+			go func() { <-ctx.Done(); close(release) }()
+			requireNoError(t, d.ConfirmFolder(d.folder.Blocked().Token, "reset"))
+			if n := <-result; n != 0 {
+				t.Fatal("stale download committed", n)
+			}
+			requireMissingFile(t, filepath.Join(d.folder.Root, "incoming"), "stale bytes installed")
+			if files, _ := d.folder.Snapshot(); len(files) != 0 {
+				t.Fatal("stale index", files)
+			}
+			requireEqual(t, d.Status().Files, 0, "old runner committed")
+		})
 	}
 }

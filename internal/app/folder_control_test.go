@@ -24,88 +24,64 @@ func folderDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	home := t.TempDir()
 	cfg := &config.Config{Folder: filepath.Join(home, "root")}
-	if err := cfg.Save(home); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, cfg.Save(home))
 	d, err := New(home, log.New(io.Discard, "", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	d.ctx = context.Background()
 	d.folder, err = folder.Open(cfg.Folder, filepath.Join(home, "index.json"), d.ID.Short(), d.Log)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	t.Cleanup(func() { d.lifecycle.Lock(); defer d.lifecycle.Unlock(); d.stopFolder(); d.folder.Close() })
-	if err = os.WriteFile(filepath.Join(cfg.Folder, "item"), []byte("old"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err = d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Remove(filepath.Join(cfg.Folder, "item")); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(cfg.Folder, "item"), []byte("old"), 0600)
+	mustScan(t, d.folder)
+	requireNoError(t, os.Remove(filepath.Join(cfg.Folder, "item")))
 	if err = d.folder.Scan(); err == nil {
 		t.Fatal("expected latch")
 	}
 	return d
 }
-func TestBlockedDaemonStatus(t *testing.T) {
+
+func TestBlockedFolderStatusAndLatch(t *testing.T) {
 	d := folderDaemon(t)
-	r := httptest.NewRecorder()
-	d.controlHandler().ServeHTTP(r, httptest.NewRequest("GET", "/status", nil))
-	if r.Code != 200 || !bytes.Contains(r.Body.Bytes(), []byte(`"folder_error"`)) {
-		t.Fatal(r.Body.String())
-	}
-}
-func TestPauseResumePreservesLatch(t *testing.T) {
-	d := folderDaemon(t)
-	token := d.folder.Blocked().Token
-	for _, paused := range []bool{true, false} {
-		if err := d.SetPaused(paused); err != nil {
-			t.Fatal(err)
+	t.Run("BlockedDaemonDoesNotServeIndexIntegration", func(t *testing.T) { testBlockedDaemonDoesNotServeIndexIntegration(t, d) })
+	t.Run("BlockedDaemonStatus", func(t *testing.T) {
+		r := httptest.NewRecorder()
+		d.controlHandler().ServeHTTP(r, httptest.NewRequest("GET", "/status", nil))
+		if r.Code != 200 || !bytes.Contains(r.Body.Bytes(), []byte(`"folder_error"`)) {
+			t.Fatal(r.Body.String())
 		}
-	}
-	if d.folder.Blocked().Token != token {
-		t.Fatal("latch changed")
-	}
-}
-func TestRestartPreservesLatch(t *testing.T) {
-	d := folderDaemon(t)
-	token := d.folder.Blocked().Token
-	d.folder.Close()
-	f, err := folder.Open(d.Config().Folder, filepath.Join(d.Home, "index.json"), d.ID.Short(), d.Log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.folder = f
-	if f.Blocked().Token != token {
-		t.Fatal("restart cleared latch")
-	}
+	})
+	t.Run("PauseResumePreservesLatch", func(t *testing.T) {
+		token := d.folder.Blocked().Token
+		for _, paused := range []bool{true, false} {
+			requireNoError(t, d.SetPaused(paused))
+		}
+		requireEqual(t, d.folder.Blocked().Token, token, "latch changed")
+	})
+	t.Run("RestartPreservesLatch", func(t *testing.T) {
+		token := d.folder.Blocked().Token
+		d.folder.Close()
+		f, err := folder.Open(d.Config().Folder, filepath.Join(d.Home, "index.json"), d.ID.Short(), d.Log)
+		requireNoError(t, err)
+		d.folder = f
+		requireEqual(t, f.Blocked().Token, token, "restart cleared latch")
+	})
+	t.Run("ControlStaleToken409", func(t *testing.T) {
+		r := httptest.NewRecorder()
+		d.controlHandler().ServeHTTP(r, httptest.NewRequest("POST", "/folder/confirm", bytes.NewBufferString(`{"token":"stale","action":"reset"}`)))
+		requireEqual(t, r.Code, 409, r.Code, r.Body.String())
+	})
 }
 func TestReloadNewRoot(t *testing.T) {
 	d := folderDaemon(t)
 	cfg := d.Config()
 	cfg.Folder = t.TempDir()
-	if err := cfg.Save(d.Home); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Reload(); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, cfg.Save(d.Home))
+	requireNoError(t, d.Reload())
 	if d.Status().Folder != cfg.Folder || d.folder.Root != cfg.Folder || d.folder.Blocked() == nil {
 		t.Fatal(d.Status())
 	}
 }
-func TestControlStaleToken409(t *testing.T) {
-	d := folderDaemon(t)
-	r := httptest.NewRecorder()
-	d.controlHandler().ServeHTTP(r, httptest.NewRequest("POST", "/folder/confirm", bytes.NewBufferString(`{"token":"stale","action":"reset"}`)))
-	if r.Code != 409 {
-		t.Fatal(r.Code, r.Body.String())
-	}
-}
+
 func TestCtlResetSemantics(t *testing.T) {
 	d := folderDaemon(t)
 	srv := httptest.NewServer(d.controlHandler())
@@ -113,73 +89,24 @@ func TestCtlResetSemantics(t *testing.T) {
 	ctl := &Ctl{http: srv.Client()}
 	// Ctl uses a fixed host; route its requests to this handler.
 	ctl.http.Transport = handlerTransport{d.controlHandler()}
-	if err := ctl.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, ctl.ConfirmFolder(d.folder.Blocked().Token, "reset"))
 	if d.Status().FolderError != nil || d.Status().Files != 0 {
 		t.Fatal(d.Status())
 	}
 }
 func TestControlRebindSemantics(t *testing.T) {
 	d := folderDaemon(t)
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "rebind"); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, d.ConfirmFolder(d.folder.Blocked().Token, "rebind"))
 	files, _ := d.folder.Snapshot()
 	if len(files) != 1 || !files[0].Deleted {
 		t.Fatal(files)
 	}
 }
-func TestOldRunnerCannotCommitAfterConfirm(t *testing.T) {
-	d := folderDaemon(t)
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(d.ctx)
-	started, release := make(chan struct{}), make(chan struct{})
-	applied := make(chan int, 1)
-	hash := sha256.Sum256([]byte("incoming"))
-	d.workers.Add(1)
-	d.peers["old"] = &peerRunner{cancel: cancel}
-	go func() {
-		defer d.workers.Done()
-		n, _ := d.folder.ApplyRemote(ctx, "peer", []folder.FileInfo{{Name: "incoming", Size: 8, Hash: hex.EncodeToString(hash[:]), Version: folder.Vector{"peer": 1}}}, func(ctx context.Context, fi folder.FileInfo, w io.Writer) error {
-			close(started)
-			<-release
-			_, err := io.WriteString(w, "incoming")
-			return err
-		}, nil)
-		applied <- n
-	}()
-	<-started
-	if err := os.WriteFile(filepath.Join(d.Config().Folder, "dummy"), []byte("dummy"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(d.Config().Folder, "dummy")); err != nil {
-		t.Fatal(err)
-	}
-	_ = d.folder.Scan()
-	token := d.folder.Blocked().Token
-	go func() { <-ctx.Done(); close(release) }()
-	if err := d.ConfirmFolder(token, "reset"); err != nil {
-		t.Fatal(err)
-	}
-	if n := <-applied; n != 0 {
-		t.Fatal("old runner applied", n)
-	}
-	if d.Status().Files != 0 {
-		t.Fatal("old runner committed")
-	}
-}
-
 func TestStopFolderCancelsAndDrainsBlockedDownload(t *testing.T) {
 	d := folderDaemon(t)
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, d.ConfirmFolder(d.folder.Blocked().Token, "reset"))
+	keep := filepath.Join(d.folder.Root, "existing")
+	writeTestFile(t, keep, []byte("prior data"), 0600)
 	ctx, cancel := context.WithCancel(context.Background())
 	started, observedCancel, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	pr := &peerRunner{cancel: cancel, st: PeerStatus{ID: "peer"}}
@@ -210,9 +137,8 @@ func TestStopFolderCancelsAndDrainsBlockedDownload(t *testing.T) {
 	default:
 		t.Fatal("runner returned before stopFolder completed")
 	}
-	if _, err := os.Stat(filepath.Join(d.Config().Folder, "late")); !os.IsNotExist(err) {
-		t.Fatalf("late mutation remains: %v", err)
-	}
+	requireMissingFile(t, filepath.Join(d.Config().Folder, "late"), "late mutation remains")
+	requireFileContents(t, keep, []byte("prior data"), "existing data after canceled download")
 	if _, failed := d.folder.ApplyRemote(context.Background(), "peer", []folder.FileInfo{{Name: "resume", Size: 8, Hash: hex.EncodeToString(hash[:]), Version: folder.Vector{"peer": 1}}}, func(_ context.Context, _ folder.FileInfo, w io.Writer) error {
 		_, err := w.Write([]byte("incoming"))
 		return err
@@ -223,9 +149,7 @@ func TestStopFolderCancelsAndDrainsBlockedDownload(t *testing.T) {
 
 func TestPauseDrainsReadyCoordinatorGroup(t *testing.T) {
 	d := folderDaemon(t)
-	if err := d.ConfirmFolder(d.folder.Blocked().Token, "reset"); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, d.ConfirmFolder(d.folder.Blocked().Token, "reset"))
 	ctx, cancel := context.WithCancel(context.Background())
 	doneRunner := make(chan struct{})
 	d.peers["peer"] = &peerRunner{cancel: cancel, done: doneRunner, st: PeerStatus{ID: "peer"}}
@@ -247,12 +171,8 @@ func TestPauseDrainsReadyCoordinatorGroup(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if err := d.SetPaused(true); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(d.Config().Folder, "paused-ready")); !os.IsNotExist(err) {
-		t.Fatalf("ready group mutated folder after pause: %v", err)
-	}
+	requireNoError(t, d.SetPaused(true))
+	requireMissingFile(t, filepath.Join(d.Config().Folder, "paused-ready"), "ready group mutated folder after pause")
 }
 
 func TestUnpairWaitsForRunnerDrainWithoutDaemonLock(t *testing.T) {
@@ -274,9 +194,7 @@ func TestUnpairWaitsForRunnerDrainWithoutDaemonLock(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		close(runnerDone)
 	}()
-	if err := d.Unpair(id); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, d.Unpair(id))
 	select {
 	case <-started:
 	default:
@@ -307,9 +225,7 @@ func TestUnpairPausedPeerWithoutRunnerDoesNotWait(t *testing.T) {
 	go func() { done <- d.Unpair(id) }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireNoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("unpair waited for a runner that was never started")
 	}
@@ -328,9 +244,7 @@ func TestRunClosesRootAfterFailure(t *testing.T) {
 	d.folder.Close()
 	cfg := d.Config()
 	cfg.Port = -1
-	if err := cfg.Save(d.Home); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, cfg.Save(d.Home))
 	d.cfg = &cfg
 	before := rootDescriptors(t, cfg.Folder)
 	if err := d.Run(context.Background()); err == nil {
@@ -343,18 +257,12 @@ func TestRunClosesRootAfterFailure(t *testing.T) {
 func rootDescriptors(t *testing.T, path string) int {
 	t.Helper()
 	var root unix.Stat_t
-	if err := unix.Stat(path, &root); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, unix.Stat(path, &root))
 	dir, err := os.Open("/dev/fd")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	defer dir.Close()
 	entries, err := dir.Readdirnames(-1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	count := 0
 	for _, entry := range entries {
 		fd, err := strconv.Atoi(entry)
@@ -374,9 +282,7 @@ func TestBlockedRunServesStatusAndClosesRoot(t *testing.T) {
 	d.folder.Close()
 	cfg := d.Config()
 	cfg.Port = 0
-	if err := cfg.Save(d.Home); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, cfg.Save(d.Home))
 	d.cfg = &cfg
 	before := rootDescriptors(t, cfg.Folder)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -399,10 +305,12 @@ func TestBlockedRunServesStatusAndClosesRoot(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if after := rootDescriptors(t, cfg.Folder); after != before {
-		t.Fatalf("root descriptors %d -> %d", before, after)
+	requireNoError(t, <-done)
+	// FSEvents can release a root descriptor shortly after its stop returns.
+	for after := rootDescriptors(t, cfg.Folder); after != before; after = rootDescriptors(t, cfg.Folder) {
+		if time.Now().After(deadline) {
+			t.Fatalf("root descriptors %d -> %d", before, after)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

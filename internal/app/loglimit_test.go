@@ -11,18 +11,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func testLogWriter(t *testing.T, path string) *BoundedLogWriter {
+	t.Helper()
+	w, err := NewBoundedLogWriter(path)
+	requireNoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+	return w
+}
+
+func readTestLog(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	requireNoError(t, err)
+	return b
+}
+
 func TestBoundedLogWriterRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
-	w, err := NewBoundedLogWriter(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
+	w := testLogWriter(t, path)
 
 	for i := 0; i < logFileCount+1; i++ {
-		if _, err := w.Write(bytes.Repeat([]byte{byte('a' + i)}, logFileLimit)); err != nil {
-			t.Fatal(err)
-		}
+		mustWrite(t, w, bytes.Repeat([]byte{byte('a' + i)}, logFileLimit))
 	}
 	for i := 0; i < logFileCount; i++ {
 		name := path
@@ -40,10 +49,7 @@ func TestBoundedLogWriterRotation(t *testing.T) {
 	if _, err := os.Stat(path + ".3"); !os.IsNotExist(err) {
 		t.Errorf("unexpected fourth generation: err=%v", err)
 	}
-	got, err := os.ReadFile(path + ".2")
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := readTestLog(t, path+".2")
 	if got[0] != 'b' {
 		t.Errorf("oldest retained log starts with %q, want b", got[0])
 	}
@@ -51,14 +57,9 @@ func TestBoundedLogWriterRotation(t *testing.T) {
 
 func TestBoundedLogWriterRecoversAfterRotationFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
-	w, err := NewBoundedLogWriter(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
-	if _, err := w.Write(bytes.Repeat([]byte("x"), logFileLimit)); err != nil {
-		t.Fatal(err)
-	}
+	w := testLogWriter(t, path)
+	original := bytes.Repeat([]byte("x"), logFileLimit)
+	mustWrite(t, w, original)
 	originalRename := w.rename
 	failed := false
 	w.rename = func(old, new string) error {
@@ -74,30 +75,17 @@ func TestBoundedLogWriterRecoversAfterRotationFailure(t *testing.T) {
 	if _, err := w.Write([]byte("recovered")); err != nil {
 		t.Fatalf("write after failed rotation: %v", err)
 	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "recovered" {
-		t.Fatalf("active log = %q, want recovered", got)
-	}
+	got := readTestLog(t, path)
+	requireEqualf(t, string(got), "recovered", "active log = %q, want recovered", got)
+	requireFileContents(t, path+".1", original, "original log after interrupted rotation")
 }
 
 func TestBoundedLogWriterPreservesOversizedExistingLog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
 	want := bytes.Repeat([]byte("legacy"), logFileLimit/6+17)
-	if err := os.WriteFile(path, want, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	w, err := NewBoundedLogWriter(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
-	got, err := os.ReadFile(path + ".1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, path, want, 0o600)
+	testLogWriter(t, path)
+	got := readTestLog(t, path+".1")
 	if !bytes.Equal(got, want) {
 		t.Fatalf("rotated legacy log has %d bytes, want %d", len(got), len(want))
 	}
@@ -108,26 +96,12 @@ func TestBoundedLogWriterPreservesOversizedExistingLog(t *testing.T) {
 
 func TestBoundedLogWriterDoesNotSplitWriteAcrossFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
-	w, err := NewBoundedLogWriter(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
+	w := testLogWriter(t, path)
 	prefix := bytes.Repeat([]byte("p"), logFileLimit-2)
-	if _, err := w.Write(prefix); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("whole-line")); err != nil {
-		t.Fatal(err)
-	}
-	active, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rotated, err := os.ReadFile(path + ".1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	mustWrite(t, w, prefix)
+	mustWrite(t, w, []byte("whole-line"))
+	active := readTestLog(t, path)
+	rotated := readTestLog(t, path+".1")
 	if string(active) != "whole-line" || !bytes.Equal(rotated, prefix) {
 		t.Fatalf("active=%q rotated size=%d; line or prefix was split", active, len(rotated))
 	}
@@ -135,19 +109,12 @@ func TestBoundedLogWriterDoesNotSplitWriteAcrossFiles(t *testing.T) {
 
 func TestBoundedLogWriterAllowsSingleOversizedLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
-	w, err := NewBoundedLogWriter(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
+	w := testLogWriter(t, path)
 	line := bytes.Repeat([]byte("L"), logFileLimit+1)
 	if n, err := w.Write(line); err != nil || n != len(line) {
 		t.Fatalf("oversized Write = (%d, %v), want %d bytes", n, err, len(line))
 	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := readTestLog(t, path)
 	if !bytes.Equal(got, line) {
 		t.Fatal("oversized line was split or changed")
 	}
@@ -156,9 +123,7 @@ func TestBoundedLogWriterAllowsSingleOversizedLine(t *testing.T) {
 func TestBoundedLogWriterRedirectsStderrAfterRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sharedir.log")
 	oldStdout, err := unix.Dup(1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	oldStderr, err := unix.Dup(2)
 	if err != nil {
 		_ = unix.Close(oldStdout)
@@ -176,34 +141,16 @@ func TestBoundedLogWriterRedirectsStderrAfterRotation(t *testing.T) {
 	}
 	t.Cleanup(restore)
 	w, err := NewBoundedLogWriter(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	w.redirectFDs = true
-	if err := w.redirectStandardFDs(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(bytes.Repeat([]byte("r"), logFileLimit)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write([]byte("rotate")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stderr.Write([]byte("stderr-current")); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, w.redirectStandardFDs())
+	mustWrite(t, w, bytes.Repeat([]byte("r"), logFileLimit))
+	mustWrite(t, w, []byte("rotate"))
+	mustWrite(t, os.Stderr, []byte("stderr-current"))
+	requireNoError(t, w.Close())
 	restore()
-	active, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rotated, err := os.ReadFile(path + ".1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	active := readTestLog(t, path)
+	rotated := readTestLog(t, path+".1")
 	if !bytes.Contains(active, []byte("stderr-current")) || bytes.Contains(rotated, []byte("stderr-current")) {
 		t.Fatal("stderr output did not land in the active log after rotation")
 	}
@@ -213,9 +160,7 @@ func TestWriteAllHandlesPartialWrites(t *testing.T) {
 	want := []byte("partial writes are completed")
 	w := &shortWriter{limit: 3}
 	n, err := writeAll(w, want)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	if n != len(want) || !bytes.Equal(w.buf.Bytes(), want) {
 		t.Fatalf("got %d bytes %q, want %q", n, w.buf.Bytes(), want)
 	}
@@ -228,68 +173,38 @@ func TestWriteAllRejectsZeroProgress(t *testing.T) {
 	}
 }
 
-func TestRunLogOutputKeepsLinuxOnJournaldStderr(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sharedir.log")
-	var stderr bytes.Buffer
-	writer, closeOutput, err := NewRunLogOutput("linux", path, &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("journal only")); err != nil {
-		t.Fatal(err)
-	}
-	if err := closeOutput(); err != nil {
-		t.Fatal(err)
-	}
-	if stderr.String() != "journal only" {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("log file exists or stat failed: %v", err)
-	}
-}
-
-func TestRunLogOutputUsesBoundedFileOnDarwin(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sharedir.log")
-	var stderr bytes.Buffer
-	writer, closeOutput, err := NewRunLogOutput("darwin", path, &stderr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("file only")); err != nil {
-		t.Fatal(err)
-	}
-	if err := closeOutput(); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "file only" || stderr.Len() != 0 {
-		t.Fatalf("file = %q, stderr = %q", got, stderr.String())
-	}
-}
-
-func TestRunLogOutputIncludesStderrWhenInteractive(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sharedir.log")
-	var stderr bytes.Buffer
-	writer, closeOutput, err := newRunLogOutput("darwin", path, &stderr, true, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("interactive")); err != nil {
-		t.Fatal(err)
-	}
-	if err := closeOutput(); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "interactive" || stderr.String() != "interactive" {
-		t.Fatalf("file=%q stderr=%q", got, stderr.String())
+func TestRunLogOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, platform, message, stderr string
+		interactive, file               bool
+	}{
+		{"LinuxJournald", "linux", "journal only", "journal only", false, false},
+		{"DarwinFile", "darwin", "file only", "", false, true},
+		{"DarwinInteractive", "darwin", "interactive", "interactive", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "sharedir.log")
+			var stderr bytes.Buffer
+			var writer io.Writer
+			var closeOutput func() error
+			var err error
+			if tc.interactive {
+				writer, closeOutput, err = newRunLogOutput(tc.platform, path, &stderr, true, false)
+			} else {
+				writer, closeOutput, err = NewRunLogOutput(tc.platform, path, &stderr)
+			}
+			requireNoError(t, err)
+			mustWrite(t, writer, []byte(tc.message))
+			requireNoError(t, closeOutput())
+			requireEqualf(t, stderr.String(), tc.stderr, "stderr = %q, want %q", stderr.String(), tc.stderr)
+			if tc.file {
+				if got := readTestLog(t, path); string(got) != tc.message {
+					t.Fatalf("file = %q, want %q", got, tc.message)
+				}
+			} else if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("log file exists or stat failed: %v", err)
+			}
+		})
 	}
 }
 

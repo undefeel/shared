@@ -25,13 +25,9 @@ func TestRunPeerReportsIncompatibleAndCancelsRetry(t *testing.T) {
 	_ = os.MkdirAll(peerHome, 0700)
 	_ = os.MkdirAll(localHome, 0700)
 	peerID, err := identity.LoadOrCreate(peerHome)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	localID, err := identity.LoadOrCreate(localHome)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	old := httptest.NewUnstartedServer(http.NotFoundHandler())
 	old.TLS = &tls.Config{Certificates: []tls.Certificate{peerID.Cert}, MinVersion: tls.VersionTLS13}
 	old.StartTLS()
@@ -41,9 +37,7 @@ func TestRunPeerReportsIncompatibleAndCancelsRetry(t *testing.T) {
 	_ = os.MkdirAll(root, 0700)
 	_ = os.MkdirAll(filepath.Dir(state), 0700)
 	f, err := folder.Open(root, state, "local", log.New(io.Discard, "", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	defer f.Close()
 	pr := &peerRunner{st: PeerStatus{ID: peerID.ID, Name: "old-peer"}, lan: make(chan struct{}, 1)}
 	d := &Daemon{ID: localID, folder: f, Log: log.New(io.Discard, "", 0), cfg: &config.Config{Port: 0, Peers: []config.Peer{{ID: peerID.ID, Name: "old-peer", Addrs: []string{addr}}}}, peers: map[string]*peerRunner{peerID.ID: pr}}

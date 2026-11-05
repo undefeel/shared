@@ -12,18 +12,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sharedir/internal/folder"
 )
 
 type batchWriter struct {
 	*httptest.ResponseRecorder
-	after func()
+	after   func()
+	trigger []byte
 }
 
 func (w *batchWriter) SetWriteDeadline(_ time.Time) error { return nil }
 func (w *batchWriter) Write(p []byte) (int, error) {
 	n, err := w.ResponseRecorder.Write(p)
 	// Body is a separate write, after the header.
-	if w.after != nil && string(p) == "abc" {
+	if w.after != nil && bytes.Equal(p, w.trigger) {
 		f := w.after
 		w.after = nil
 		f()
@@ -39,48 +42,48 @@ func batchRequest(items []BatchItem) *http.Request {
 	r.Header.Set(ProtocolHeader, "2")
 	return r
 }
-func TestFilesChangesBetweenFrames(t *testing.T) {
-	for _, mode := range []string{"version", "blocked", "symlink"} {
+func TestFilesStreaming(t *testing.T) {
+	f, _ := fileFixture(t)
+	t.Run("BoundedSequentialBodies", func(t *testing.T) { testFilesBoundedSequentialBodies(t, f) })
+	t.Run("ChangesBetweenFrames", func(t *testing.T) { testFilesChangesBetweenFrames(t, f) })
+}
+
+func testFilesChangesBetweenFrames(t *testing.T, f *folder.Folder) {
+	for _, mode := range []string{"version", "symlink", "blocked"} {
+		for _, prefix := range []string{"a", "b"} {
+			writeTestFile(t, filepath.Join(f.Root, prefix+mode), []byte("abc"), 0600)
+		}
+	}
+	mustScan(t, f)
+	for _, mode := range []string{"version", "symlink", "blocked"} {
 		t.Run(mode, func(t *testing.T) {
-			f, fi := fileFixture(t)
-			if err := os.WriteFile(filepath.Join(f.Root, "b"), []byte("abc"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := f.Scan(); err != nil {
-				t.Fatal(err)
-			}
-			w := &batchWriter{ResponseRecorder: httptest.NewRecorder()}
+			fi, _, _ := f.Lookup("a" + mode)
+			w := &batchWriter{ResponseRecorder: httptest.NewRecorder(), trigger: []byte("abc")}
 			w.after = func() {
 				switch mode {
 				case "version":
-					if err := os.WriteFile(filepath.Join(f.Root, "b"), []byte("xyz"), 0600); err != nil {
-						t.Fatal(err)
-					}
+					writeTestFile(t, filepath.Join(f.Root, "b"+mode), []byte("xyz"), 0600)
 				case "blocked":
-					if err := os.Remove(filepath.Join(f.Root, "b")); err != nil {
-						t.Fatal(err)
+					requireNoError(t, os.Remove(filepath.Join(f.Root, "b"+mode)))
+					entries, err := os.ReadDir(f.Root)
+					requireNoError(t, err)
+					for _, entry := range entries {
+						if entry.Name() != "a" {
+							requireNoError(t, os.Remove(filepath.Join(f.Root, entry.Name())))
+						}
 					}
 					blockFileFixture(t, f)
 				case "symlink":
 					outside := filepath.Join(t.TempDir(), "secret")
-					if err := os.WriteFile(outside, []byte("abc"), 0600); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Remove(filepath.Join(f.Root, "b")); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Symlink(outside, filepath.Join(f.Root, "b")); err != nil {
-						t.Fatal(err)
-					}
+					writeTestFile(t, outside, []byte("abc"), 0600)
+					requireNoError(t, os.Remove(filepath.Join(f.Root, "b"+mode)))
+					requireNoError(t, os.Symlink(outside, filepath.Join(f.Root, "b"+mode)))
 				}
 			}
-			(&Server{Folder: f}).files(w, batchRequest([]BatchItem{{"1", "a", fi.Hash, 3}, {"2", "b", fi.Hash, 3}}))
-			d, err := NewBatchDecoder(bytes.NewReader(w.Body.Bytes()), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
+			(&Server{Folder: f}).files(w, batchRequest([]BatchItem{{"1", "a" + mode, fi.Hash, 3}, {"2", "b" + mode, fi.Hash, 3}}))
+			d := testBatchDecoder(t, bytes.NewReader(w.Body.Bytes()), map[string]struct{}{"1": {}, "2": {}})
 			first, err := d.Next()
-			if err != nil || string(first.Body) != "abc" {
+			if err != nil || string(first.Body) != "abc" || first.Header.ID != "1" {
 				t.Fatalf("first: %+v %v", first, err)
 			}
 			second, err := d.Next()
@@ -91,9 +94,9 @@ func TestFilesChangesBetweenFrames(t *testing.T) {
 			if err != nil || second.Header.Status != want || len(second.Body) != 0 {
 				t.Fatalf("second: %+v %v", second, err)
 			}
-			end, err := d.Next()
-			if err != nil || !end.Header.End {
-				t.Fatalf("end: %+v %v", end, err)
+			requireBatchEnd(t, d)
+			if _, err := d.Next(); err == nil {
+				t.Fatal("expected EOF after end")
 			}
 		})
 	}
@@ -101,15 +104,9 @@ func TestFilesChangesBetweenFrames(t *testing.T) {
 
 func TestSingleFileKnownTombstoneReturnsVersionChanged(t *testing.T) {
 	f, fi := fileFixture(t)
-	if err := os.WriteFile(filepath.Join(f.Root, "b"), []byte("keep"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(f.Root, "a")); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(f.Root, "b"), []byte("keep"), 0600)
+	requireNoError(t, os.Remove(filepath.Join(f.Root, "a")))
+	mustScan(t, f)
 	r := httptest.NewRequest("GET", "/file?name=a&hash="+fi.Hash, nil)
 	w := httptest.NewRecorder()
 	(&Server{Folder: f}).file(w, r)
@@ -126,31 +123,22 @@ func TestFilesLimitsAndBlocked(t *testing.T) {
 	} {
 		w := &batchWriter{ResponseRecorder: httptest.NewRecorder()}
 		(&Server{Folder: f}).files(w, batchRequest(items))
-		if w.Code != 400 {
-			t.Fatalf("status %d", w.Code)
-		}
+		requireEqualf(t, w.Code, 400, "status %d", w.Code)
 	}
 	blockFileFixture(t, f)
 	w := &batchWriter{ResponseRecorder: httptest.NewRecorder()}
 	(&Server{Folder: f}).files(w, batchRequest(nil))
-	if w.Code != 503 {
-		t.Fatalf("status %d", w.Code)
-	}
+	requireEqualf(t, w.Code, 503, "status %d", w.Code)
 }
-func TestFilesBoundedSequentialBodies(t *testing.T) {
-	f, _ := fileFixture(t)
+func testFilesBoundedSequentialBodies(t *testing.T, f *folder.Folder) {
 	data := bytes.Repeat([]byte("z"), BatchMaxPlain)
-	items := make([]BatchItem, 32)
+	items := make([]BatchItem, 2)
 	for i := range items {
 		name := fmt.Sprint(i)
-		if err := os.WriteFile(filepath.Join(f.Root, name), data, 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeTestFile(t, filepath.Join(f.Root, name), data, 0600)
 		items[i] = BatchItem{ID: name, Name: name, Size: int64(len(data))}
 	}
-	if err := f.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	mustScan(t, f)
 	files, _ := f.Snapshot()
 	for _, fi := range files {
 		for i := range items {
@@ -168,20 +156,14 @@ func TestFilesBoundedSequentialBodies(t *testing.T) {
 		defer pw.Close()
 		(&Server{Folder: f}).files(&pipeBatchWriter{pw}, batchRequest(items))
 	}()
-	d, err := NewBatchDecoder(pr, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := testBatchDecoder(t, pr, nil)
 	for range items {
 		frame, err := d.Next()
 		if err != nil || !bytes.Equal(frame.Body, data) {
 			t.Fatalf("frame %v", err)
 		}
 	}
-	end, err := d.Next()
-	if err != nil || !end.Header.End {
-		t.Fatalf("end %v", err)
-	}
+	requireBatchEnd(t, d)
 	<-done
 }
 

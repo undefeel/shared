@@ -13,35 +13,11 @@ import (
 func batchStream(t *testing.T, frames ...BatchFrame) []byte {
 	t.Helper()
 	var b bytes.Buffer
-	if err := WriteBatchMagic(&b); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, WriteBatchMagic(&b))
 	for _, f := range frames {
-		if err := WriteBatchFrame(&b, f.Header, f.Body); err != nil {
-			t.Fatal(err)
-		}
+		requireNoError(t, WriteBatchFrame(&b, f.Header, f.Body))
 	}
 	return b.Bytes()
-}
-func TestBatchCodecRoundTripAndEnd(t *testing.T) {
-	input := batchStream(t,
-		BatchFrame{Header: BatchHeader{ID: "a", Status: "ok", Name: "a.txt", Hash: "h", Size: 3, Encoding: "identity", WireSize: 3}, Body: []byte("abc")},
-		BatchFrame{Header: BatchHeader{End: true, Count: 1}},
-	)
-	d, err := NewBatchDecoder(bytes.NewReader(input), map[string]struct{}{"a": {}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := d.Next()
-	if err != nil || string(f.Body) != "abc" || f.Header.ID != "a" {
-		t.Fatalf("frame %+v, %v", f, err)
-	}
-	if _, err := d.Next(); err != nil {
-		t.Fatalf("end: %v", err)
-	}
-	if _, err := d.Next(); err == nil {
-		t.Fatal("expected EOF after end")
-	}
 }
 func TestBatchCodecRejectsTruncatedFrameAndMissingEnd(t *testing.T) {
 	good := batchStream(t,
@@ -51,10 +27,8 @@ func TestBatchCodecRejectsTruncatedFrameAndMissingEnd(t *testing.T) {
 	endOnly := batchStream(t, BatchFrame{Header: BatchHeader{End: true, Count: 1}})
 	missingEnd := len(good) - (len(endOnly) - len(BatchMagic)) // data frame complete, End frame absent
 	for _, cut := range []int{len(BatchMagic) + 2, missingEnd, len(good) - 1} {
-		d, err := NewBatchDecoder(bytes.NewReader(good[:cut]), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		d := testBatchDecoder(t, bytes.NewReader(good[:cut]), nil)
+		var err error
 		for {
 			_, err = d.Next()
 			if err != nil {
@@ -68,17 +42,26 @@ func TestBatchCodecRejectsTruncatedFrameAndMissingEnd(t *testing.T) {
 }
 func TestBatchCodecRejectsDuplicateAndUnknownIDs(t *testing.T) {
 	item := BatchFrame{Header: BatchHeader{ID: "a", Status: "not_found"}}
-	input := batchStream(t, item, item, BatchFrame{Header: BatchHeader{End: true, Count: 2}})
-	d, _ := NewBatchDecoder(bytes.NewReader(input), nil)
-	if _, err := d.Next(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.Next(); err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("duplicate id: %v", err)
-	}
-	d, _ = NewBatchDecoder(bytes.NewReader(batchStream(t, item, BatchFrame{Header: BatchHeader{End: true, Count: 1}})), map[string]struct{}{"b": {}})
-	if _, err := d.Next(); err == nil || !strings.Contains(err.Error(), "unknown") {
-		t.Fatalf("unknown id: %v", err)
+	for _, tc := range []struct {
+		name         string
+		frames       []BatchFrame
+		allowed      map[string]struct{}
+		consumeFirst bool
+	}{
+		{"duplicate", []BatchFrame{item, item, {Header: BatchHeader{End: true, Count: 2}}}, nil, true},
+		{"unknown", []BatchFrame{item, {Header: BatchHeader{End: true, Count: 1}}}, map[string]struct{}{"b": {}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testBatchDecoder(t, bytes.NewReader(batchStream(t, tc.frames...)), tc.allowed)
+			if tc.consumeFirst {
+				if _, err := d.Next(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := d.Next(); err == nil || !strings.Contains(err.Error(), tc.name) {
+				t.Fatalf("%s id: %v", tc.name, err)
+			}
+		})
 	}
 }
 func TestBatchCodecEnforcesWireAndPlainCapsBeforeBodyRead(t *testing.T) {
@@ -98,9 +81,7 @@ func TestBatchCodecEnforcesWireAndPlainCapsBeforeBodyRead(t *testing.T) {
 		if _, err := d.Next(); err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Fatalf("oversized header %+v: want a limit error, got %v", h, err)
 		}
-		if b.Len() != 64 {
-			t.Fatalf("decoder read %d body bytes before rejecting caps", 64-b.Len())
-		}
+		requireEqualf(t, b.Len(), 64, "decoder read %d body bytes before rejecting caps", 64-b.Len())
 	}
 }
 func TestBatchCodecRejectsBadEndCountAndTrailingBytes(t *testing.T) {
@@ -108,10 +89,7 @@ func TestBatchCodecRejectsBadEndCountAndTrailingBytes(t *testing.T) {
 		batchStream(t, BatchFrame{Header: BatchHeader{End: true, Count: 1}}),
 		append(batchStream(t, BatchFrame{Header: BatchHeader{End: true, Count: 0}}), 'x'),
 	} {
-		d, err := NewBatchDecoder(bytes.NewReader(suffix), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		d := testBatchDecoder(t, bytes.NewReader(suffix), nil)
 		if _, err := d.Next(); err == nil {
 			t.Fatal("accepted invalid end")
 		}

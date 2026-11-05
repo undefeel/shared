@@ -7,16 +7,14 @@ import (
 	"strings"
 	"testing"
 
+	"sharedir/internal/folder"
 	"sharedir/internal/identity"
 )
 
-func TestAckAuthenticationAndValidation(t *testing.T) {
-	f, _ := fileFixture(t)
+func testAckAuthenticationAndValidation(t *testing.T, f *folder.Folder) {
 	raw := []byte("certified test peer")
 	id := identity.IDFromCert(raw)
-	if err := f.SetPeers([]string{id}); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, f.SetPeers([]string{id}))
 	s := &Server{Folder: f, Allowed: func(p string) bool { return p == id }}
 	for _, tc := range []struct {
 		body string
@@ -37,8 +35,6 @@ func TestAckAuthenticationAndValidation(t *testing.T) {
 		}
 		w := httptest.NewRecorder()
 		s.ack(w, r)
-		if w.Code != tc.code {
-			t.Fatalf("code %d, want %d: %s", w.Code, tc.code, w.Body.String())
-		}
+		requireEqualf(t, w.Code, tc.code, "code %d, want %d: %s", w.Code, tc.code, w.Body.String())
 	}
 }

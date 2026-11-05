@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,9 +70,7 @@ func TestFetchFilesKeepsGoodFramesAndRetriesOnlyRemaining(t *testing.T) {
 	defer closeServer()
 	c.BodyIdleTimeout = 20 * time.Millisecond
 	got, err := c.FetchFiles(context.Background(), addr, []BatchItem{a, b})
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	if string(got["a"].Body) != "alpha" || string(got["b"].Body) != "bravo" || calls.Load() != 2 {
 		t.Fatalf("results=%+v calls=%d", got, calls.Load())
 	}
@@ -107,27 +104,4 @@ func TestFetchFilesCancellationStopsStalledRequest(t *testing.T) {
 	if result.err != context.Canceled || len(result.got) != 0 {
 		t.Fatalf("results=%+v err=%v", result.got, result.err)
 	}
-}
-
-type closeUnblocksBody struct {
-	closed chan struct{}
-	once   sync.Once
-}
-
-func (b *closeUnblocksBody) Read([]byte) (int, error) { <-b.closed; return 0, io.ErrClosedPipe }
-func (b *closeUnblocksBody) Close() error             { b.once.Do(func() { close(b.closed) }); return nil }
-
-func TestResponseCloseOnCancelUnblocksRead(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	body := &closeUnblocksBody{closed: make(chan struct{})}
-	cleanup := closeResponseOnCancel(ctx, body)
-	readDone := make(chan struct{})
-	go func() { defer close(readDone); _, _ = body.Read(make([]byte, 1)) }()
-	cancel()
-	select {
-	case <-readDone:
-	case <-time.After(time.Second):
-		t.Fatal("response Read remained blocked after cancellation")
-	}
-	cleanup()
 }

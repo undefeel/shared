@@ -18,52 +18,44 @@ import (
 	"sharedir/internal/transport"
 )
 
+func ackDaemon(t *testing.T, base, name string) *Daemon {
+	t.Helper()
+	home := filepath.Join(base, name)
+	root := filepath.Join(home, "root")
+	mustMkdirAll(t, root, 0700)
+	requireNoError(t, (&config.Config{Name: name, Folder: root}).Save(home))
+	d, err := New(home, log.New(io.Discard, "", 0))
+	requireNoError(t, err)
+	d.folder, err = folder.Open(root, filepath.Join(home, "index.json"), d.ID.ID, d.Log)
+	requireNoError(t, err)
+	t.Cleanup(func() { _ = d.folder.Close() })
+	return d
+}
+
+func waitForAck(t *testing.T, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for ACK convergence")
+}
+
 func TestAckConvergesAfterLossAndOfflineMember(t *testing.T) {
 	base := t.TempDir()
-	open := func(name string) *Daemon {
-		home := filepath.Join(base, name)
-		root := filepath.Join(home, "root")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := (&config.Config{Name: name, Folder: root}).Save(home); err != nil {
-			t.Fatal(err)
-		}
-		d, err := New(home, log.New(io.Discard, "", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder, err = folder.Open(root, filepath.Join(home, "index.json"), d.ID.ID, d.Log)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = d.folder.Close() })
-		return d
-	}
-	source, receiver := open("source"), open("receiver")
+	source, receiver := ackDaemon(t, base, "source"), ackDaemon(t, base, "receiver")
 	receiver.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
-	if err := os.WriteFile(filepath.Join(source.folder.Root, "keep"), []byte("keep"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source.folder.Root, "gone"), []byte("gone"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(source.folder.Root, "keep"), []byte("keep"), 0600)
+	writeTestFile(t, filepath.Join(source.folder.Root, "gone"), []byte("gone"), 0600)
+	mustScan(t, source.folder)
 	source.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
-	if err := os.Remove(filepath.Join(source.folder.Root, "gone")); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.SetPeers([]string{receiver.ID.ID}); err != nil {
-		t.Fatal(err)
-	}
-	if err := receiver.folder.SetPeers([]string{source.ID.ID}); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, os.Remove(filepath.Join(source.folder.Root, "gone")))
+	mustScan(t, source.folder)
+	requireNoError(t, source.folder.SetPeers([]string{receiver.ID.ID}))
+	requireNoError(t, receiver.folder.SetPeers([]string{source.ID.ID}))
 	var lost, holdFetch, fetchBlocked atomic.Bool
 	holdFetch.Store(true)
 	allowed := func(id string) bool { return id == receiver.ID.ID }
@@ -89,46 +81,26 @@ func TestAckConvergesAfterLossAndOfflineMember(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); receiver.runPeer(ctx, runner) }()
 	defer func() { cancel(); <-done }()
-	wait := func(check func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		t.Fatal("timed out waiting for ACK convergence")
-	}
-	wait(fetchBlocked.Load)
+
+	waitForAck(t, fetchBlocked.Load)
 	if n, err := source.folder.CollectTombstones(time.Now()); err != nil || n != 0 || lost.Load() {
 		t.Fatalf("pending apply authorized GC: %d %v", n, err)
 	}
-	if err := source.folder.SetPeers([]string{receiver.ID.ID, "offline"}); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, source.folder.SetPeers([]string{receiver.ID.ID, "offline"}))
 	holdFetch.Store(false)
-	wait(func() bool { fi, _, ok := receiver.folder.Lookup("gone"); return ok && fi.Deleted && lost.Load() })
+	waitForAck(t, func() bool { fi, _, ok := receiver.folder.Lookup("gone"); return ok && fi.Deleted && lost.Load() })
 	cancel()
 	<-done
-	if err := receiver.folder.Close(); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, receiver.folder.Close())
 	// Removal and re-pair are a new incarnation even for the same identity.
-	if err := source.folder.SetPeers([]string{"offline"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.SetPeers([]string{receiver.ID.ID, "offline"}); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, source.folder.SetPeers([]string{"offline"}))
+	requireNoError(t, source.folder.SetPeers([]string{receiver.ID.ID, "offline"}))
 	if n, err := source.folder.CollectTombstones(time.Now()); err != nil || n != 0 {
 		t.Fatalf("re-pair reused old ACK: %d %v", n, err)
 	}
 	var err error
 	receiver.folder, err = folder.Open(receiver.cfg.Folder, filepath.Join(receiver.Home, "index.json"), receiver.ID.ID, receiver.Log)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 	done = make(chan struct{})
@@ -136,10 +108,8 @@ func TestAckConvergesAfterLossAndOfflineMember(t *testing.T) {
 	if n, err := source.folder.CollectTombstones(time.Now()); err != nil || n != 0 {
 		t.Fatalf("offline member did not block GC: %d %v", n, err)
 	}
-	if err := source.folder.SetPeers([]string{receiver.ID.ID}); err != nil {
-		t.Fatal(err)
-	}
-	wait(func() bool { _, _, ok := source.folder.Lookup("gone"); return !ok })
+	requireNoError(t, source.folder.SetPeers([]string{receiver.ID.ID}))
+	waitForAck(t, func() bool { _, _, ok := source.folder.Lookup("gone"); return !ok })
 	// The second daemon can collect too, even if its peer retired the same
 	// deletion before receiving this reverse baseline.
 	reverseAllowed := func(id string) bool { return id == source.ID.ID }
@@ -154,79 +124,72 @@ func TestAckConvergesAfterLossAndOfflineMember(t *testing.T) {
 	reverseDone := make(chan struct{})
 	go func() { defer close(reverseDone); source.runPeer(reverseCtx, reverseRunner) }()
 	defer func() { reverseCancel(); <-reverseDone }()
-	wait(func() bool { _, _, ok := receiver.folder.Lookup("gone"); return !ok })
+	waitForAck(t, func() bool { _, _, ok := receiver.folder.Lookup("gone"); return !ok })
 }
 
-func TestAckRetriesDroppedRequestWithoutRemoteChanges(t *testing.T) {
-	testAckRetry(t, http.StatusServiceUnavailable, "")
+func TestAckRetryScenarios(t *testing.T) {
+	cases := []struct {
+		name             string
+		status           int
+		ignored          string
+		source, receiver *Daemon
+	}{
+		{name: "RetriesDroppedRequestWithoutRemoteChanges", status: http.StatusServiceUnavailable},
+		{name: "RefreshesStaleBaseline", status: http.StatusConflict},
+		{name: "BaselineAllowsIgnoredLiveFile", status: http.StatusServiceUnavailable, ignored: "keep"},
+		{name: "BaselineRequiresIgnoredDeletionCoverage", status: http.StatusServiceUnavailable, ignored: "gone"},
+	}
+	for i := range cases {
+		tc := &cases[i]
+		base := t.TempDir()
+		tc.source, tc.receiver = ackDaemon(t, base, "source"), ackDaemon(t, base, "receiver")
+		if tc.ignored != "" {
+			writeTestFile(t, filepath.Join(tc.receiver.folder.Root, ".sharedirignore"), []byte(tc.ignored+"\n"), 0600)
+		}
+		for _, name := range []string{"keep", "gone"} {
+			writeTestFile(t, filepath.Join(tc.source.folder.Root, name), []byte(name), 0600)
+		}
+	}
+	// The folders are independent; scan them concurrently to share their stability wait.
+	scan := func(folders []*folder.Folder) {
+		errs := make(chan error, len(folders))
+		for _, f := range folders {
+			go func(f *folder.Folder) { errs <- f.Scan() }(f)
+		}
+		var firstErr error
+		for range folders {
+			if err := <-errs; err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		if firstErr != nil {
+			t.Fatal(firstErr)
+		}
+	}
+	var first []*folder.Folder
+	for _, tc := range cases {
+		first = append(first, tc.source.folder)
+		if tc.ignored != "" {
+			first = append(first, tc.receiver.folder)
+		}
+	}
+	scan(first)
+	var second []*folder.Folder
+	for _, tc := range cases {
+		tc.receiver.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
+		tc.source.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
+		requireNoError(t, os.Remove(filepath.Join(tc.source.folder.Root, "gone")))
+		second = append(second, tc.source.folder)
+	}
+	scan(second)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { testAckRetry(t, tc.source, tc.receiver, tc.status, tc.ignored) })
+	}
 }
 
-func TestAckRefreshesStaleBaseline(t *testing.T) {
-	testAckRetry(t, http.StatusConflict, "")
-}
-
-func TestAckBaselineAllowsIgnoredLiveFile(t *testing.T) {
-	testAckRetry(t, http.StatusServiceUnavailable, "keep")
-}
-
-func TestAckBaselineRequiresIgnoredDeletionCoverage(t *testing.T) {
-	testAckRetry(t, http.StatusServiceUnavailable, "gone")
-}
-
-func testAckRetry(t *testing.T, droppedStatus int, ignored string) {
-	base := t.TempDir()
-	open := func(name string) *Daemon {
-		home := filepath.Join(base, name)
-		root := filepath.Join(home, "root")
-		if err := os.MkdirAll(root, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := (&config.Config{Name: name, Folder: root}).Save(home); err != nil {
-			t.Fatal(err)
-		}
-		d, err := New(home, log.New(io.Discard, "", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
-		d.folder, err = folder.Open(root, filepath.Join(home, "index.json"), d.ID.ID, d.Log)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = d.folder.Close() })
-		return d
-	}
-	source, receiver := open("source"), open("receiver")
-	if ignored != "" {
-		if err := os.WriteFile(filepath.Join(receiver.folder.Root, ".sharedirignore"), []byte(ignored+"\n"), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := receiver.folder.Scan(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	receiver.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
-	if err := os.WriteFile(filepath.Join(source.folder.Root, "keep"), []byte("keep"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source.folder.Root, "gone"), []byte("gone"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	source.folder.SetPersistenceProbe(folder.PersistenceProbe{ClockNow: func() time.Time { return time.Now().Add(-31 * 24 * time.Hour) }})
-	if err := os.Remove(filepath.Join(source.folder.Root, "gone")); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	if err := source.folder.SetPeers([]string{receiver.ID.ID}); err != nil {
-		t.Fatal(err)
-	}
-	if err := receiver.folder.SetPeers([]string{source.ID.ID}); err != nil {
-		t.Fatal(err)
-	}
+func testAckRetry(t *testing.T, source, receiver *Daemon, droppedStatus int, ignored string) {
+	requireNoError(t, source.folder.SetPeers([]string{receiver.ID.ID}))
+	requireNoError(t, receiver.folder.SetPeers([]string{source.ID.ID}))
 	var lost, holdFetch, fetchBlocked atomic.Bool
 	var refreshed atomic.Bool
 	var polls atomic.Int32
@@ -270,23 +233,13 @@ func testAckRetry(t *testing.T, droppedStatus int, ignored string) {
 	done := make(chan struct{})
 	go func() { defer close(done); receiver.runPeer(ctx, runner) }()
 	defer func() { cancel(); <-done }()
-	wait := func(check func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			if check() {
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		t.Fatal("timed out waiting for ACK convergence")
-	}
+
 	if ignored != "keep" {
-		wait(fetchBlocked.Load)
+		waitForAck(t, fetchBlocked.Load)
 	}
 	holdFetch.Store(false)
 	if ignored == "gone" {
-		wait(func() bool { return polls.Load() >= 2 })
+		waitForAck(t, func() bool { return polls.Load() >= 2 })
 		if lost.Load() {
 			t.Fatal("uncovered ignored deletion authorized an ACK")
 		}
@@ -298,8 +251,8 @@ func testAckRetry(t *testing.T, droppedStatus int, ignored string) {
 		}
 		return
 	}
-	wait(lost.Load)
-	wait(func() bool { _, _, ok := source.folder.Lookup("gone"); return !ok })
+	waitForAck(t, lost.Load)
+	waitForAck(t, func() bool { _, _, ok := source.folder.Lookup("gone"); return !ok })
 	if droppedStatus == http.StatusConflict && !refreshed.Load() {
 		t.Fatal("stale ACK did not request a fresh full baseline")
 	}

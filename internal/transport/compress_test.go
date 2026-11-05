@@ -10,30 +10,30 @@ import (
 	"testing"
 )
 
-func TestEncodeTextUsesGzipForRelay(t *testing.T) {
-	plain := strings.Repeat("sharedir sync text payload\n", 3000)
-	var wire bytes.Buffer
-	encoding, plainSize, wireSize, hash, err := EncodeBody(&wire, strings.NewReader(plain), "notes.txt", true, 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if encoding != "gzip" || plainSize != int64(len(plain)) || wireSize != int64(wire.Len()) || wireSize >= plainSize {
-		t.Fatalf("unexpected encoded result: encoding=%q plain=%d wire=%d", encoding, plainSize, wireSize)
-	}
-	if hash != sha256.Sum256([]byte(plain)) {
-		t.Fatal("encoder returned a hash other than the plain body hash")
-	}
-}
-
-func TestEncodeJPEGUsesIdentity(t *testing.T) {
-	plain := bytes.Repeat([]byte{0x91, 0x2a, 0x47, 0xe3}, 4096)
-	var wire bytes.Buffer
-	encoding, plainSize, wireSize, _, err := EncodeBody(&wire, bytes.NewReader(plain), "photo.JPEG", true, 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if encoding != "identity" || plainSize != int64(len(plain)) || wireSize != plainSize || !bytes.Equal(wire.Bytes(), plain) {
-		t.Fatalf("JPEG was not sent unchanged: encoding=%q plain=%d wire=%d", encoding, plainSize, wireSize)
+func TestEncodeBodyFormats(t *testing.T) {
+	for _, tc := range []struct {
+		name, filename, encoding string
+		plain                    []byte
+	}{
+		{"text", "notes.txt", "gzip", []byte(strings.Repeat("sharedir sync text payload\n", 3000))},
+		{"jpeg", "photo.JPEG", "identity", bytes.Repeat([]byte{0x91, 0x2a, 0x47, 0xe3}, 4096)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var wire bytes.Buffer
+			encoding, plainSize, wireSize, hash, err := EncodeBody(&wire, bytes.NewReader(tc.plain), tc.filename, true, 1<<20)
+			requireNoError(t, err)
+			if encoding != tc.encoding || plainSize != int64(len(tc.plain)) || wireSize != int64(wire.Len()) {
+				t.Fatalf("unexpected encoded result: encoding=%q plain=%d wire=%d", encoding, plainSize, wireSize)
+			}
+			if tc.encoding == "gzip" {
+				if wireSize >= plainSize {
+					t.Fatal("text did not compress")
+				}
+				requireEqual(t, hash, sha256.Sum256(tc.plain), "encoder returned a hash other than the plain body hash")
+			} else if wireSize != plainSize || !bytes.Equal(wire.Bytes(), tc.plain) {
+				t.Fatal("JPEG was not sent unchanged")
+			}
+		})
 	}
 }
 
@@ -41,17 +41,13 @@ func TestDecodeRejectsBombAndTrailingGzip(t *testing.T) {
 	var compressed bytes.Buffer
 	zw := gzip.NewWriter(&compressed)
 	_, _ = io.WriteString(zw, strings.Repeat("x", 4096))
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, zw.Close())
 
 	var decoded bytes.Buffer
 	if _, _, err := DecodeBody(&decoded, bytes.NewReader(compressed.Bytes()), "gzip", 1024); err == nil {
 		t.Fatal("expected decoded size limit error")
 	}
-	if decoded.Len() != 1024 {
-		t.Fatalf("decoder wrote %d bytes beyond/under the 1024-byte limit", decoded.Len())
-	}
+	requireEqualf(t, decoded.Len(), 1024, "decoder wrote %d bytes beyond/under the 1024-byte limit", decoded.Len())
 
 	trailing := append(append([]byte(nil), compressed.Bytes()...), 0x42)
 	decoded.Reset()
@@ -64,17 +60,11 @@ func TestDecodeReturnsPlainHash(t *testing.T) {
 	plain := []byte(strings.Repeat("hash the decoded bytes\n", 200))
 	var wire bytes.Buffer
 	zw := gzip.NewWriter(&wire)
-	if _, err := zw.Write(plain); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	mustWrite(t, zw, plain)
+	requireNoError(t, zw.Close())
 	var decoded bytes.Buffer
 	size, hash, err := DecodeBody(&decoded, bytes.NewReader(wire.Bytes()), "gzip", int64(len(plain)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNoError(t, err)
 	if size != int64(len(plain)) || hash != sha256.Sum256(plain) || !bytes.Equal(decoded.Bytes(), plain) {
 		t.Fatal("decoded bytes, size, or hash do not match the plain payload")
 	}
