@@ -13,6 +13,8 @@ var ErrStaleWatchGeneration = errors.New("watch: stale generation")
 // WatchBatch is a coalesced set of relative paths that may need rescanning.
 type WatchBatch struct {
 	Paths        []string
+	RenamePaths  []string // rename targets, independently fingerprinted
+	RenameFull   bool     // an unmatched/ambiguous rename needs full reconciliation
 	FullRequired bool
 	RootChanged  bool
 	Generation   uint64
@@ -46,6 +48,19 @@ func (f *Folder) normalizeWatchPath(name string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+// relativeWatchEvent accepts event paths only within the watched root. Root
+// metadata events are distinguished from root replacement flags by callers.
+func relativeWatchEvent(root, event string) (rel string, inTree, rootEvent bool) {
+	rel, err := filepath.Rel(root, event)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false, false
+	}
+	if rel == "." {
+		return "", true, true
+	}
+	return strings.ReplaceAll(rel, string(filepath.Separator), "/"), true, false
 }
 
 // filepathRel is isolated here to keep watcher paths slash-normalized on every OS.

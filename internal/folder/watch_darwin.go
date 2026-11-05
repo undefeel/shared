@@ -3,14 +3,17 @@ package folder
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsevents"
 )
 
 func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(), <-chan struct{}, error) {
-	es := &fsevents.EventStream{Paths: []string{f.Root}, Latency: 300 * time.Millisecond, Flags: fsevents.FileEvents | fsevents.WatchRoot}
+	watchRoot, err := filepath.EvalSymlinks(f.Root)
+	if err != nil {
+		return nil, nil, err
+	}
+	es := &fsevents.EventStream{Paths: []string{watchRoot}, Latency: 300 * time.Millisecond, Flags: fsevents.FileEvents | fsevents.WatchRoot}
 	if err := es.Start(); err != nil {
 		return nil, nil, err
 	}
@@ -42,12 +45,16 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 						full(true)
 						continue
 					}
-					rel, err := filepath.Rel(f.Root, e.Path)
-					if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
-						full(true)
+					rel, inTree, rootEvent := relativeWatchEvent(watchRoot, e.Path)
+					if !inTree {
 						continue
 					}
-					rel = strings.ReplaceAll(rel, string(filepath.Separator), "/")
+					if rootEvent {
+						// Directory metadata notifications are common during ordinary
+						// writes; only the explicit FSEvents RootChanged flag is a
+						// root replacement signal.
+						continue
+					}
 					if rel == ignoreFile {
 						full(false)
 						continue
@@ -56,15 +63,18 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 						continue
 					}
 					paths := []string{rel}
+					renamed := []string(nil)
+					renameFull := false
 					if flags&fsevents.ItemRenamed != 0 {
+						renamed = append(renamed, rel)
 						p := filepath.ToSlash(filepath.Dir(rel))
-						if p == "." {
-							full(false)
-							continue
+						if p != "." {
+							paths = append(paths, p)
+						} else {
+							renameFull = true
 						}
-						paths = append(paths, p)
 					}
-					emit(WatchBatch{Paths: paths, Generation: gen})
+					emit(WatchBatch{Paths: paths, RenamePaths: renamed, RenameFull: renameFull, FullRequired: renameFull, Generation: gen})
 				}
 			}
 		}

@@ -81,7 +81,14 @@ func (f *Folder) WatchPaths(ctx context.Context, emit func(WatchBatch)) (func(),
 					return
 				}
 				if filepath.Clean(ev.Name) == root {
-					full(true)
+					// chmod/attribute notifications on the watched directory are
+					// ordinary metadata changes; only removal or rename means the
+					// root binding may have changed.
+					if ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename) {
+						full(true)
+					} else {
+						full(false)
+					}
 					continue
 				}
 				if ev.Has(fsnotify.Create) {

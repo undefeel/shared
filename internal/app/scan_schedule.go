@@ -16,6 +16,8 @@ const (
 // Once the path bound is exceeded, a full scan subsumes the entire queue.
 type scanQueue struct {
 	paths      map[string]struct{}
+	renames    map[string]struct{}
+	renameFull bool
 	full       bool
 	root       bool
 	generation uint64
@@ -23,6 +25,23 @@ type scanQueue struct {
 
 func (q *scanQueue) merge(b folder.WatchBatch) {
 	if b.FullRequired || b.RootChanged {
+		if b.RenameFull {
+			q.renameFull = true
+			for _, p := range b.RenamePaths {
+				if q.renames == nil {
+					q.renames = make(map[string]struct{})
+				}
+				q.renames[p] = struct{}{}
+			}
+			for _, p := range b.Paths {
+				if q.paths == nil {
+					q.paths = make(map[string]struct{})
+				}
+				q.paths[p] = struct{}{}
+			}
+			q.generation = b.Generation
+			return
+		}
 		q.full = q.full || b.FullRequired
 		q.root = q.root || b.RootChanged
 		q.generation = b.Generation
@@ -43,17 +62,28 @@ func (q *scanQueue) merge(b folder.WatchBatch) {
 			break
 		}
 	}
+	for _, p := range b.RenamePaths {
+		if q.renames == nil {
+			q.renames = make(map[string]struct{})
+		}
+		q.renames[p] = struct{}{}
+	}
 	q.generation = b.Generation
 }
 
 func (q *scanQueue) drain() folder.WatchBatch {
-	b := folder.WatchBatch{FullRequired: q.full, RootChanged: q.root, Generation: q.generation}
+	b := folder.WatchBatch{FullRequired: q.full, RootChanged: q.root, RenameFull: q.renameFull, Generation: q.generation}
 	for p := range q.paths {
 		b.Paths = append(b.Paths, p)
+	}
+	for p := range q.renames {
+		b.RenamePaths = append(b.RenamePaths, p)
 	}
 	q.paths = nil
 	q.full = false
 	q.root = false
+	q.renames = nil
+	q.renameFull = false
 	return b
 }
 

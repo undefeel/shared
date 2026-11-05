@@ -187,3 +187,16 @@ func TestScanWatchBatchFencesGenerationAndEmptyPaths(t *testing.T) {
 		t.Fatalf("stale batch error = %v", err)
 	}
 }
+
+func TestRelativeWatchEventScopesRootAndOutsidePaths(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "private", "var", "sync")
+	if rel, inTree, rootEvent := relativeWatchEvent(root, root); rel != "" || !inTree || !rootEvent {
+		t.Fatalf("root event = (%q,%v,%v)", rel, inTree, rootEvent)
+	}
+	if rel, inTree, rootEvent := relativeWatchEvent(root, filepath.Join(root, "dir", "file")); rel != "dir/file" || !inTree || rootEvent {
+		t.Fatalf("file event = (%q,%v,%v)", rel, inTree, rootEvent)
+	}
+	if rel, inTree, rootEvent := relativeWatchEvent(root, filepath.Join(filepath.Dir(root), "other", "file")); rel != "" || inTree || rootEvent {
+		t.Fatalf("outside event = (%q,%v,%v)", rel, inTree, rootEvent)
+	}
+}

@@ -315,10 +315,13 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 		if len(b.Paths) == 0 && !b.FullRequired && !b.RootChanged {
 			continue
 		}
-		if d.watchScanObserver != nil {
-			d.watchScanObserver(b)
-		}
 		if err := d.folder.ScanWatchBatch(ctx, b); err != nil {
+			if errors.Is(err, folder.ErrStaleWatchGeneration) || ctx.Err() != nil {
+				// Rebind invalidates the old watch stream's generation. Do not
+				// requeue that immutable batch forever; the new watcher or periodic
+				// full scan will establish the current baseline.
+				continue
+			}
 			// Preserve the failed scopes for a delayed retry; the timer still forces periodic full work.
 			qmu.Lock()
 			q.merge(b)
@@ -335,6 +338,9 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 			}
 		} else {
 			retryAt = time.Time{}
+			if d.watchScanObserver != nil {
+				d.watchScanObserver(b)
+			}
 		}
 		d.changed()
 	}

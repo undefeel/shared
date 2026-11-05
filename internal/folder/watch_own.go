@@ -57,9 +57,10 @@ func (f *Folder) registerOwnEvents(g groupIntent) {
 // FilterWatchBatch removes only fully verified incoming writes. Any uncertainty,
 // mixed path or generation change preserves the event for incremental scanning.
 func (f *Folder) FilterWatchBatch(ctx context.Context, b WatchBatch) WatchBatch {
-	if b.FullRequired || b.RootChanged || len(b.Paths) == 0 {
+	if b.RootChanged || (b.FullRequired && !b.RenameFull) || (len(b.Paths) == 0 && len(b.RenamePaths) == 0) {
 		return b
 	}
+	wasRenameFull := b.RenameFull
 	// Pin the root while scanMu prevents rebind; drop both locks before any
 	// rooted filesystem work or hashing.
 	f.scanMu.Lock()
@@ -74,37 +75,32 @@ func (f *Folder) FilterWatchBatch(ctx context.Context, b WatchBatch) WatchBatch 
 	f.scanMu.Unlock()
 	defer root.releaseLease()
 	out := make([]string, 0, len(b.Paths))
-	for _, name := range b.Paths {
+	keptRenames := make([]string, 0, len(b.RenamePaths))
+	verify := func(name string) bool {
 		if ctx.Err() != nil {
-			out = append(out, name)
-			continue
+			return false
 		}
 		if name == "" || name == "." {
-			out = append(out, name)
-			continue
+			return false
 		}
 		f.ownMu.Lock()
 		fp, ok := f.ownEvents[name]
 		f.ownMu.Unlock()
 		if !ok || fp.generation != generation {
-			out = append(out, name)
-			continue
+			return false
 		}
 		before, err := scanStatAt(root, name)
 		if err != nil || before != fp.stat || before.mode&uint32(0xf000) != 0x8000 {
-			out = append(out, name)
-			continue
+			return false
 		}
 		file, err := f.rootScanIO().openRead(root, name)
 		if err != nil {
-			out = append(out, name)
-			continue
+			return false
 		}
 		hash, _, after, hashErr := stableHash(file)
 		file.Close()
 		if hashErr != nil || after != fp.stat || hash != fp.hash {
-			out = append(out, name)
-			continue
+			return false
 		}
 		f.saveMu.Lock()
 		f.mu.Lock()
@@ -112,10 +108,21 @@ func (f *Folder) FilterWatchBatch(ctx context.Context, b WatchBatch) WatchBatch 
 		matches := f.confirmedGeneration == generation && cur != nil && !cur.Deleted && cur.Hash == fp.info.Hash && cur.Size == fp.info.Size && cur.ModTime == fp.info.ModTime && cur.Exec == fp.info.Exec && cur.Version.Compare(fp.info.Version) == Equal
 		f.mu.Unlock()
 		f.saveMu.Unlock()
-		if !matches {
+		return matches
+	}
+	for _, name := range b.Paths {
+		if !verify(name) {
 			out = append(out, name)
 		}
 	}
+	for _, name := range b.RenamePaths {
+		if !verify(name) {
+			keptRenames = append(keptRenames, name)
+		}
+	}
 	b.Paths = out
+	b.RenamePaths = keptRenames
+	b.RenameFull = wasRenameFull && len(keptRenames) > 0
+	b.FullRequired = b.FullRequired && (!wasRenameFull || len(keptRenames) > 0)
 	return b
 }
