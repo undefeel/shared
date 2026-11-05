@@ -68,6 +68,11 @@ func (r *rootFS) cloneFile(src *os.File, name string, size int64) (_ *os.File, e
 	}
 	var dst *os.File
 	if created {
+		defer func() {
+			if dst == nil {
+				_ = unix.Unlinkat(int(p.Fd()), leaf, 0)
+			}
+		}()
 		// The clone inherits donor permissions, including a read-only mode.
 		pinned, e := openRegularAt(p, leaf, unix.O_RDONLY, 0)
 		if e != nil {
@@ -94,6 +99,7 @@ func (r *rootFS) cloneFile(src *os.File, name string, size int64) (_ *os.File, e
 		if err != nil {
 			if dst != nil {
 				dst.Close()
+				dst = nil
 			}
 			return nil, err
 		}
