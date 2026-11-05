@@ -139,10 +139,11 @@ func kindOf(name string) string {
 }
 
 type Folder struct {
-	ownMu       sync.Mutex
-	ownEvents   map[string]ownFingerprint
-	scanError   *ScanError // mu
-	scanLogTime time.Time  // mu
+	retiredAvailable atomic.Bool
+	ownMu            sync.Mutex
+	ownEvents        map[string]ownFingerprint
+	scanError        *ScanError // mu
+	scanLogTime      time.Time  // mu
 
 	root                *rootFS
 	binding             rootBinding // mu
@@ -236,6 +237,7 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 		return nil, err
 	}
 	f.Root, f.me, f.log, f.store = root, me, logger, store
+	f.retiredAvailable.Store(len(store.state.Control.Retired) > 0)
 	f.files, f.hashCache = map[string]*FileInfo{}, map[string]scanHashCache{}
 	f.seq, f.changed = uint64(time.Now().UnixNano()), make(chan struct{})
 	p := storePersisted(store.state)
@@ -462,7 +464,7 @@ func (f *Folder) persistStore(p persisted) error {
 	for _, fi := range p.Files {
 		v := *recoveryFile(fi)
 		before, exists := old[v.Name]
-		if exists {
+		if exists && v.Deleted && before.Deleted && reflect.DeepEqual(v.Version, before.Version) {
 			v.DeletedAt = before.DeletedAt
 		}
 		if !v.Deleted {

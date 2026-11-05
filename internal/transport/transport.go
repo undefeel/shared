@@ -43,12 +43,14 @@ const (
 )
 
 type IndexResponse struct {
-	Seq        uint64            `json:"-"` // compatibility alias for callers; cursor is the wire field
-	Protocol   int               `json:"protocol"`
-	StoreEpoch string            `json:"storeEpoch"`
-	Cursor     uint64            `json:"cursor"`
-	Reset      bool              `json:"reset"`
-	Files      []folder.FileInfo `json:"files"`
+	Seq               uint64            `json:"-"` // compatibility alias for callers; cursor is the wire field
+	Protocol          int               `json:"protocol"`
+	StoreEpoch        string            `json:"storeEpoch"`
+	Cursor            uint64            `json:"cursor"`
+	Reset             bool              `json:"reset"`
+	Files             []folder.FileInfo `json:"files"`
+	MembershipEpoch   uint64            `json:"membershipEpoch,omitempty"`
+	BaselineChallenge string            `json:"baselineChallenge,omitempty"`
 }
 
 // StateProvider must return durable epochs (stable across restart) and an atomic
@@ -118,6 +120,7 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hello", s.hello)
+	mux.HandleFunc("POST /ack", s.ack)
 	mux.HandleFunc("POST /files", s.files)
 	mux.HandleFunc("POST /delta", s.delta)
 	mux.HandleFunc("GET /index", s.index)
@@ -174,7 +177,8 @@ func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "state unavailable", 503)
 		return
 	}
-	if _, err := DecodeHello(r.Body); err != nil {
+	hello, err := DecodeHello(r.Body)
+	if err != nil {
 		var pe *ProtocolError
 		if errors.As(err, &pe) {
 			WriteProtocolIncompatible(w, pe.Received)
@@ -193,7 +197,7 @@ func (s *Server) hello(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	})
-	s.sessions.Store(connectionKey(r), struct{}{})
+	s.sessions.Store(connectionKey(r), hello)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.State.Hello())
 }
@@ -219,6 +223,9 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil || (s.Paused != nil && s.Paused()) || s.Folder.CheckRead(generation) != nil {
 		http.Error(w, "folder unavailable", 503)
+		return
+	}
+	if !s.prepareAckBaseline(w, r, &out) {
 		return
 	}
 	out.Protocol = ProtocolVersion
@@ -295,6 +302,7 @@ func (w *versionWriter) Write(p []byte) (int, error) {
 }
 
 type Client struct {
+	peer string
 	// LocalHello supplies durable local epochs; set before concurrent use.
 	LocalHello      func() Hello
 	http            *http.Client
@@ -322,7 +330,7 @@ func NewClient(id *identity.Identity, peer string, port int, relayDial func(cont
 			return nil
 		},
 	}
-	c := &Client{port: port, http: &http.Client{Transport: &http.Transport{
+	c := &Client{peer: peer, port: port, http: &http.Client{Transport: &http.Transport{
 		TLSClientConfig:       tlsCfg,
 		ResponseHeaderTimeout: pollTimeout + 10*time.Second,
 		DialContext:           dialer(relayDial),
@@ -357,7 +365,7 @@ func (t *helloTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	u.RawQuery = ""
 	h.URL = &u
 	h.Method = http.MethodPost
-	local := Hello{Protocol: ProtocolVersion, Features: []string{"files", "gzip"}}
+	local := Hello{Protocol: ProtocolVersion, Features: []string{"files", "gzip", "ack"}}
 	if t.client != nil && t.client.LocalHello != nil {
 		local = t.client.LocalHello()
 	}
@@ -524,6 +532,10 @@ func decodeIndex(out *IndexResponse, r io.Reader) error {
 			err = d.Decode(&out.StoreEpoch)
 		case "reset":
 			err = d.Decode(&out.Reset)
+		case "membershipepoch":
+			err = d.Decode(&out.MembershipEpoch)
+		case "baselinechallenge":
+			err = d.Decode(&out.BaselineChallenge)
 		case "cursor":
 			err = d.Decode(&out.Cursor)
 			out.Seq = out.Cursor

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"sharedir/internal/folder"
@@ -11,9 +12,8 @@ import (
 type folderPeerState struct{ folder *folder.Folder }
 
 func (s folderPeerState) Hello() transport.Hello {
-	epoch, _ := s.folder.DurableCursor()
-	// Membership is not durable/modelled until wave C; keep a stable placeholder.
-	return transport.Hello{Protocol: transport.ProtocolVersion, StoreEpoch: epoch, PeerSetEpoch: "membership-v1-placeholder", Features: []string{"files", "gzip"}}
+	epoch, membership := s.folder.PeerACKEpoch()
+	return transport.Hello{Protocol: transport.ProtocolVersion, StoreEpoch: epoch, PeerSetEpoch: strconv.FormatUint(membership, 10), Features: []string{"files", "gzip", "ack"}}
 }
 
 func (s folderPeerState) Index(ctx context.Context, epoch string, since uint64, wait time.Duration, name string) (transport.IndexResponse, error) {
