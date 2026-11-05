@@ -577,6 +577,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 	var ackIndex *transport.IndexResponse
 	var ackDeletions []folder.FileInfo
 	var baselineIgnored bool
+	var refreshBaseline bool
 	var lastCollect time.Time
 	for ctx.Err() == nil {
 		if addr == "" {
@@ -619,18 +620,23 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 					msg := transport.AckMessage{StoreEpoch: ackIndex.StoreEpoch, MembershipEpoch: ackIndex.MembershipEpoch, BaselineChallenge: challenge, Deletions: covered[:n]}
 					if err := client.Ack(ctx, addr, id, msg); err != nil {
 						failed = true
+						if errors.Is(err, transport.ErrStaleACK) {
+							ackIndex = nil
+							ackDeletions = nil
+							refreshBaseline = true
+						}
 						break
 					}
 					challenge = ""
 					covered = covered[n:]
 				}
-				ackIndex = nil
-				ackDeletions = nil
 				if failed {
 					addr = ""
 					sleepCtx(ctx, peerRetryMin)
 					continue
 				}
+				ackIndex = nil
+				ackDeletions = nil
 				if _, err := d.folder.CollectTombstones(time.Now()); err != nil {
 					d.Log.Printf("tombstone collection: %v", err)
 				}
@@ -654,7 +660,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			stopPoll = func() { close(done); cancel() }
 		}
 		epoch, since, haveCursor := queue.cursor(id)
-		if !haveCursor {
+		if !haveCursor || refreshBaseline {
 			epoch, since = "", 0
 		}
 		var idx *transport.IndexResponse
@@ -720,6 +726,7 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		incompatibleLogged = false
 
 		if polling && idx != nil {
+			refreshBaseline = false
 			if !haveCursor || idx.StoreEpoch != epoch || idx.Cursor != since || idx.Reset || len(idx.Files) != 0 {
 				ackIndex = idx
 				ackDeletions = nil

@@ -14,6 +14,8 @@ import (
 	"sharedir/internal/folder"
 )
 
+var ErrStaleACK = errors.New("stale ack")
+
 const ackBodyLimit = 1 << 20
 const ackMaxDeletions = 256
 
@@ -162,6 +164,9 @@ func (c *Client) Ack(ctx context.Context, addr, peerID string, msg AckMessage) e
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return ErrStaleACK
+	}
 	if resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("ack %s: %s", resp.Status, b)
