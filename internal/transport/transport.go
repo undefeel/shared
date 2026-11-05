@@ -119,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /hello", s.hello)
 	mux.HandleFunc("POST /files", s.files)
+	mux.HandleFunc("POST /delta", s.delta)
 	mux.HandleFunc("GET /index", s.index)
 	mux.HandleFunc("GET /file", s.file)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
