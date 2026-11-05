@@ -303,6 +303,10 @@ func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint6
 		f.scanMu.Lock()
 		defer f.scanMu.Unlock()
 	}
+	if f.Ignored(r.Name) {
+		st.act = skip
+		return st, nil
+	}
 	if err := ctx.Err(); err != nil {
 		return st, err
 	}

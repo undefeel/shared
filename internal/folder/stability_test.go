@@ -1,6 +1,12 @@
 package folder
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -84,5 +90,113 @@ func TestFolderStabilityAccessors(t *testing.T) {
 	f.stability.probe("pending", scanStat{})
 	if f.PendingStability() != 1 {
 		t.Fatal("pending count not exposed")
+	}
+}
+
+func TestEndlessWriterAndOverflowProgress(t *testing.T) {
+	s, now := fakeTracker()
+	for i := 0; i < 20; i++ {
+		*now = now.Add(time.Second)
+		if s.probe("writer", scanStat{size: int64(i)}) || s.pending() != 1 {
+			t.Fatal("writer became stable")
+		}
+	}
+	s, now = fakeTracker()
+	for i := 0; i < maxStabilityProbes+1; i++ {
+		s.probe(fmt.Sprint(i), scanStat{ino: uint64(i)})
+	}
+	if !s.needsFullRescan() || s.pending() != maxStabilityProbes {
+		t.Fatal("overflow unbounded")
+	}
+	*now = now.Add(time.Second)
+	for i := 0; i < maxStabilityProbes; i++ {
+		if !s.probe(fmt.Sprint(i), scanStat{ino: uint64(i)}) {
+			t.Fatal("tracked probe blocked")
+		}
+	}
+	s.probe(fmt.Sprint(maxStabilityProbes), scanStat{ino: maxStabilityProbes})
+	*now = now.Add(time.Second)
+	if !s.probe(fmt.Sprint(maxStabilityProbes), scanStat{ino: maxStabilityProbes}) {
+		t.Fatal("overflow cannot progress")
+	}
+}
+
+func TestUnstableScanPreservesWholeIndex(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	n.write(t, "item", "old", time.Now())
+	if err := n.f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	before, seq := n.f.Snapshot()
+	tracker, now := fakeTracker()
+	n.f.stability = tracker
+	// First probe is metadata collection; mutate immediately before the locked pass.
+	ops := n.f.rootScanIO()
+	info := ops.info
+	calls := 0
+	ops.info = func(d *os.File, e os.DirEntry) (os.FileInfo, scanStat, error) {
+		if e.Name() == "item" {
+			calls++
+			if calls == 2 {
+				if err := os.WriteFile(filepath.Join(n.f.Root, "item"), []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return info(d, e)
+	}
+	file, err := n.f.root.openRead("item")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := file.Stat()
+	file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker.probe("item", scanStatFromInfo(meta))
+	*now = now.Add(time.Second)
+	if err := n.f.scanWith(ops); !errors.Is(err, ErrScanPending) {
+		t.Fatal("want pending", err)
+	}
+	after, afterSeq := n.f.Snapshot()
+	if !reflect.DeepEqual(before, after) || seq != afterSeq || n.f.PendingStability() != 1 {
+		t.Fatal("unstable scan published")
+	}
+	*now = now.Add(time.Second)
+	if err := n.f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = n.f.Snapshot()
+	if after[0].Hash == before[0].Hash {
+		t.Fatal("retry lost change")
+	}
+}
+
+func TestStabilityWaitCancellation(t *testing.T) {
+	n := newNode(t, "A")
+	defer n.f.Close()
+	n.write(t, "item", "x", time.Now())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := n.f.preflightStability(ctx, n.f.rootScanIO()); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func TestOverflowDropsDisappearedPending(t *testing.T) {
+	s, _ := fakeTracker()
+	for i := 0; i < maxStabilityProbes; i++ {
+		s.probe(fmt.Sprint(i), scanStat{})
+	}
+	s.probe("new", scanStat{})
+	s.forgetAbsent(map[string]scanStat{"new": {}})
+	if s.pending() != 0 || !s.needsFullRescan() {
+		t.Fatal("absent probe cleanup lost overflow state")
+	}
+	s.probe("new", scanStat{})
+	if s.pending() != 1 {
+		t.Fatal("stale pending prevents recovery")
 	}
 }

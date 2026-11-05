@@ -12,7 +12,6 @@ const maxStabilityProbes = 10000
 type stabilityProbe struct {
 	stat     scanStat
 	deadline time.Time
-	ready    bool
 }
 
 // stabilityTracker tracks whether a file's metadata has remained unchanged
@@ -66,7 +65,7 @@ func (s *stabilityTracker) probe(name string, stat scanStat) bool {
 	}
 	if old, ok := s.probes[name]; ok {
 		if old.stat == stat {
-			if old.ready || !now.Before(old.deadline) {
+			if !now.Before(old.deadline) {
 				delete(s.probes, name)
 				s.ready[name] = stat
 				return true
@@ -87,15 +86,30 @@ func (s *stabilityTracker) probe(name string, stat scanStat) bool {
 func (s *stabilityTracker) pending() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n := 0
-	n = len(s.probes)
-	return n
+	return len(s.probes)
 }
 
 func (s *stabilityTracker) needsFullRescan() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fullRescanNeeded
+}
+
+// A complete metadata walk can discard absent probe evidence even when hashing
+// later fails. This never changes the index or acknowledges overflow recovery.
+func (s *stabilityTracker) forgetAbsent(present map[string]scanStat) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name := range s.probes {
+		if _, ok := present[name]; !ok {
+			delete(s.probes, name)
+		}
+	}
+	for name := range s.ready {
+		if _, ok := present[name]; !ok {
+			delete(s.ready, name)
+		}
+	}
 }
 
 // reconcile is called only after a successful complete scan. It drops probes
