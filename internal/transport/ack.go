@@ -59,7 +59,7 @@ func (s *Server) prepareAckBaseline(w http.ResponseWriter, r *http.Request, idx 
 	if err != nil {
 		return true
 	}
-	epoch, membership, _ := s.Folder.PeerACKState()
+	epoch, membership := s.Folder.PeerACKEpoch()
 	if epoch != idx.StoreEpoch {
 		http.Error(w, "stale index", http.StatusConflict)
 		return false

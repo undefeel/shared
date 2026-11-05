@@ -72,11 +72,11 @@ func (f *Folder) CollectTombstones(now time.Time) (int, error) {
 		return 0, e
 	}
 	s := f.store.state
-	c := cloneControl(s.Control)
+	c := s.Control
 	if len(c.Members) == 0 {
 		return 0, nil
 	}
-	frame := storeFrame{Kind: "GC", PreviousGeneration: s.Generation, Generation: s.Generation + 1, Clock: s.Clock, Control: &c}
+	frame := storeFrame{Kind: "GC", PreviousGeneration: s.Generation, Generation: s.Generation + 1, Clock: s.Clock}
 	for _, v := range s.Files {
 		if !v.Deleted || v.DeletedAt <= 0 || len(v.Version) == 0 {
 			continue
@@ -99,6 +99,10 @@ func (f *Folder) CollectTombstones(now time.Time) (int, error) {
 		}
 		if !eligible {
 			continue
+		}
+		if frame.Control == nil {
+			c = cloneControl(c)
+			frame.Control = &c
 		}
 		r := storeRetired{Name: v.Name, Version: append([]storePair(nil), v.Version...)}
 		i := sort.Search(len(c.Retired), func(i int) bool { return !retiredLess(c.Retired[i], r) })

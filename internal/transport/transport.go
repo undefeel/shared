@@ -365,7 +365,7 @@ func (t *helloTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	u.RawQuery = ""
 	h.URL = &u
 	h.Method = http.MethodPost
-	local := Hello{Protocol: ProtocolVersion, Features: []string{"files", "gzip"}}
+	local := Hello{Protocol: ProtocolVersion, Features: []string{"files", "gzip", "ack"}}
 	if t.client != nil && t.client.LocalHello != nil {
 		local = t.client.LocalHello()
 	}

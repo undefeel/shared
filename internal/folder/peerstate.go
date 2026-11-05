@@ -105,6 +105,16 @@ func (f *Folder) PeerACKState() (string, uint64, []string) {
 	return hex.EncodeToString(s.StoreID[:]), s.Control.PeerSetEpoch, ids
 }
 
+// PeerACKEpoch returns the store and membership epochs without copying the peer list.
+func (f *Folder) PeerACKEpoch() (string, uint64) {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	if f.store == nil {
+		return "", 0
+	}
+	return hex.EncodeToString(f.store.state.StoreID[:]), f.store.state.Control.PeerSetEpoch
+}
+
 // BeginPeerBaseline records a fresh challenge against a peer's store epoch.
 // The caller issues it only with a full baseline and must bind it to that
 // baseline's checkpoint; it cannot be inferred from an incoming index.

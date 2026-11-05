@@ -12,8 +12,8 @@ import (
 type folderPeerState struct{ folder *folder.Folder }
 
 func (s folderPeerState) Hello() transport.Hello {
-	epoch, membership, _ := s.folder.PeerACKState()
-	return transport.Hello{Protocol: transport.ProtocolVersion, StoreEpoch: epoch, PeerSetEpoch: strconv.FormatUint(membership, 10), Features: []string{"files", "gzip"}}
+	epoch, membership := s.folder.PeerACKEpoch()
+	return transport.Hello{Protocol: transport.ProtocolVersion, StoreEpoch: epoch, PeerSetEpoch: strconv.FormatUint(membership, 10), Features: []string{"files", "gzip", "ack"}}
 }
 
 func (s folderPeerState) Index(ctx context.Context, epoch string, since uint64, wait time.Duration, name string) (transport.IndexResponse, error) {
