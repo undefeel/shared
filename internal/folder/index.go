@@ -175,6 +175,7 @@ type Folder struct {
 	ignore       []string
 	hashCache    map[string]scanHashCache
 	contentNames map[string]map[string]struct{}
+	stability    *stabilityTracker
 }
 
 type persistHooks struct {
@@ -243,6 +244,13 @@ func Open(root, statePath, me string, logger *log.Logger) (*Folder, error) {
 	f.wireStore()
 	if err = f.initRoot(nil); err == nil {
 		err = f.recoverApplyIntent()
+	}
+	if err == nil && f.root != nil {
+		var rules []string
+		rules, err = readIgnore(f.rootScanIO(), f.root)
+		if err == nil {
+			f.ignore = rules
+		}
 	}
 	if err != nil {
 		f.Close()
@@ -495,6 +503,9 @@ func (f *Folder) Snapshot() ([]FileInfo, uint64) {
 	defer f.mu.Unlock()
 	out := make([]FileInfo, 0, len(f.files))
 	for _, fi := range f.files {
+		if ignoredWith(f.ignore, fi.Name) {
+			continue
+		}
 		c := *fi
 		c.Disk = ""
 		c.Version = fi.Version.Copy()

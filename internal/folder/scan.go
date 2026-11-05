@@ -23,6 +23,8 @@ type scanIO struct {
 	beforeCommit func()
 }
 
+var ErrScanPending = errors.New("scan pending: files are not stable")
+
 func (f *Folder) rootScanIO() scanIO {
 	return scanIO{func(r *rootFS, p string) (*os.File, error) { return r.openDir(p, false) },
 		func(d *os.File) ([]os.DirEntry, error) { return d.ReadDir(-1) },
@@ -84,7 +86,7 @@ func fileMode(mode uint32) os.FileMode {
 }
 
 func readIgnore(ioops scanIO, r *rootFS) ([]string, error) {
-	patterns := append([]string(nil), builtinIgnore...)
+	var patterns []string
 	file, err := ioops.openRead(r, ignoreFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return patterns, nil
@@ -154,9 +156,165 @@ func (f *Folder) Scan() error { return f.scanWith(f.rootScanIO()) }
 
 // scanWith builds a complete candidate before touching published files or clocks.
 func (f *Folder) scanWith(ioops scanIO) error {
+	if err := f.preflightStability(context.Background(), ioops); err != nil {
+		f.recordScanResult(err)
+		return err
+	}
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	return f.scanLocked(ioops, false)
+}
+
+// preflightStability observes metadata outside scanMu and waits at most once.
+// A separate root descriptor pins the traversal while other scans can proceed.
+func (f *Folder) preflightStability(ctx context.Context, ioops scanIO) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.scanMu.Lock()
+	if f.root == nil {
+		f.scanMu.Unlock()
+		return errors.New("scan: root unavailable")
+	}
+	if err := f.guardRoot(); err != nil {
+		f.scanMu.Unlock()
+		return err
+	}
+	bindingRoot := f.root
+	generation := f.ConfirmedGeneration()
+	r, err := f.root.openDir(".", false)
+	if err != nil {
+		err = f.blockRoot("root_unavailable", err.Error())
+		f.scanMu.Unlock()
+		return err
+	}
+	f.scanMu.Unlock()
+	latch := func(err error) error {
+		var rootErr *rootProbeError
+		if !errors.As(err, &rootErr) {
+			return err
+		}
+		f.scanMu.Lock()
+		defer f.scanMu.Unlock()
+		if f.root != bindingRoot || f.ConfirmedGeneration() != generation {
+			return ErrScanPending
+		}
+		return f.blockRoot("root_unavailable", err.Error())
+	}
+	root := &rootFS{root: r}
+	defer root.Close()
+	patterns, err := readIgnore(ioops, root)
+	if err != nil {
+		return err
+	}
+	probes, err := collectScanProbes(ioops, root, patterns)
+	if err != nil {
+		return latch(err)
+	}
+	tracker := f.integrationStability()
+	tracker.forgetAbsent(probes)
+	pending := false
+	for name, meta := range probes {
+		if !tracker.probe(name, meta) {
+			pending = true
+		}
+	}
+	if !pending {
+		return nil
+	}
+	tracker.mu.Lock()
+	delay := tracker.interval
+	tracker.mu.Unlock()
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	probes, err = collectScanProbes(ioops, root, patterns)
+	if err != nil {
+		return latch(err)
+	}
+	pending = false
+	for name, meta := range probes {
+		if !tracker.probe(name, meta) {
+			pending = true
+		}
+	}
+	if pending {
+		return ErrScanPending
+	}
+	return nil
+}
+
+func (f *Folder) integrationStability() *stabilityTracker {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stability == nil {
+		f.stability = newStabilityTracker()
+	}
+	return f.stability
+}
+
+type rootProbeError struct{ error }
+
+func collectScanProbes(ioops scanIO, r *rootFS, patterns []string) (map[string]scanStat, error) {
+	probes := make(map[string]scanStat)
+	canonical := make(map[string]string)
+	var walk func(string) error
+	walk = func(dir string) error {
+		d, err := ioops.openDir(r, dir)
+		if err != nil {
+			if dir == "." {
+				return &rootProbeError{err}
+			}
+			return err
+		}
+		defer d.Close()
+		entries, err := ioops.readDir(d)
+		if err != nil {
+			if dir == "." {
+				return &rootProbeError{err}
+			}
+			return err
+		}
+		for _, entry := range entries {
+			disk := entry.Name()
+			if dir != "." {
+				disk = dir + "/" + disk
+			}
+			name := norm.NFC.String(disk)
+			if !validName(name) {
+				return errors.New("scan: invalid canonical name: " + disk)
+			}
+			if prior, ok := canonical[name]; ok && prior != disk {
+				return errors.New("scan: canonical name collision: " + prior + " and " + disk)
+			}
+			canonical[name] = disk
+			info, meta, err := ioops.info(d, entry)
+			if err != nil {
+				return err
+			}
+			if info == nil || ignoredWith(patterns, name) {
+				continue
+			}
+			if info.IsDir() {
+				if err := walk(disk); err != nil {
+					return err
+				}
+				continue
+			}
+			if info.Mode().IsRegular() {
+				probes[name] = meta
+			}
+		}
+		return nil
+	}
+	if err := walk("."); err != nil {
+		return nil, err
+	}
+	return probes, nil
 }
 
 func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
@@ -204,10 +362,6 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 			indexed[name] = true
 		}
 	}
-	cached := make(map[string]scanHashCache, len(f.hashCache))
-	for disk, entry := range f.hashCache {
-		cached[disk] = entry
-	}
 	f.mu.Unlock()
 	newCache := make(map[string]scanHashCache)
 	canonicalDisk := make(map[string]string)
@@ -254,7 +408,7 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 				}
 				continue
 			}
-			if matchIgnore(patterns, name) {
+			if ignoredWith(patterns, name) {
 				continue
 			}
 			if info.IsDir() {
@@ -269,26 +423,25 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 				}
 				continue
 			}
+			if !allowEmpty && !f.integrationStability().probe(name, meta) {
+				return ErrScanPending
+			}
 			hash, stable := "", info
-			if entry, ok := cached[disk]; ok && entry.scanStat == meta {
-				hash = entry.hash
-			} else {
-				file, err := ioops.openRead(r, disk)
-				if err != nil {
-					return err
-				}
-				var stableMeta scanStat
-				hash, stable, stableMeta, err = stableHash(file)
-				closeErr := file.Close()
-				if err != nil {
-					return err
-				}
-				if closeErr != nil {
-					return closeErr
-				}
-				if stableMeta != meta {
-					return errors.New("scan: entry changed before hashing: " + disk)
-				}
+			file, err := ioops.openRead(r, disk)
+			if err != nil {
+				return err
+			}
+			var stableMeta scanStat
+			hash, stable, stableMeta, err = stableHash(file)
+			closeErr := file.Close()
+			if err != nil {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if stableMeta != meta {
+				return errors.New("scan: entry changed before hashing: " + disk)
 			}
 			newCache[disk] = scanHashCache{scanStat: meta, hash: hash}
 			fi := &FileInfo{Name: name, Size: stable.Size(), ModTime: stable.ModTime().UnixNano(), Exec: stable.Mode().Perm()&0100 != 0, Hash: hash}
@@ -305,7 +458,15 @@ func (f *Folder) scanLocked(ioops scanIO, allowEmpty bool) (result error) {
 	if ioops.beforeCommit != nil {
 		ioops.beforeCommit()
 	}
-	return f.commitScan(candidate, patterns, newCache, allowEmpty)
+	if err := f.commitScan(candidate, patterns, newCache, allowEmpty); err != nil {
+		return err
+	}
+	present := make(map[string]struct{}, len(candidate))
+	for name := range candidate {
+		present[name] = struct{}{}
+	}
+	f.integrationStability().reconcile(present)
+	return nil
 }
 
 func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashCache map[string]scanHashCache, allowEmpty bool) error {
@@ -325,7 +486,14 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	}
 	// Decide against the same current files snapshot used to build next. Release
 	// both locks before blockRoot persists the latch through saveMu.
-	if !allowEmpty && len(found) == 0 && len(f.files) != 0 {
+	visibleExisting := false
+	for name := range f.files {
+		if !ignoredWith(patterns, name) {
+			visibleExisting = true
+			break
+		}
+	}
+	if !allowEmpty && len(found) == 0 && visibleExisting {
 		f.mu.Unlock()
 		f.saveMu.Unlock()
 		return f.blockRoot("root_empty", "scan found no regular files in a nonempty index")
@@ -362,7 +530,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		next[name] = fi
 	}
 	for name, fi := range f.files {
-		if fi.Deleted || found[name] != nil || matchIgnore(patterns, name) {
+		if fi.Deleted || found[name] != nil || ignoredWith(patterns, name) {
 			continue
 		}
 		v := fi.Version.Copy()
@@ -372,6 +540,10 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 		dirty = true
 	}
 	var p persisted
+	ignoreChanged := !equalStrings(f.ignore, patterns)
+	if ignoreChanged {
+		dirty = true
+	}
 	if dirty {
 		p = persisted{Generation: f.generation + 1, Clock: clock, Files: make([]*FileInfo, 0, len(next))}
 		for _, fi := range next {
@@ -383,7 +555,7 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	f.mu.Unlock()
 	publish := func() {
 		f.files, f.clock, f.ignore, f.hashCache = next, clock, append([]string(nil), patterns...), hashCache
-		if changed > 0 {
+		if changed > 0 || ignoreChanged {
 			f.notify()
 		}
 		f.lastScan = time.Now()
@@ -403,8 +575,45 @@ func (f *Folder) commitScan(found map[string]*FileInfo, patterns []string, hashC
 	return nil
 }
 
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *Folder) recordScanResult(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		f.scanError = nil
+		return
+	}
+	var root *RootError
+	if errors.As(err, &root) {
+		return
+	}
+	now := time.Now()
+	f.scanError = &ScanError{Message: err.Error(), Path: f.Root, Time: now}
+}
+
 // ScanGeneration rejects events queued by a canceled watcher generation.
 func (f *Folder) ScanGeneration(ctx context.Context, generation uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if generation != f.ConfirmedGeneration() {
+		return errors.New("stale watcher generation")
+	}
+	if err := f.preflightStability(ctx, f.rootScanIO()); err != nil {
+		f.recordScanResult(err)
+		return err
+	}
 	f.scanMu.Lock()
 	defer f.scanMu.Unlock()
 	if err := ctx.Err(); err != nil {

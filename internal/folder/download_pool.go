@@ -208,6 +208,9 @@ func (f *Folder) DurableState() ([]FileInfo, string, uint64) {
 	f.mu.Lock()
 	files := make([]FileInfo, 0, len(f.files))
 	for _, fi := range f.files {
+		if ignoredWith(f.ignore, fi.Name) {
+			continue
+		}
 		c := *fi
 		c.Version = fi.Version.Copy()
 		files = append(files, c)

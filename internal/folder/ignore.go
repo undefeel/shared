@@ -21,9 +21,14 @@ var builtinIgnore = []string{
 // Ignored checks slash-separated relative paths against built-ins and user rules.
 func (f *Folder) Ignored(name string) bool {
 	f.mu.Lock()
-	patterns := append(append([]string(nil), builtinIgnore...), f.ignore...)
+	patterns := append([]string(nil), f.ignore...)
 	f.mu.Unlock()
-	return matchIgnore(patterns, name)
+	return ignoredWith(patterns, name)
+}
+
+// ignoredWith applies built-ins and user rules once, independent of Folder state.
+func ignoredWith(user []string, name string) bool {
+	return matchIgnore(append(append([]string(nil), builtinIgnore...), user...), name)
 }
 
 func matchIgnore(patterns []string, name string) bool {

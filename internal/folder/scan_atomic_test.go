@@ -151,7 +151,7 @@ func TestScanAtomicPersistFailureAndConcurrentSave(t *testing.T) {
 	}
 }
 
-func TestScanHashCacheAndRestoredMtimeChange(t *testing.T) {
+func TestFullScanHashesAndRestoredMtimeChange(t *testing.T) {
 	f := atomicScanFixture(t)
 	var reads atomic.Int32
 	ioops := f.rootScanIO()
@@ -169,8 +169,8 @@ func TestScanHashCacheAndRestoredMtimeChange(t *testing.T) {
 	if err := f.scanWith(ioops); err != nil {
 		t.Fatal(err)
 	}
-	if got := reads.Load(); got != 0 {
-		t.Fatalf("unchanged scan opened %d file(s) for reading", got)
+	if got := reads.Load(); got == 0 {
+		t.Fatal("full scan skipped stableHash for unchanged metadata")
 	}
 	path := filepath.Join(f.Root, "a.txt")
 	oldInfo, err := os.Stat(path)
