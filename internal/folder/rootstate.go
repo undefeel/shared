@@ -356,6 +356,7 @@ func (f *Folder) Confirm(token, action, configuredPath string) error {
 	}
 	if c.store != nil {
 		f.store = c.store
+		f.retiredAvailable.Store(len(c.store.state.Control.Retired) > 0)
 		f.wireStore()
 	}
 	old := f.root

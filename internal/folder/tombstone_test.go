@@ -2,7 +2,9 @@ package folder
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"testing"
@@ -48,6 +50,9 @@ func TestTombstoneRetentionAndReplay(t *testing.T) {
 	if n, err := f.CollectTombstones(observed.Add(tombstoneRetention)); err != nil || n != 1 {
 		t.Fatalf("collect: %d %v", n, err)
 	}
+	if err := f.store.compact(); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +65,18 @@ func TestTombstoneRetentionAndReplay(t *testing.T) {
 	}
 	if _, _, ok := f.Lookup(fi.Name); ok {
 		t.Fatal("retired tombstone resurrected")
+	}
+	if !f.CanAcknowledgeDeletion(fi) {
+		t.Fatal("retirement lost durable deletion evidence")
+	}
+	oldLive := FileInfo{Name: fi.Name, Size: 3, Hash: fmt.Sprintf("%x", sha256.Sum256([]byte("old"))), Version: Vector{"me": 2, "other": 7}}
+	called := false
+	_, failed := f.ApplyRemote(context.Background(), "peer", []FileInfo{oldLive}, func(context.Context, FileInfo, io.Writer) error { called = true; return io.ErrClosedPipe }, nil)
+	if failed != 0 || called {
+		t.Fatal("retired live entry was downloaded or failed")
+	}
+	if _, _, ok := f.Lookup(fi.Name); ok {
+		t.Fatal("retired live entry resurrected")
 	}
 	f.scanMu.Lock()
 	f.saveMu.Lock()

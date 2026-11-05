@@ -212,6 +212,14 @@ func (f *Folder) CanAcknowledgeDeletion(deletion FileInfo) bool {
 	if f.store == nil {
 		return false
 	}
+	retired := f.store.state.Control.Retired
+	j := sort.Search(len(retired), func(i int) bool { return retired[i].Name >= deletion.Name })
+	want := recoveryFile(&deletion).Version
+	for ; j < len(retired) && retired[j].Name == deletion.Name; j++ {
+		if reflect.DeepEqual(retired[j].Version, want) {
+			return true
+		}
+	}
 	files := f.store.state.Files
 	i := sort.Search(len(files), func(i int) bool { return files[i].Name >= deletion.Name })
 	if i == len(files) || files[i].Name != deletion.Name {

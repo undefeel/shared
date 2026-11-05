@@ -44,6 +44,17 @@ func (f *Folder) retiredCoversLocked(fi FileInfo) bool {
 	return false
 }
 
+func (f *Folder) retiredCovers(fi FileInfo) bool {
+	if !f.retiredAvailable.Load() {
+		return false
+	}
+	f.scanMu.Lock()
+	defer f.scanMu.Unlock()
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	return f.retiredCoversLocked(fi)
+}
+
 // CollectTombstones retains exact retired versions permanently and publishes
 // removal only after one durable frame has committed both effects.
 func (f *Folder) CollectTombstones(now time.Time) (int, error) {
@@ -53,6 +64,9 @@ func (f *Folder) CollectTombstones(now time.Time) (int, error) {
 	defer f.saveMu.Unlock()
 	if f.store == nil {
 		return 0, ErrPeerState
+	}
+	if !time.Unix(0, now.UnixNano()).Equal(now) {
+		return 0, nil
 	}
 	if e := f.Blocked(); e != nil {
 		return 0, e
@@ -104,6 +118,7 @@ func (f *Folder) CollectTombstones(now time.Time) (int, error) {
 	if err := f.store.append(frame); err != nil {
 		return 0, err
 	}
+	f.retiredAvailable.Store(true)
 	f.mu.Lock()
 	for _, op := range frame.Operations {
 		delete(f.files, op.Name)

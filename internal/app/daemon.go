@@ -180,6 +180,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := d.folder.SetPeers(peerIDs(cfg.Peers)); err != nil {
+		_ = d.folder.Close()
+		return err
+	}
 	d.folder.SetDownloadConcurrency(cfg.DownloadConcurrency)
 	defer func() { d.lifecycle.Lock(); defer d.lifecycle.Unlock(); d.stopFolder(); _ = d.folder.Close() }()
 	d.Log.Printf("устройство %q, ID %s", cfg.Name, identity.Pretty(d.ID.ID))
@@ -570,6 +574,10 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 	addr := ""
 	attempt := 0
 	var incompatibleLogged bool
+	var ackIndex *transport.IndexResponse
+	var ackDeletions []folder.FileInfo
+	var baselineIgnored bool
+	var lastCollect time.Time
 	for ctx.Err() == nil {
 		if addr == "" {
 			cands := d.addrs(id)
@@ -581,6 +589,53 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 			}
 			addr = cands[attempt%len(cands)]
 			attempt++
+		}
+
+		// A cursor exists only once every queued item, including delayed retries,
+		// has completed. Do not authorize a baseline before that boundary.
+		if ackIndex != nil {
+			completedEpoch, completedCursor, completed := queue.cursor(id)
+			if completed && completedEpoch == ackIndex.StoreEpoch && completedCursor == ackIndex.Cursor {
+				allCovered := !baselineIgnored
+				covered := make([]transport.AckDeletion, 0, len(ackDeletions))
+				for _, fi := range ackDeletions {
+					if d.folder.CanAcknowledgeDeletion(fi) {
+						covered = append(covered, transport.AckDeletion{Name: fi.Name, Version: fi.Version})
+					} else {
+						allCovered = false
+					}
+				}
+				challenge := ackIndex.BaselineChallenge
+				if challenge != "" && !allCovered {
+					challenge = ""
+					covered = nil
+				}
+				failed := false
+				for len(covered) > 0 || challenge != "" {
+					n := len(covered)
+					if n > 256 {
+						n = 256
+					}
+					msg := transport.AckMessage{StoreEpoch: ackIndex.StoreEpoch, MembershipEpoch: ackIndex.MembershipEpoch, BaselineChallenge: challenge, Deletions: covered[:n]}
+					if err := client.Ack(ctx, addr, id, msg); err != nil {
+						failed = true
+						break
+					}
+					challenge = ""
+					covered = covered[n:]
+				}
+				ackIndex = nil
+				ackDeletions = nil
+				if failed {
+					addr = ""
+					sleepCtx(ctx, peerRetryMin)
+					continue
+				}
+				if _, err := d.folder.CollectTombstones(time.Now()); err != nil {
+					d.Log.Printf("tombstone collection: %v", err)
+				}
+				lastCollect = time.Now()
+			}
 		}
 
 		// Через relay long-poll прерываем, как только пир появится в LAN.
@@ -666,6 +721,19 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 
 		if polling && idx != nil {
 			if !haveCursor || idx.StoreEpoch != epoch || idx.Cursor != since || idx.Reset || len(idx.Files) != 0 {
+				ackIndex = idx
+				ackDeletions = nil
+				baselineIgnored = false
+				for _, fi := range idx.Files {
+					if d.folder.Ignored(fi.Name) {
+						baselineIgnored = true
+					}
+					if fi.Deleted {
+						ackDeletions = append(ackDeletions, fi)
+					}
+				}
+			}
+			if !haveCursor || idx.StoreEpoch != epoch || idx.Cursor != since || idx.Reset || len(idx.Files) != 0 {
 				queue.accept(id, idx.StoreEpoch, idx.Cursor, idx.Reset, idx.Files)
 			}
 		}
@@ -705,6 +773,13 @@ func (d *Daemon) runPeer(ctx context.Context, pr *peerRunner) {
 		}
 		pr.set(func(s *PeerStatus) { s.State, s.LastSync, s.Failed = StateSynced, time.Now(), 0 })
 		d.changed()
+
+		if now := time.Now(); lastCollect.IsZero() || now.Sub(lastCollect) >= time.Hour {
+			if _, err := d.folder.CollectTombstones(now); err != nil {
+				d.Log.Printf("tombstone collection: %v", err)
+			}
+			lastCollect = now
+		}
 
 		// Вернулись домой: пир снова виден в LAN — уходим с relay на прямую связь.
 		if addr == transport.RelayHost && d.disc != nil {
@@ -772,6 +847,14 @@ func (d *Daemon) Status() Status {
 
 // Pair добавляет устройство в доверенные. Имя и адрес можно не указывать:
 // они подставятся из обнаружения.
+func peerIDs(peers []config.Peer) []string {
+	ids := make([]string, 0, len(peers))
+	for _, p := range peers {
+		ids = append(ids, p.ID)
+	}
+	return ids
+}
+
 func (d *Daemon) Pair(id, name, addr string) error {
 	id, err := identity.Normalize(id)
 	if err != nil {
@@ -787,6 +870,18 @@ func (d *Daemon) Pair(id, name, addr string) error {
 			}
 		}
 	}
+	d.lifecycle.Lock()
+	defer d.lifecycle.Unlock()
+	d.mu.Lock()
+	ids := peerIDs(d.cfg.Peers)
+	already := d.cfg.FindPeer(id) != nil
+	d.mu.Unlock()
+	if !already {
+		ids = append(ids, id)
+		if err := d.folder.SetPeers(ids); err != nil {
+			return err
+		}
+	}
 	d.mu.Lock()
 	err = pairInConfig(d.cfg, id, name, addr)
 	if err == nil {
@@ -797,12 +892,14 @@ func (d *Daemon) Pair(id, name, addr string) error {
 		return err
 	}
 	d.Log.Printf("сопряжено устройство %s", identity.Pretty(id))
-	d.syncPeers()
+	d.syncPeersLocked()
 	d.changed()
 	return nil
 }
 
 func (d *Daemon) Unpair(id string) error {
+	d.lifecycle.Lock()
+	defer d.lifecycle.Unlock()
 	id, err := identity.Normalize(id)
 	if err != nil {
 		return err
@@ -820,7 +917,10 @@ func (d *Daemon) Unpair(id string) error {
 	if err != nil {
 		return err
 	}
-	d.syncPeers()
+	if err := d.folder.SetPeers(peerIDs(d.Config().Peers)); err != nil {
+		return err
+	}
+	d.syncPeersLocked()
 	d.changed()
 	return nil
 }
@@ -842,11 +942,30 @@ func (d *Daemon) Reload() error {
 		d.cfg.Folder = cfg.Folder
 		d.mu.Unlock()
 	}
+	// First add all new peers so a collector cannot omit them during reload.
+	existing := d.Config().Peers
+	union := append([]config.Peer(nil), existing...)
+	seen := make(map[string]bool)
+	for _, p := range union {
+		seen[p.ID] = true
+	}
+	for _, p := range cfg.Peers {
+		if !seen[p.ID] {
+			union = append(union, p)
+			seen[p.ID] = true
+		}
+	}
+	if err := d.folder.SetPeers(peerIDs(union)); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	d.cfg.Peers = cfg.Peers
 	relayChanged := d.cfg.Relay != cfg.Relay
 	d.cfg.Relay = cfg.Relay
 	d.mu.Unlock()
+	if err := d.folder.SetPeers(peerIDs(cfg.Peers)); err != nil {
+		return err
+	}
 	if relayChanged {
 		select {
 		case d.relayKick <- struct{}{}:
@@ -939,6 +1058,9 @@ func (d *Daemon) ConfirmFolder(token, action string) error {
 	defer d.lifecycle.Unlock()
 	d.stopFolder()
 	err := d.folder.Confirm(token, action, d.Config().Folder)
+	if err == nil {
+		err = d.folder.SetPeers(peerIDs(d.Config().Peers))
+	}
 	d.startWatch()
 	d.syncPeersLocked()
 	d.changed()

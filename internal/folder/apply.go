@@ -86,6 +86,9 @@ func (s step) needsDownload() bool {
 // NeedsRemoteContent reports whether applying fi currently requires its body.
 // It is a planning hint only; prepareApply repeats the decision before commit.
 func (f *Folder) NeedsRemoteContent(peer string, fi FileInfo) bool {
+	if f.retiredCovers(fi) {
+		return false
+	}
 	f.mu.Lock()
 	var local *FileInfo
 	if cur := f.files[fi.Name]; cur != nil {
@@ -140,6 +143,12 @@ func (f *Folder) applyRemoteResults(ctx context.Context, peer string, remote []F
 			failed++
 			if outcome != nil {
 				outcome(r, errors.New("invalid remote path"))
+			}
+			continue
+		}
+		if f.retiredCovers(r) {
+			if outcome != nil {
+				outcome(r, nil)
 			}
 			continue
 		}
