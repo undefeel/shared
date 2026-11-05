@@ -36,12 +36,23 @@ type storeAck struct {
 	Peer, Name string
 	Version    []storePair
 }
+type storeMember struct {
+	ID, RemoteEpoch, Challenge string
+	Baseline                   bool
+	Checkpoint                 uint64
+}
+type storeRetired struct {
+	Name    string
+	Version []storePair
+}
 type storeControl struct {
 	Binding                           rootBinding
 	Blocked                           *RootError
 	ConfirmedGeneration, PeerSetEpoch uint64
 	ACK                               []storeAck
 	GCFloor                           []storePair
+	Members                           []storeMember
+	Retired                           []storeRetired
 	Migration                         bool
 }
 type storeSnapshot struct {
@@ -87,6 +98,19 @@ func validateStoreFile(f storeFile) error {
 	return validatePairs(f.Version)
 }
 func validateControl(c storeControl) error {
+	for i, m := range c.Members {
+		if m.ID == "" || (i > 0 && c.Members[i-1].ID >= m.ID) || (m.Baseline && (m.RemoteEpoch == "" || m.Challenge == "")) {
+			return codecError()
+		}
+	}
+	for i, r := range c.Retired {
+		if !validName(r.Name) || len(r.Version) == 0 || (i > 0 && c.Retired[i-1].Name > r.Name) {
+			return codecError()
+		}
+		if err := validatePairs(r.Version); err != nil {
+			return err
+		}
+	}
 	if err := validatePairs(c.GCFloor); err != nil {
 		return err
 	}

@@ -27,6 +27,13 @@ func applyStoreFrame(s storeSnapshot, f storeFrame) (storeSnapshot, error) {
 	if f.PreviousGeneration != s.Generation || f.Clock < s.Clock {
 		return s, codecError()
 	}
+	if len(f.Operations) == 0 {
+		s.Generation, s.Clock = f.Generation, f.Clock
+		if f.Control != nil {
+			s.Control = *f.Control
+		}
+		return s, nil
+	}
 	files := make(map[string]storeFile, len(s.Files))
 	for _, v := range s.Files {
 		files[v.Name] = v
