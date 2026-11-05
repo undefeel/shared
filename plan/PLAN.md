@@ -3,7 +3,8 @@
 ## Архитектура и стек
 Двусторонняя синхронизация одной папки между macOS и Linux (Omarchy).
 - Go-демон: `cmd/sharedir`, `internal/{app,config,discovery,folder,identity,relay,transport,i18n,tray}`.
-- Сеть: UDP-обнаружение в LAN (22101), взаимный TLS 1.3 (22100), ID устройства = SHA-256 сертификата; relay через свой VPS (`internal/relay`, `deploy/sharedir-relay.service`).
+- Сеть: UDP-обнаружение в LAN (22101), взаимный TLS 1.3 (22100), протокол между пирами v2 (`docs/protocol-v2.md`), ID устройства = SHA-256 сертификата; relay через свой VPS (`internal/relay`, `deploy/sharedir-relay.service`).
+- Хранение: индекс — gob-журнал `index.log` + снимок `index.snapshot` (групповой commit), не `index.json`.
 - macOS: меню-бар SwiftUI (`macos/SharedirBar`) + встроенный демон, связь через локальный control-сокет.
 - Omarchy: виджет бара QML (`omarchy/sharedir`).
 
