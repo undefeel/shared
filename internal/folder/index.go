@@ -462,7 +462,7 @@ func (f *Folder) persistStore(p persisted) error {
 	for _, fi := range p.Files {
 		v := *recoveryFile(fi)
 		before, exists := old[v.Name]
-		if exists {
+		if exists && v.Deleted && before.Deleted && reflect.DeepEqual(v.Version, before.Version) {
 			v.DeletedAt = before.DeletedAt
 		}
 		if !v.Deleted {

@@ -224,3 +224,18 @@ func (f *Folder) CanAcknowledgeDeletion(deletion FileInfo) bool {
 	order := v.Compare(deletion.Version)
 	return (files[i].Deleted && order == Equal) || (!files[i].Deleted && order == Greater)
 }
+
+// NeedsPeerBaseline reports whether the current peer incarnation and remote
+// store epoch have completed the checkpoint handshake.
+func (f *Folder) NeedsPeerBaseline(peer, remoteEpoch string) bool {
+	f.scanMu.Lock()
+	defer f.scanMu.Unlock()
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	if f.store == nil {
+		return true
+	}
+	ms := f.store.state.Control.Members
+	i := sort.Search(len(ms), func(i int) bool { return ms[i].ID >= peer })
+	return i == len(ms) || ms[i].ID != peer || !ms[i].Baseline || ms[i].RemoteEpoch != remoteEpoch
+}

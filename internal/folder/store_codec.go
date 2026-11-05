@@ -104,7 +104,7 @@ func validateControl(c storeControl) error {
 		}
 	}
 	for i, r := range c.Retired {
-		if !validName(r.Name) || len(r.Version) == 0 || (i > 0 && c.Retired[i-1].Name > r.Name) {
+		if !validName(r.Name) || len(r.Version) == 0 || (i > 0 && !retiredLess(c.Retired[i-1], r)) {
 			return codecError()
 		}
 		if err := validatePairs(r.Version); err != nil {

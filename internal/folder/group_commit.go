@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"reflect"
 	"sort"
 )
 
@@ -61,7 +62,12 @@ func (f *Folder) commitGroupLocked(g groupIntent, trees []*commitTree, preparedD
 		if e.After != nil {
 			c := *e.After
 			if c.Deleted {
-				c.StoreDeletedAt = oldFiles[c.Name].DeletedAt
+				old := oldFiles[c.Name]
+				if old.Deleted && reflect.DeepEqual(old.Version, recoveryFile(&c).Version) {
+					c.StoreDeletedAt = old.DeletedAt
+				} else {
+					c.StoreDeletedAt = 0
+				}
 				if c.StoreDeletedAt == 0 {
 					c.StoreDeletedAt = f.persistHooks.clockNow().UnixNano()
 				}

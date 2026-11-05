@@ -331,6 +331,10 @@ func (f *Folder) prepareApply(ctx context.Context, peer string, generation uint6
 		f.saveMu.Lock()
 		defer f.saveMu.Unlock()
 	}
+	if f.retiredCoversLocked(r) {
+		st.act = skip
+		return st, nil
+	}
 	var next map[string]*FileInfo
 	var clock uint64
 	if batch != nil {
