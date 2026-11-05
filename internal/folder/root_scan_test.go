@@ -3,6 +3,7 @@ package folder
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,27 +42,25 @@ func assertRootEmptyBlocked(t *testing.T, f *Folder) {
 	}
 }
 
-func TestScanEmptyRootAfterNonemptyIndexBlocks(t *testing.T) {
-	f := rootScanFixture(t)
-	if err := os.Remove(filepath.Join(f.Root, "item")); err != nil {
-		t.Fatal(err)
+func TestScanEmptyRootBlocks(t *testing.T) {
+	for _, tombstone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("tombstone=%v", tombstone), func(t *testing.T) {
+			f := rootScanFixture(t)
+			if tombstone {
+				f.mu.Lock()
+				old := f.files["item"]
+				f.files = map[string]*FileInfo{"gone": {Name: "gone", Deleted: true, Version: old.Version.Copy()}}
+				f.mu.Unlock()
+				if err := f.save(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(filepath.Join(f.Root, "item")); err != nil {
+				t.Fatal(err)
+			}
+			assertRootEmptyBlocked(t, f)
+		})
 	}
-	assertRootEmptyBlocked(t, f)
-}
-
-func TestScanEmptyRootWithOnlyTombstoneBlocks(t *testing.T) {
-	f := rootScanFixture(t)
-	f.mu.Lock()
-	old := f.files["item"]
-	f.files = map[string]*FileInfo{"gone": {Name: "gone", Deleted: true, Version: old.Version.Copy()}}
-	f.mu.Unlock()
-	if err := f.save(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(f.Root, "item")); err != nil {
-		t.Fatal(err)
-	}
-	assertRootEmptyBlocked(t, f)
 }
 
 func TestScanUnmountSimulationBlocksBeforePublishing(t *testing.T) {
@@ -190,14 +189,6 @@ func TestScanReplacementRootBlocksWithoutPublishingTombstones(t *testing.T) {
 			t.Fatalf("replacement scan wrote tombstone: %+v", fi)
 		}
 	}
-}
-
-func TestScanRemovingLastFileBlocks(t *testing.T) {
-	f := rootScanFixture(t)
-	if err := os.Remove(filepath.Join(f.Root, "item")); err != nil {
-		t.Fatal(err)
-	}
-	assertRootEmptyBlocked(t, f)
 }
 
 func TestScanIgnoreAllLeavesRecordsAndPublishesEmptyView(t *testing.T) {

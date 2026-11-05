@@ -133,10 +133,12 @@ func testSaveFailure(t *testing.T, hook string) {
 		t.Fatal(p)
 	}
 }
-func TestSaveMarshalFailure(t *testing.T)       { testSaveFailure(t, "marshal") }
-func TestSaveRenameFailure(t *testing.T)        { testSaveFailure(t, "rename") }
-func TestSaveFileSyncFailure(t *testing.T)      { testSaveFailure(t, "file sync") }
-func TestSaveDirectorySyncFailure(t *testing.T) { testSaveFailure(t, "dir sync") }
+func TestSaveFailures(t *testing.T) {
+	for _, fault := range []string{"marshal", "rename", "file sync", "dir sync"} {
+		t.Run(fault, func(t *testing.T) { testSaveFailure(t, fault) })
+	}
+}
+
 func TestSaveReadableJSONMonotonicGeneration(t *testing.T) {
 	f := persistFolder(t)
 	var previous uint64
@@ -253,6 +255,7 @@ func TestStoreReplayAndNoJSONRewrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(g)
 	defer g.Close()
 	if fi, _, ok := g.Lookup("a"); !ok || fi.Hash == "" {
 		t.Fatal("Open did not replay before serving lookup")
@@ -298,6 +301,7 @@ func TestLegacyIntentRecoveredBeforeMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(g)
 	defer g.Close()
 	journalBytes(t, g, j.Target, "old")
 	if _, err = os.Stat(g.intentPath()); !os.IsNotExist(err) {
@@ -334,6 +338,7 @@ func TestStoreConfirmEpochAndHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			fastFolder(g)
 			defer g.Close()
 			if g.Blocked() != nil || g.ConfirmedGeneration() != 1 {
 				t.Fatal("confirmation lost")
@@ -389,6 +394,7 @@ func TestResetInterruptedAfterMarkerRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(g)
 	defer g.Close()
 	if g.store.state.StoreID == epoch || g.Blocked() != nil {
 		t.Fatal("durable reset marker not completed")

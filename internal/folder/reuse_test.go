@@ -9,6 +9,17 @@ import (
 	"time"
 )
 
+func reuseSeed(t *testing.T) *node {
+	t.Helper()
+	n := newNode(t, "A")
+	t.Cleanup(func() { n.f.Close() })
+	n.write(t, "donor", "body", time.Unix(100, 0))
+	if err := n.f.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestReuseApplyAndChangedDonor(t *testing.T) {
 	for _, changed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "reuse", true: "changed"}[changed], func(t *testing.T) {
@@ -76,12 +87,7 @@ func TestReuseApplyAndChangedDonor(t *testing.T) {
 }
 
 func TestReuseChangedDuringCloneFallsBack(t *testing.T) {
-	n := newNode(t, "A")
-	defer n.f.Close()
-	n.write(t, "donor", "body", time.Unix(100, 0))
-	if e := n.f.Scan(); e != nil {
-		t.Fatal(e)
-	}
+	n := reuseSeed(t)
 	r := incoming("body", Vector{"B": 1}, 200e9)
 	calls := 0
 	tmp, e := n.f.downloadOrReuseWith(context.Background(), r, func(_ context.Context, _ FileInfo, w io.Writer) error {
@@ -109,12 +115,7 @@ func TestReuseChangedDuringCloneFallsBack(t *testing.T) {
 }
 
 func TestReuseSymlinkDonorFallsBack(t *testing.T) {
-	n := newNode(t, "A")
-	defer n.f.Close()
-	n.write(t, "donor", "body", time.Unix(100, 0))
-	if e := n.f.Scan(); e != nil {
-		t.Fatal(e)
-	}
+	n := reuseSeed(t)
 	outside := filepath.Join(t.TempDir(), "outside")
 	os.WriteFile(outside, []byte("body"), 0600)
 	os.Remove(filepath.Join(n.f.Root, "donor"))

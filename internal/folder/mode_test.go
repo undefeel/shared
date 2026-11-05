@@ -31,57 +31,45 @@ func filePerm(t *testing.T, n *node) os.FileMode {
 	return st.Mode().Perm()
 }
 
-func TestIncomingBytesPreserve0600(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	if err := os.Chmod(filepath.Join(n.f.Root, "x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := n.f.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	r := modeRemote("updated", false)
-	applyModeRemote(t, n, r, bodyFetch("updated"))
-	if got := filePerm(t, n); got != 0o600 {
-		t.Fatalf("mode = %04o, want 0600", got)
-	}
-}
-
-func TestIncomingBytesPreserve0700(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	if err := os.Chmod(filepath.Join(n.f.Root, "x"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := n.f.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	r := modeRemote("updated", true)
-	applyModeRemote(t, n, r, bodyFetch("updated"))
-	if got := filePerm(t, n); got != 0o700 {
-		t.Fatalf("mode = %04o, want 0700", got)
+func TestIncomingBytesPreserveMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		exec bool
+	}{{"0600", 0o600, false}, {"0700", 0o700, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := applySeed(t)
+			defer n.f.Close()
+			if err := os.Chmod(filepath.Join(n.f.Root, "x"), tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := n.f.Scan(); err != nil {
+				t.Fatal(err)
+			}
+			applyModeRemote(t, n, modeRemote("updated", tc.exec), bodyFetch("updated"))
+			if got := filePerm(t, n); got != tc.mode {
+				t.Fatalf("mode = %04o, want %04o", got, tc.mode)
+			}
+		})
 	}
 }
 
-func TestNewIncomingMode0644(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := modeRemote("new", false)
-	r.Name = "new"
-	applyModeRemote(t, n, r, bodyFetch("new"))
-	if got, err := os.Stat(filepath.Join(n.f.Root, "new")); err != nil || got.Mode().Perm() != 0o644 {
-		t.Fatalf("stat=%v, err=%v; want mode 0644", got, err)
-	}
-}
-
-func TestNewIncomingMode0755(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	r := modeRemote("new", true)
-	r.Name = "new"
-	applyModeRemote(t, n, r, bodyFetch("new"))
-	if got, err := os.Stat(filepath.Join(n.f.Root, "new")); err != nil || got.Mode().Perm() != 0o755 {
-		t.Fatalf("stat=%v, err=%v; want mode 0755", got, err)
+func TestNewIncomingMode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		exec bool
+	}{{"0644", 0o644, false}, {"0755", 0o755, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := applySeed(t)
+			defer n.f.Close()
+			r := modeRemote("new", tc.exec)
+			r.Name = "new"
+			applyModeRemote(t, n, r, bodyFetch("new"))
+			if got, err := os.Stat(filepath.Join(n.f.Root, "new")); err != nil || got.Mode().Perm() != tc.mode {
+				t.Fatalf("stat=%v, err=%v; want mode %04o", got, err, tc.mode)
+			}
+		})
 	}
 }
 
@@ -112,35 +100,26 @@ func TestChmodOnlyWithSameMtimeAdvancesVector(t *testing.T) {
 	}
 }
 
-func TestExecTrueMetadataOnlyDoesNotFetch(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	if err := os.Chmod(filepath.Join(n.f.Root, "x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := n.f.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	r := modeRemote("old", true)
-	applyModeRemote(t, n, r, func(context.Context, FileInfo, io.Writer) error { t.Fatal("unexpected fetch"); return nil })
-	if got := filePerm(t, n); got != 0o700 {
-		t.Fatalf("mode = %04o, want 0700", got)
-	}
-}
-
-func TestExecFalseMetadataOnlyDoesNotFetch(t *testing.T) {
-	n := applySeed(t)
-	defer n.f.Close()
-	if err := os.Chmod(filepath.Join(n.f.Root, "x"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := n.f.Scan(); err != nil {
-		t.Fatal(err)
-	}
-	r := modeRemote("old", false)
-	applyModeRemote(t, n, r, func(context.Context, FileInfo, io.Writer) error { t.Fatal("unexpected fetch"); return nil })
-	if got := filePerm(t, n); got != 0o600 {
-		t.Fatalf("mode = %04o, want 0600", got)
+func TestExecMetadataOnlyDoesNotFetch(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		before, after os.FileMode
+		exec          bool
+	}{{"true", 0o600, 0o700, true}, {"false", 0o700, 0o600, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := applySeed(t)
+			defer n.f.Close()
+			if err := os.Chmod(filepath.Join(n.f.Root, "x"), tc.before); err != nil {
+				t.Fatal(err)
+			}
+			if err := n.f.Scan(); err != nil {
+				t.Fatal(err)
+			}
+			applyModeRemote(t, n, modeRemote("old", tc.exec), func(context.Context, FileInfo, io.Writer) error { t.Fatal("unexpected fetch"); return nil })
+			if got := filePerm(t, n); got != tc.after {
+				t.Fatalf("mode = %04o, want %04o", got, tc.after)
+			}
+		})
 	}
 }
 

@@ -80,41 +80,39 @@ func journalBytes(t *testing.T, f *Folder, name, want string) {
 		t.Fatalf("%s: %q %v", name, b, e)
 	}
 }
-func TestJournalCrashAfterIntent(t *testing.T) {
-	f, _ := journalFixture(t, 0)
-	recoverJournal(t, f)
-	journalBytes(t, f, "a", "old")
-}
-func TestJournalCrashAfterCapture(t *testing.T) {
-	f, _ := journalFixture(t, 1)
-	recoverJournal(t, f)
-	journalBytes(t, f, "a", "old")
-}
-func TestJournalCrashAfterInstall(t *testing.T) {
-	f, _ := journalFixture(t, 2)
-	recoverJournal(t, f)
-	journalBytes(t, f, "a", "new")
-	entries, e := os.ReadDir(f.Root)
-	if e != nil {
-		t.Fatal(e)
-	}
-	found := false
-	for _, ent := range entries {
-		if ent.Name() != "a" {
-			journalBytes(t, f, ent.Name(), "old")
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("captured bytes lost")
-	}
-}
-func TestJournalCrashAfterIndex(t *testing.T) {
-	f, j := journalFixture(t, 3)
-	recoverJournal(t, f)
-	journalBytes(t, f, "a", "new")
-	if _, e := os.Stat(filepath.Join(f.Root, j.Capture)); !errors.Is(e, os.ErrNotExist) {
-		t.Fatalf("capture remains: %v", e)
+func TestJournalCrashRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		phase      int
+	}{
+		{"intent", "old", 0}, {"capture", "old", 1}, {"install", "new", 2}, {"index", "new", 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, j := journalFixture(t, tc.phase)
+			recoverJournal(t, f)
+			journalBytes(t, f, "a", tc.want)
+			if tc.phase == 2 {
+				entries, err := os.ReadDir(f.Root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, ent := range entries {
+					if ent.Name() != "a" {
+						journalBytes(t, f, ent.Name(), "old")
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("captured bytes lost")
+				}
+			}
+			if tc.phase == 3 {
+				if _, err := os.Stat(filepath.Join(f.Root, j.Capture)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("capture remains: %v", err)
+				}
+			}
+		})
 	}
 }
 func TestJournalRepeatedRecovery(t *testing.T) {
@@ -231,6 +229,13 @@ func newFileRecovery(t *testing.T, content string, exists, wantCommit bool) {
 	}
 	recoverJournal(t, f)
 }
-func TestJournalNewFileCrashMatchingTarget(t *testing.T) { newFileRecovery(t, "incoming", true, true) }
-func TestJournalNewFileCrashMissingTarget(t *testing.T)  { newFileRecovery(t, "", false, false) }
-func TestJournalNewFileCrashChangedTarget(t *testing.T)  { newFileRecovery(t, "external", true, false) }
+func TestJournalNewFileCrash(t *testing.T) {
+	for _, tc := range []struct {
+		name, content  string
+		exists, commit bool
+	}{
+		{"matching", "incoming", true, true}, {"missing", "", false, false}, {"changed", "external", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { newFileRecovery(t, tc.content, tc.exists, tc.commit) })
+	}
+}

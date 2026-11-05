@@ -27,6 +27,7 @@ func TestGroupCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	defer f.Close()
 	if f.Blocked() != nil {
 		t.Fatal(f.Blocked())
@@ -226,6 +227,7 @@ func crashFixture(t *testing.T, stateBase string) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fastFolder(f)
 	for name, body := range map[string]string{"replace": "old-replace", "delete": "old-delete", "tomb": "tomb"} {
 		if err = os.WriteFile(filepath.Join(root, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)

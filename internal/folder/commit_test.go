@@ -122,14 +122,11 @@ func commitSyncFailure(t *testing.T, fail int) {
 	default:
 	}
 }
-func TestCommitDataSyncFailure(t *testing.T)          { commitSyncFailure(t, 1) }
-func TestCommitIntentSyncFailure(t *testing.T)        { commitSyncFailure(t, 2) }
-func TestCommitIntentDirSyncFailure(t *testing.T)     { commitSyncFailure(t, 3) }
-func TestCommitCaptureDirSyncFailure(t *testing.T)    { commitSyncFailure(t, 4) }
-func TestCommitInstallDirSyncFailure(t *testing.T)    { commitSyncFailure(t, 5) }
-func TestCommitIndexSyncFailure(t *testing.T)         { commitSyncFailure(t, 6) }
-func TestCommitCleanupParentSyncFailure(t *testing.T) { commitSyncFailure(t, 7) }
-func TestCommitCleanupStateSyncFailure(t *testing.T)  { commitSyncFailure(t, 8) }
+func TestCommitSyncFailures(t *testing.T) {
+	for i, name := range []string{"data", "intent", "intent_dir", "capture_dir", "install_dir", "index", "cleanup_parent", "cleanup_state"} {
+		t.Run(name, func(t *testing.T) { commitSyncFailure(t, i+1) })
+	}
+}
 
 func TestCommitOpenRecoversBeforeScan(t *testing.T) {
 	f, j := journalFixture(t, 1)

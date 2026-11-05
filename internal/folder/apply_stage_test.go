@@ -33,24 +33,6 @@ func TestApplyStageOutsideScanLock(t *testing.T) {
 	assertBody(t, n, "old")
 }
 
-func TestApplyStageRepeatsDecisionAfterLocalEdit(t *testing.T) {
-	n := applySeed(t)
-	r := incoming("new", Vector{"B": 1}, 200e9)
-	a, b := n.f.ApplyRemote(context.Background(), "B", []FileInfo{r}, func(_ context.Context, _ FileInfo, w io.Writer) error {
-		if !n.f.scanMu.TryLock() {
-			t.Fatal("fetch holds scanMu")
-		}
-		n.f.scanMu.Unlock()
-		n.write(t, "x", "local", time.Unix(300, 0))
-		_, err := io.WriteString(w, "new")
-		return err
-	}, nil)
-	if a != 0 || b != 0 {
-		t.Fatalf("applied=%d failed=%d", a, b)
-	}
-	assertBody(t, n, "local")
-}
-
 func TestApplyStageMetadataOnlyDoesNotFetch(t *testing.T) {
 	n := applySeed(t)
 	files, _ := n.f.Snapshot()

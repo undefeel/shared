@@ -34,7 +34,18 @@ type node struct {
 	id string
 }
 
+func fastFolder(f *Folder) *Folder {
+	f.integrationStability().interval = time.Millisecond
+	return f
+}
+
 func newNode(t *testing.T, id string) *node {
+	n := newDefaultNode(t, id)
+	fastFolder(n.f)
+	return n
+}
+
+func newDefaultNode(t *testing.T, id string) *node {
 	dir := t.TempDir()
 	f, err := Open(filepath.Join(dir, "data"), filepath.Join(dir, "index.json"), id, log.New(io.Discard, "", 0))
 	if err != nil {
