@@ -154,7 +154,7 @@
 |---|---|---|---|---|---|---|---|
 | 04-75 | C1: дельта больших файлов (04-42…04-45) | L3 | sol-ведущий → terra | — | done | `task_7fd4f2a26f57` | `ctx_98d68e87a46b` |
 | 04-79 | Профиль и исправление замедления первой синхронизации после волны B | L3 | sol | — | done | `task_f2bbc0e00855` | `ctx_a429ea0e690a` |
-| 04-76 | C2: ACK и GC tombstone (04-46…04-49) | L3 | sol-ведущий → terra | 04-75 | in_progress | `task_ea6028efea93` | `ctx_cc56c765dda6` |
+| 04-76 | C2: ACK и GC tombstone (04-46…04-49) | L3 | sol-ведущий → terra | 04-75 | done | `task_ea6028efea93` | `ctx_cc56c765dda6` |
 | 04-77 | C3: crash suite + сводки переподключений (04-51, 04-55) | L3 | sol-ведущий → terra | 04-76 | todo | `task_cb2b40be9a61` |  |
 | 04-78 | C4: README, protocol-v2, power-loss, факты в perf.md (04-56, 04-57) | L1 | sonnet | 04-77, 04-79 | todo | `task_d1873339fe62` |  |
 
